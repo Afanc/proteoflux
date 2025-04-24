@@ -1,0 +1,10 @@
+pandas
+numpy
+scanpy
+matplotlib
+seaborn
+typer[all]
+pyyaml
+scikit-learn
+anndata
+openpyxl

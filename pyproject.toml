@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "proteoflux"
+version = "0.1.0"
+description = "Transparent and reproducible proteomics analysis pipeline"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "pandas",
+    "numpy",
+    "scanpy",
+    "matplotlib",
+    "seaborn",
+    "typer[all]",
+    "pyyaml",
+    "scikit-learn",
+    "anndata",
+    "openpyxl",
+]
+
+[project.scripts]
+proteoflux = "proteoflux.cli:app"
+
+[tool.setuptools.package-data]
+"proteoflux.templates" = ["*.yaml"]
+

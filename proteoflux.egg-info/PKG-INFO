@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: proteoflux
+Version: 0.1.0
+Summary: Transparent and reproducible proteomics analysis pipeline
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: pandas
+Requires-Dist: numpy
+Requires-Dist: scanpy
+Requires-Dist: matplotlib
+Requires-Dist: seaborn
+Requires-Dist: typer[all]
+Requires-Dist: pyyaml
+Requires-Dist: scikit-learn
+Requires-Dist: anndata
+Requires-Dist: openpyxl

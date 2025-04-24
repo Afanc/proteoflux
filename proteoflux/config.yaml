@@ -1,0 +1,53 @@
+dataset:
+  input_file: full_test.tsv
+  index_column: PG.ProteinGroups
+  signal_column: FG.MS2RawQuantity
+  qvalue_column: PG.Qvalue
+  pep_column: PG.PEP
+  condition_column: R.Condition
+  replicate_column: R.Replicate
+  filename_column: R.FileName
+  run_evidence_column: PG.RunEvidenceCount
+  fasta_column: PG.FastaFiles
+  protein_weight: PG.MolecularWeight
+  protein_descriptions: PG.ProteinDescriptions
+  gene_names: PG.Genes
+
+preprocessing:
+  filter_qvalue: 0.01
+  filter_pep: 0.2
+  filter_run_evidence_count: 3
+  contaminants_files:
+    - Contaminants_2022.fasta
+
+  normalization:
+    method:
+      - log2
+      - median_equalization
+    loess_span: 0.9
+
+  imputation:
+    method: hybridknn
+    knn_k: 6
+    knn_tn_perc: 0.75
+    rf_max_iter: 20
+    rf_random_state: 42
+
+  exports:
+    normalization_plots: true
+    imputation_plots: true
+    normalization_plot_path: 0_normalization_plots.pdf
+    imputation_plot_path: 1_imputation_plots.pdf
+
+analysis:
+  plot_extensive: true
+  extensive_plot_path: 2_extensive_de.pdf
+  export_csv: true
+  log2fc_path: 3_log2fc_report.csv
+  export_h5ad: true
+  h5ad_export_path: 4_processed_data.h5ad
+
+design:
+  mode: default
+  group_column: CONDITION
+

@@ -1,0 +1,2 @@
+recursive-include proteoflux/templates *.yaml
+
