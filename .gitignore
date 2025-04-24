@@ -1,0 +1,11 @@
+# Ignore outputs and big inputs
+*.pdf
+*.xlsx
+*.h5ad
+*.tsv
+*.fasta
+output/
+data/
+__pycache__/
+*.pyc
+
