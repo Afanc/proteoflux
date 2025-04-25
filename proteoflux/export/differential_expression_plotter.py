@@ -17,7 +17,8 @@ class DifferentialExpressionPlotter:
     ):
         self.adata = adata
         self.protein_labels = adata.var.get(protein_label_key, adata.var_names)
-        self.protein_names = adata.var_names
+        #self.protein_names = adata.var_names
+        self.protein_names = adata.var["GENE_NAMES"] #TODO option ? 
         self.contrast_names = adata.uns.get("contrast_names", [f"C{i}" for i in range(adata.varm['log2fc'].shape[1])])
 
         # Cache stats for fast access
@@ -34,7 +35,6 @@ class DifferentialExpressionPlotter:
         self.q_ebayes = pd.DataFrame(adata.varm["q_ebayes"],
                                      columns=self.contrast_names,
                                      index=adata.var.index)
-        self.t = adata.varm["t"]
         self.res_var = adata.uns.get("residual_variance", None)
         self.residuals = adata.uns.get("residuals", None)
         self.missingness = adata.uns.get("missingness", {})
@@ -49,7 +49,7 @@ class DifferentialExpressionPlotter:
             self._plot_stat_distribution("p", pdf, log_y=False)
             self._plot_stat_distribution("q", pdf, log_y=False)
             self._plot_ebayes_comparison(pdf)
-            self._plot_volcano_plots(pdf)
+            self._plot_volcano_plots(pdf, side_by_side=True)
             if "EC_high_vs_EC_low" in self.contrast_names:
                 self._plot_spikein_separation("EC_high_vs_EC_low", pdf)
 
@@ -123,7 +123,7 @@ class DifferentialExpressionPlotter:
             pdf.savefig(fig)
             plt.close(fig)
 
-    def _plot_volcano_plots(self, pdf):
+    def _plot_volcano_plots(self, pdf, side_by_side=True):
         for i, name in enumerate(self.contrast_names):
             logfc = self.log2fc[:, i]
             pvals_raw = self.p.iloc[:, i]
@@ -132,34 +132,27 @@ class DifferentialExpressionPlotter:
             qvals_bayes = self.q_ebayes.iloc[:, i]
 
             group1, group2 = name.split("_vs_")
-            miss_dict = self.missingness.get(name, {})
 
-            # Build missingness masks
-            missing_a = np.zeros(logfc.shape[0], dtype=bool)
-            missing_b = np.zeros(logfc.shape[0], dtype=bool)
-            for j, prot in enumerate(self.protein_names):
-                entry = miss_dict.get(prot, {})
-                missing_a[j] = entry.get(group1, 0.0) >= 1.0
-                missing_b[j] = entry.get(group2, 0.0) >= 1.0
-
+            # Map missingness from DataFrame
+            miss_df = self.missingness
+            missing_a = miss_df[group1].values >= 1.0
+            missing_b = miss_df[group2].values >= 1.0
             both_missing = missing_a & missing_b
-            partial_missing = missing_a ^ missing_b
-            neither_missing = ~(missing_a | missing_b)
 
             color = np.full(logfc.shape[0], "gray", dtype=object)
             color[missing_a & ~missing_b] = "blue"
             color[missing_b & ~missing_a] = "green"
-            # Don't plot black points (both missing)
 
             def plot_panel(ax, pvals, qvals, title):
-                # Plot points with different markers
                 mask = ~both_missing
+                masked_missing_a = missing_a[mask]
+                masked_missing_b = missing_b[mask]
+                triangle_mask = masked_missing_a ^ masked_missing_b
+                circle_mask = ~triangle_mask
+
                 base_color = color[mask]
                 base_logfc = logfc[mask]
                 base_p = pvals.iloc[mask]
-
-                triangle_mask = partial_missing[mask]
-                circle_mask = ~triangle_mask
 
                 ax.scatter(base_logfc[circle_mask], -np.log10(base_p.iloc[circle_mask]), c=base_color[circle_mask], alpha=0.7, s=10)
                 ax.scatter(base_logfc[triangle_mask], -np.log10(base_p.iloc[triangle_mask]), c=base_color[triangle_mask], alpha=0.7, s=10, marker="^")
@@ -167,20 +160,18 @@ class DifferentialExpressionPlotter:
                 ax.axhline(-np.log10(0.05), color="black", linestyle="--", linewidth=0.8)
                 ax.axvline(0, color="black", linestyle="--", linewidth=0.8)
 
-                # Label top 10 sig proteins per direction
                 for direction in ["up", "down"]:
-                    if direction == "up":
-                        mask_sig = (logfc > 0) & (qvals < 0.05) & ~both_missing
-                    else:
-                        mask_sig = (logfc < 0) & (qvals < 0.05) & ~both_missing
+                    sig_mask = (logfc > 0) if direction == "up" else (logfc < 0)
+                    sig_mask &= (qvals < 0.05) & ~both_missing
 
-                    idx = np.argsort(qvals[mask_sig])[:10]
-                    selected = np.where(mask_sig)[0][idx]
+                    top = np.argsort(qvals[sig_mask])[:10]
+                    selected = np.where(sig_mask)[0][top]
+
                     for j in selected:
                         ax.text(
                             logfc[j],
                             -np.log10(pvals.iloc[j]),
-                            self.protein_names[j],
+                            self.protein_names.iloc[j],
                             fontsize=6,
                             ha="right" if logfc[j] > 0 else "left",
                             va="bottom",
@@ -190,80 +181,34 @@ class DifferentialExpressionPlotter:
                 ax.set_ylabel("-log10(p)")
                 ax.set_title(title)
 
-            fig, axs = plt.subplots(1, 2, figsize=(14, 6))
-            plot_panel(axs[0], pvals_raw, qvals_raw, f"{name} (raw)")
-            plot_panel(axs[1], pvals_bayes, qvals_bayes, f"{name} (eBayes)")
-
-            handles = [
-                plt.Line2D([0], [0], color="gray", marker="o", linestyle="None", label="complete"),
-                plt.Line2D([0], [0], color="blue", marker="o", linestyle="None", label="missing group1"),
-                plt.Line2D([0], [0], color="green", marker="o", linestyle="None", label="missing group2"),
-                plt.Line2D([0], [0], color="black", marker="^", linestyle="None", label="partial missing")
-            ]
-            axs[1].legend(handles=handles, title="Missingness", loc="upper right")
+            # Layout based on side_by_side
+            if side_by_side:
+                fig, axs = plt.subplots(1, 2, figsize=(14, 6))
+                plot_panel(axs[0], pvals_raw, qvals_raw, f"{name} (raw)")
+                plot_panel(axs[1], pvals_bayes, qvals_bayes, f"{name} (eBayes)")
+                axs[1].legend(
+                    handles=[
+                        plt.Line2D([0], [0], color="gray", marker="o", linestyle="None", label="Observed in both"),
+                        plt.Line2D([0], [0], color="blue", marker="^", linestyle="None", label="missing group1"),
+                        plt.Line2D([0], [0], color="green", marker="^", linestyle="None", label="missing group2"),
+                    ],
+                    title="Missingness",
+                    loc="upper right")
+            else:
+                fig, ax = plt.subplots(1, 1, figsize=(7, 6))
+                plot_panel(ax, pvals_bayes, qvals_bayes, f"{name} (eBayes)")
+                ax.legend(
+                    handles = [
+                        plt.Line2D([0], [0], color="gray", marker="o", linestyle="None", label="Observed in both"),
+                        plt.Line2D([0], [0], color="blue", marker="^", linestyle="None", label="missing from group1"),
+                        plt.Line2D([0], [0], color="green", marker="^", linestyle="None", label="missing from group2"),
+                    ],
+                    title="Missingness",
+                    loc="upper right")
 
             fig.tight_layout()
             pdf.savefig(fig)
             plt.close(fig)
-
-    def _plot_volcano_plots2(self, pdf):
-        for i, name in enumerate(self.contrast_names):
-            logfc = self.log2fc[:, i]
-            pvals = self.p.iloc[:, i]
-            qvals = self.q.iloc[:, i]
-
-            # Default coloring
-            color = np.full(logfc.shape, "gray")
-
-            if name in self.missingness:
-                miss_dict = self.missingness[name]
-                group1, group2 = name.split("_vs_")
-
-                missing_a = np.zeros(self.log2fc.shape[0], dtype=bool)
-                missing_b = np.zeros(self.log2fc.shape[0], dtype=bool)
-
-                for i, prot in enumerate(self.protein_names):
-                    entry = miss_dict.get(prot, {})
-                    missing_a[i] = entry.get(group1, 0) >= 1.0
-                    missing_b[i] = entry.get(group2, 0) >= 1.0
-
-                color = np.where(missing_a & ~missing_b, "blue", color)
-                color = np.where(~missing_a & missing_b, "green", color)
-                color = np.where(missing_a & missing_b, "black", color)
-
-            fig, ax = plt.subplots(figsize=(12, 10))
-            ax.scatter(logfc, -np.log10(pvals), c=color, alpha=0.7, s=10)
-
-            # Reference lines
-            ax.axhline(-np.log10(0.05), color="black", linestyle="--", linewidth=0.8)
-            ax.axvline(0, color="black", linestyle="--", linewidth=0.8)
-
-            # Annotations: top 10 per direction
-            for direction in ["up", "down"]:
-                if direction == "up":
-                    mask = (logfc > 0) & (qvals < 0.05)
-                else:
-                    mask = (logfc < 0) & (qvals < 0.05)
-
-                idx = np.argsort(qvals[mask])[:10]
-                selected = np.where(mask)[0][idx]
-                for j in selected:
-                    ax.text(
-                        logfc[j],
-                        -np.log10(pvals.iloc[j]),
-                        self.protein_names[j],
-                        fontsize=6,
-                        ha="right" if logfc[j] > 0 else "left",
-                        va="bottom",
-                    )
-
-            ax.set_title(f"Volcano Plot: {name}")
-            ax.set_xlabel("log2FC")
-            ax.set_ylabel("-log10(p-value)")
-            fig.tight_layout()
-            pdf.savefig(fig)
-            plt.close(fig)
-
 
     def _plot_ebayes_comparison(self, pdf):
         if "p_ebayes" not in self.adata.varm:

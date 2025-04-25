@@ -9,6 +9,11 @@ from proteoflux.utils.utils import logger, log_time
 
 @log_time("Limma pipeline")
 def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
+    use_r = config.get("analysis", {}).get("use_r_limma", False)
+    if use_r:
+        from proteoflux.analysis.r_limma_pipeline import run_r_limma_pipeline
+        return run_r_limma_pipeline(adata, config)
+
     builder = DesignMatrixBuilder(adata.obs, config["design"])
     X, design_info = builder.build()
 
@@ -21,10 +26,26 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
 
     logfc, se, v_j = apply_contrasts(results, C, contrast_names)
 
+    # eBayes
+    ebayes_method = config.get("analysis", {}).get("ebayes_method", "moments")
+    moderator = EbayesModerator(
+        results["residual_variance"],
+        results["df_residual"],
+        method=ebayes_method)
+    moderator.fit()
+
     # Classical stats
-    tester = StatisticalTester(logfc, se, results["df_residual"], contrast_names, adata.var.index)
+    tester = StatisticalTester(
+        logfc,
+        se,
+        results["df_residual"],
+        contrast_names,
+        adata.var.index,
+        df_prior = moderator.d0)
+
     stats = tester.compute()
 
+    # Save all the data
     adata.uns['residuals'] = results['residuals']
     adata.uns['residual_variance'] = results['residual_variance']
     adata.varm["log2fc"] = logfc
@@ -32,9 +53,6 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     adata.varm["p"] = stats["p"]
     adata.varm["q"] = stats["q"]
 
-    # eBayes
-    moderator = EbayesModerator(results["residual_variance"], results["df_residual"])
-    moderator.fit()
     bayes_stats = moderator.apply_to_contrasts(logfc, v_j)
 
     adata.varm["t_ebayes"] = bayes_stats["t_ebayes"]
@@ -48,4 +66,3 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     adata.uns["missingness"] = miss
 
     return adata
-

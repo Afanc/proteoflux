@@ -15,7 +15,7 @@ class DataHarmonizer:
         "replicate_column": "REPLICATE",
         "filename_column": "FILENAME",
         "run_evidence_column": "RUN_EVIDENCE_COUNT",
-        "fasta_column": "FASTA_HEADERS",  # or FASTA_FILES, depending on use
+        "fasta_column": "FASTA_HEADERS",
         "protein_weight": "PROTEIN_WEIGHT",
         "protein_descriptions": "PROTEIN_DESCRIPTIONS",
         "gene_names": "GENE_NAMES",

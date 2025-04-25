@@ -1,12 +1,12 @@
 import numpy as np
 import pandas as pd
 from scipy.stats import t as t_dist
-from statsmodels.stats.multitest import multipletests
+from statsmodels.stats.multitest import multipletests, fdrcorrection
 from typing import List
 from proteoflux.utils.utils import logger, log_time
 
 class StatisticalTester:
-    def __init__(self, log2fc, se, df_residual, contrast_names, protein_ids):
+    def __init__(self, log2fc, se, df_residual, contrast_names, protein_ids, df_prior = None):
         """
         Parameters:
         - log2fc: (n_proteins x n_contrasts) NumPy array
@@ -17,31 +17,25 @@ class StatisticalTester:
         """
         self.log2fc = log2fc
         self.se = se
-        self.df = df_residual
+        self.df_residual = df_residual
+        self.df_prior = df_prior
         self.contrast_names = contrast_names
         self.protein_ids = protein_ids
 
     def compute(self):
 
-        # Perseus style variance flooring
-        pos_se = self.se[self.se > 0]
-        if len(pos_se) == 0:
-            s0 = 1e-6  # fallback if somehow everything is zero
-        else:
-            s0 = np.percentile(pos_se, 10)
-
-        # replace raw SE with sqrt(SE^2 + s0^2)
-        self.se = np.sqrt(self.se**2 + s0**2)
+        df_raw = self.df_residual
 
         # compute t stat
         t_stat = self.log2fc / self.se
-        p_val = 2 * t_dist.sf(np.abs(t_stat), df=self.df)
+        p_val = 2 * t_dist.sf(np.abs(t_stat), df=df_raw)
 
-        # Adjusted p-values (FDR)
-        q_val = np.zeros_like(p_val)
-        for j in range(p_val.shape[1]):
-            q_val[:, j] = multipletests(p_val[:, j], method="fdr_bh")[1]
-
+        # BH on raw p's
+        q_val = np.stack([
+            fdrcorrection(p_val[:, j])[1]
+            for j in range(p_val.shape[1])
+        ], axis=1)
+        t_stat = self.log2fc / self.se
 
         return {
             "log2fc": self.log2fc,
@@ -73,7 +67,6 @@ class StatisticalTester:
         missingness_dict: dict from compute_missingness()
         """
         for key, arr in stats_dict.items():
-            #adata.varm[key] = pd.DataFrame(arr, index=self.protein_ids, columns=self.contrast_names)
             adata.varm[key] = arr
 
         adata.uns["contrast_names"] = self.contrast_names

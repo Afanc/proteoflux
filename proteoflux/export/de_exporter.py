@@ -54,23 +54,6 @@ class DEExporter:
                 annotated.loc[prot, contrast] += s
         return annotated
 
-    def _annotate_matrix2(self, base_df, q_ebayes=None, miss_ratios=None):
-        annotated = base_df.astype(str)
-        for prot in base_df.index:
-            for col in base_df.columns:
-                s = ""
-                if miss_ratios is not None:
-                    group_ratios = miss_ratios.get(col, {}).get(prot, {})
-                    if any(v == 1.0 for v in group_ratios.values()):
-                        print("yay")
-                        s += "†"
-                    elif any(0.0 < v < 1.0 for v in group_ratios.values()):
-                        s += "~"
-                if q_ebayes is not None and q_ebayes.loc[prot, col] < self.sig_threshold:
-                    s += "*"
-                annotated.loc[prot, col] += s
-        return annotated
-
     def _get_dataframe(self, matrix_name):
         if matrix_name in self.adata.varm:
             return pd.DataFrame(self.adata.varm[matrix_name],
@@ -79,8 +62,31 @@ class DEExporter:
         return None
 
     def _export_excel(self, tables: dict):
+        description = (
+            "ProteoFlux Differential Expression Export\n"
+            "\n"
+            "Sheet Descriptions:\n"
+            "- Log2FC: Annotated log2 fold changes across contrasts\n"
+            "- Quantification Qvalue: Corresponding q-values (eBayes)\n"
+            "- T-statistics (raw): Classical t-statistics (pre-eBayes)\n"
+            "- P-values (raw): Classical unmoderated p-values\n"
+            "- Q-values (raw): Classical unmoderated q-values\n"
+            "- Missingness: Ratio of missing values per group\n"
+            "- Metadata: FASTA headers, gene names, UniProt info\n"
+            "- Raw Intensities: Untransformed signal matrix\n"
+            "- Processed Log2 Intensities: Normalized, imputed data\n"
+            "- Identification Qvalue: PSM-level q-values (from search engine)\n"
+            "- Identification PEP: Posterior error probability (optional)\n"
+            "\n"
+            "Annotations:\n"
+            f"- * = Quantification Q value < {self.sig_threshold}\n"
+            "- ~ = Partially missing in one group (partial imputation)\n"
+            "- † = Fully missing in one group (full imputation)\n"
+        )
+
         out_file = self.output_path.with_suffix(".xlsx")
         with pd.ExcelWriter(out_file, engine="xlsxwriter") as writer:
+            pd.DataFrame({"README": description.split("\n")}).to_excel(writer, index=False, sheet_name="README")
             for name, df in tables.items():
                 if df is not None:
                     df.to_excel(writer, sheet_name=name)
@@ -121,10 +127,17 @@ class DEExporter:
         if "pep" in self.adata.layers:
             pep = pd.DataFrame(self.adata.layers["pep"], index=self.adata.obs_names, columns=self.adata.var_names)
 
+        t_raw = self._get_dataframe("t")
+        p_raw = self._get_dataframe("p")
+        q_raw = self._get_dataframe("q")
+
         # Tables to export
         tables = {
             "Log2FC": log2fc_annot,
             "Quantification Qvalue": q_ebayes_annot,
+            "T-statistics (raw)": t_raw,
+            "P-values (raw)": p_raw,
+            "Q-values (raw)": q_raw,
             "Missingness": miss_ratios,
             "Metadata": meta_df,
             "Raw Intensities": raw.T,

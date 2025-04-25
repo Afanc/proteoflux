@@ -423,7 +423,7 @@ class ImputeEvaluator:
         all_true_vals = []
         all_imputed_vals = []
 
-        for fold in tqdm(range(n_cv), leave=False):
+        for fold in tqdm(range(n_cv), leave=False, desc="Cross-validation"):
             # Generate MV data
             mv_data = produce_balanced_mv(X_complete,
                                           p_miss_total=0.15,
@@ -435,7 +435,6 @@ class ImputeEvaluator:
             X_incomp = mv_data['X_incomp'].numpy()
 
             # Impute again using the same imputation method
-            #imputer = get_imputer(**self.imputation)
             condition_map = self.results.dfs["condition_pivot"].to_pandas()
             sample_index = list(self.df_imputed[self.numeric_columns].columns)
             imputer = get_imputer(
