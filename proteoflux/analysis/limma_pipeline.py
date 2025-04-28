@@ -7,7 +7,7 @@ from proteoflux.analysis.statisticaltester import StatisticalTester
 from proteoflux.analysis.ebayes_moderator import EbayesModerator
 from proteoflux.utils.utils import logger, log_time
 
-@log_time("Limma pipeline")
+@log_time("pyLimma pipeline")
 def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     use_r = config.get("analysis", {}).get("use_r_limma", False)
     if use_r:

@@ -20,10 +20,9 @@ def geometric_cv(values: np.ndarray, axis: int = 1) -> np.ndarray:
     ln2_squared = np.log(2)**2
     return np.sqrt(np.exp(ln2_squared * log2_std**2) - 1)
 
-# TODO sketchy, abandon
-def log_cv(values: np.ndarray, axis: int = 1, log_base: float = 2) -> np.ndarray:
+def CV(values: np.ndarray, axis: int = 1, log_base: float = 2) -> np.ndarray:
     """
-    Computes %CV from log-transformed values.
+    Computes %CV from log-transformed values -> transform back into linear scale and calculate CV
 
     Parameters:
         values: Log-transformed intensity matrix.
@@ -33,16 +32,14 @@ def log_cv(values: np.ndarray, axis: int = 1, log_base: float = 2) -> np.ndarray
     Returns:
         Vector of %CV estimates.
     """
-    log_std = np.nanstd(values, axis=axis)
+    linear_values = log_base**values
 
-    # Prevent exponential explosion
-    factor = np.log(log_base)
-    unlog_variance = np.power(log_base, log_std * factor) - 1
+    std = np.nanstd(linear_values, axis=axis)
+    mean = np.clip(np.nanmean(linear_values, axis=axis), 1e-6, None)
 
-    # Optionally clip extreme values if needed (e.g. when std is crazy)
-    unlog_variance = np.clip(unlog_variance, 0, 1e4)
+    cv = std/mean
 
-    return unlog_variance
+    return cv
 
 def compute_metrics(mat: np.ndarray, metrics: List[str] = ["CV", "MAD"]) -> Dict[str, np.ndarray]:
     """
@@ -73,15 +70,13 @@ def compute_metrics(mat: np.ndarray, metrics: List[str] = ["CV", "MAD"]) -> Dict
         means   = np.nanmean(mat, axis=1)
         medians = np.nanmedian(mat, axis=1)
         stds    = np.nanstd(mat, axis=1, ddof=1)
-        log_cvs = log_cv(mat, axis=1, log_base=2)
+        CVs = CV(mat, axis=1, log_base=2)
         geometric_cvs = geometric_cv(mat, axis=1)
         mads = np.nanmedian(np.abs(mat - medians[:, None]), axis=1)
         rmads = mads/medians
 
         if "CV" in metrics:
-            result["CV"] = stds / means
-        if "log_CV" in metrics:
-            result["log_CV"] = log_cvs
+            result["CV"] = CVs
         if "geometric_CV" in metrics:
             result["geometric_CV"] = geometric_cvs
         if "MAD" in metrics:

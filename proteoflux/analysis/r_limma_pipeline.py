@@ -9,6 +9,7 @@ from rpy2.robjects.packages import importr, PackageNotInstalledError
 from proteoflux.design.designmatrixbuilder import DesignMatrixBuilder
 from proteoflux.design.contrastbuilder import ContrastBuilder
 from proteoflux.analysis.statisticaltester import StatisticalTester
+from proteoflux.utils.utils import logger, log_time
 
 pandas2ri.activate()
 
@@ -22,6 +23,7 @@ except PackageNotInstalledError:
         "from your shell (with your R environment activated)."
     )
 
+@log_time("Integrated R Limma Pipeline")
 def run_r_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     limma = rpackages.importr("limma")
     stats = rpackages.importr("stats")

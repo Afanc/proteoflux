@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import numpy as np
+import seaborn as sns
 import pandas as pd
 import polars as pl
 import matplotlib.pyplot as plt
@@ -46,7 +47,7 @@ class NormalizerPlotter:
         self.scale = self.results.metadata["normalization"].get("scale", "global")
         self.regression_type = self.results.metadata["normalization"].get("regression_type", "loess")
 
-    @log_time("Normalization - plot")
+    @log_time("Normalization - plotting")
     def plot_all(self, filename: Union[str, Path] = "normalization_plots.pdf") -> None:
         with PdfPages(filename) as pdf:
             self.pdf = pdf
@@ -57,10 +58,45 @@ class NormalizerPlotter:
             self._plot_violin_metrics_by_condition()
             self._plot_MA_plots()
 
-    #TODO use plot utils, and plots next to each other. also only if cutoff < kept. also run_evidence_count. and smart with ranges on x, maybe log y not useful
     def _plot_filtering_histograms(self):
         thresholds = self.results.metadata.get("filtering", {})
-        import seaborn as sns
+        n_stats = len(thresholds)
+
+        if n_stats == 0:
+            return
+
+        fig, axs = plt.subplots(1, n_stats, figsize=(5 * n_stats, 4))
+
+        # If only one stat, axs is not a list — force into array
+        if n_stats == 1:
+            axs = [axs]
+
+        for ax, (stat_key, cutoff) in zip(axs, thresholds.items()):
+            arr_key = stat_key.lower() + "_array"
+            values = self.results.arrays.get(arr_key)
+
+            kept = (values <= cutoff).sum()
+            if arr_key.lower() == "run_evidence_count_array":
+                kept = (values >= cutoff).sum()
+
+            if values is not None:
+                sns.histplot(values, ax=ax, bins=60)
+                ax.axvline(cutoff, color='red', linestyle='--')
+                ax.set_title(
+                    f"{stat_key} dist (cutoff {cutoff:.3g}, kept {kept} / {len(values)})",
+                    fontsize=9
+                )
+                ax.set_yscale("log")
+                ax.set_xlabel(stat_key)
+                ax.set_ylabel("Count")
+
+        fig.tight_layout()
+        self.pdf.savefig(fig)
+        plt.close(fig)
+
+    def _plot_filtering_histograms2(self):
+
+        thresholds = self.results.metadata.get("filtering", {})
 
         for stat_key, cutoff in thresholds.items():
             arr_key = stat_key.lower() + "_array"
@@ -155,7 +191,7 @@ class NormalizerPlotter:
             before_df=self.postlog_df,
             after_df=self.normalized_df,
             condition_mapping=self.condition_map,
-            metrics=["CV", "RMAD", "geometric_CV"],
+            metrics=["CV", "RMAD"],
             label_col="Normalization",
             before_label="Before",
             after_label="After",
@@ -165,16 +201,12 @@ class NormalizerPlotter:
 
         metrics = {}
 
-        metrics['geometric_CV'] = agg_metrics["geometric_CV"]
         metrics['RMAD'] = agg_metrics["RMAD"]
         metrics['CV'] = agg_metrics["CV"]
 
         for k,v in metrics.items():
-            #TODO remove CV altogether eventually
             title=f"{k} Per Condition (Before vs After Normalization)"\
                 f" using {self.normalization_method}"
-            if k == "CV":
-                title += " | WARNING - don't trust CV in log scale ! "
             #--
             fig, ax = plt.subplots(figsize=(12, 6))
             plot_aggregated_violin(

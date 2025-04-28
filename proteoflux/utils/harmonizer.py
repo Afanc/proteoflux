@@ -24,11 +24,47 @@ class DataHarmonizer:
     def __init__(self, column_config: dict):
         """Initialize column mappings with user-defined config."""
         self.column_map = {}
+        self.annotation_file = column_config.get("annotation_file", None)
 
         for config_key, std_name in self.DEFAULT_COLUMN_MAP.items():
             original_col = column_config.get(config_key)
             if original_col:
                 self.column_map[original_col] = std_name
+
+
+    def _inject_annotation(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Injects annotation information into the dataset if missing, using pure Polars."""
+
+        # Prepare annotation for clean matching
+        annotation = pl.read_csv(self.annotation_file, separator="\t", ignore_errors=True)
+        annotation = annotation.rename({"File Name": "FILENAME"})
+
+        # Strip whitespace
+        annotation = annotation.with_columns(pl.col("FILENAME").str.strip_chars())
+        df = df.with_columns(pl.col("FILENAME").str.strip_chars())
+
+        # Now safe to join
+        df = df.join(annotation, on="FILENAME", how="left")
+
+        # Now conditionally override if missing
+        if "CONDITION" in df.columns and "Condition" in df.columns:
+            # Print preview before
+            df = df.with_columns(
+                pl.when(pl.col("Condition").is_not_null())
+                  .then(pl.col("Condition"))
+                  .otherwise(pl.col("CONDITION"))
+                  .alias("CONDITION")
+            ).drop("Condition")
+
+        if "REPLICATE" in df.columns and "Replicate" in df.columns:
+            df = df.with_columns(
+                pl.when(pl.col("Replicate").is_not_null())
+                  .then(pl.col("Replicate"))
+                  .otherwise(pl.col("REPLICATE"))
+                  .alias("REPLICATE")
+            ).drop("Replicate")
+
+        return df
 
     @log_time("Data Harmonizing")
     def harmonize(self, df: pl.DataFrame) -> pl.DataFrame:
@@ -45,4 +81,9 @@ class DataHarmonizer:
             else:
                 logger.warning(f"Column '{original}' not found in input data, skipping harmonization for it.")
 
-        return df.rename(rename_map)
+        df = df.rename(rename_map)
+
+        if self.annotation_file:
+            df = self._inject_annotation(df)
+
+        return df

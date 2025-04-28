@@ -86,7 +86,7 @@ class ImputeEvaluator:
         ].map(self.condition_color_map)
         # --- 
 
-    @log_time("Imputation - plot")
+    @log_time("Imputation - plotting")
     def plot_all(self, filename: Union[str, Path] = "imputation_plots.pdf"):
         """Generate all plots and save to a PDF file.
 
@@ -228,7 +228,7 @@ class ImputeEvaluator:
             before_df=self.df_original,
             after_df=self.df_imputed_only,
             condition_mapping=self.condition_map,
-            metrics=["CV", "geometric_CV", "RMAD"],
+            metrics=["CV", "RMAD"],
             label_col="Imputation",
             before_label="Original",
             after_label="Imputed",
@@ -238,16 +238,12 @@ class ImputeEvaluator:
 
         metrics = {}
 
-        metrics['geometric_CV'] = agg_metrics["geometric_CV"]
         metrics['RMAD'] = agg_metrics["RMAD"]
         metrics['CV'] = agg_metrics["CV"]
 
         for k,v in metrics.items():
-            #TODO remove CV altogether eventually
             title=f"{k} Per Condition (Original vs Imputed Values)"\
                 "using"
-            if k == "CV":
-                title += " | WARNING - don't trust CV in log scale ! "
             #--
 
             fig, ax = plt.subplots(figsize=(12, 6))
@@ -410,7 +406,7 @@ class ImputeEvaluator:
         return pd.concat([summary_rows, per_condition], ignore_index=True)
 
 
-    def _evaluate_imputation(self, n_cv: int = 10, p_miss: float = 0.1):
+    def _evaluate_imputation(self):
         """
         Run cross-validation to evaluate the imputation method.
 
@@ -435,18 +431,25 @@ class ImputeEvaluator:
         orig_mask = self.df_imputed_only.notna().to_numpy()
         all_orig_missing = []  # to collect per-test-point flag
 
+        # Evaluation options
+        evaluation_config = self.imputation.get("evaluation")
+        missing_total = evaluation_config.get("missing_total")
+        missing_mnar = evaluation_config.get("missing_mnar")
+        missing_quantile = evaluation_config.get("missing_quantile")
+        missing_q_lod = evaluation_config.get("missing_q_lod")
+        n_cv = evaluation_config.get("number_CV", 10)
+
         for fold in tqdm(range(n_cv), leave=False, desc="Cross-validation"):
             # Generate MV data
             mv_data = produce_balanced_mv(X_complete,
-                                          p_miss_total=0.15,
-                                          p_mnar=0.9,
-                                          quantile=0.1,
-                                          q_lod=0.05)
+                                          p_miss_total=missing_total,
+                                          p_mnar=missing_mnar,
+                                          quantile=missing_quantile,
+                                          q_lod=missing_q_lod)
 
             mask = mv_data['mask'].numpy().astype(bool)
 
             # Track if the selected points were originally missing
-
             X_incomp = mv_data['X_incomp'].numpy()
 
             # Impute again using the same imputation method
@@ -457,7 +460,6 @@ class ImputeEvaluator:
                 condition_map=condition_map,
                 sample_index=sample_index,
             )
-
 
             X_reimputed = imputer.fit_transform(X_incomp)
 

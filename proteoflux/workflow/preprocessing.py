@@ -33,10 +33,11 @@ class Preprocessor:
         self.intermediate_results = IntermediateResults()
 
         # Filtering
-        self.remove_contaminants = config.get("contaminants_files", [])
-        self.filter_qvalue = config.get("filter_qvalue", 0.01)
-        self.filter_pep = config.get("filter_pep", 0.2)
-        self.filter_run_evidence_count = config.get("filter_run_evidence_count", 1)
+        self.filtering = config.get("filtering")
+        self.remove_contaminants = self.filtering.get("contaminants_files", [])
+        self.filter_qvalue = self.filtering.get("qvalue", 0.01)
+        self.filter_pep = self.filtering.get("pep", 0.2)
+        self.filter_run_evidence_count = self.filtering.get("run_evidence_count", 1)
 
         # Pivoting
         self.pivot_signal_method = config.get("pivot_signal_method", "sum")
@@ -87,6 +88,7 @@ class Preprocessor:
             protein_meta=self.intermediate_results.dfs.get("protein_metadata"),
         )
 
+    @log_time("Filtering")
     def _filter(self, df: pl.DataFrame) -> None:
         df_filtered = self._filter_contaminants(df)
         self.intermediate_results.add_df("filtered_contaminants", df_filtered)

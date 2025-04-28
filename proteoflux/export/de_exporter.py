@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import warnings
+from proteoflux.utils.utils import logger, log_time
 
 class DEExporter:
     def __init__(
@@ -95,6 +97,7 @@ class DEExporter:
             if df is not None:
                 df.to_csv(f"{prefix}_{name}.csv")
 
+    @log_time("Differential Expression - exporting table")
     def export(self):
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -146,3 +149,14 @@ class DEExporter:
             self._export_csvs(tables)
 
         return self.output_path.with_suffix(".xlsx" if self.use_xlsx else ".csv")
+
+    @log_time("Exporting .h5ad")
+    def export_adata(self, h5ad_path: str):
+        for col in ["CONDITION", "GENE_NAMES", "PROTEIN_WEIGHT", "PROTEIN_DESCRIPTIONS",
+                    "FASTA_HEADERS"]:
+            if col in self.adata.obs.columns:
+                self.adata.obs[col] = self.adata.obs[col].astype("category")
+            if col in self.adata.var.columns:
+                self.adata.var[col] = self.adata.var[col].astype("category")
+
+        self.adata.write(h5ad_path, compression="gzip")

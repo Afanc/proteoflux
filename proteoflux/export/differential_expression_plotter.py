@@ -8,7 +8,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.gridspec import GridSpec
 import matplotlib.patches as mpatches
 from anndata import AnnData
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Dict
 from proteoflux.utils.utils import logger, log_time
 from proteoflux.export.plot_utils import plot_cluster_heatmap
 
@@ -16,11 +16,13 @@ class DifferentialExpressionPlotter:
     def __init__(
         self,
         adata: AnnData,
+        analysis_config: Dict,
         protein_label_key: str = "FASTA_HEADERS",
     ):
+        self.analysis_config = analysis_config
+        self.export_config = analysis_config.get("exports")
         self.adata = adata
         self.protein_labels = adata.var.get(protein_label_key, adata.var_names)
-        #self.protein_names = adata.var_names
         self.protein_names = adata.var["GENE_NAMES"] #TODO option ? 
         self.contrast_names = adata.uns.get("contrast_names", [f"C{i}" for i in range(adata.varm['log2fc'].shape[1])])
 
@@ -43,24 +45,28 @@ class DifferentialExpressionPlotter:
         self.missingness = adata.uns.get("missingness", {})
         self.fasta_headers = adata.var['FASTA_HEADERS'].to_numpy()
 
-    @log_time("Plot Extensive DE")
-    def plot_all(self, output_pdf: str = "DE_plots.pdf"):
-        with PdfPages(output_pdf) as pdf:
-            self._plot_log2fc_distributions(pdf)
-            self._plot_residual_variance_hist(pdf)
-            self._plot_residual_heatmap(pdf)
-            self._plot_stat_distribution("p", pdf, log_y=False)
-            self._plot_stat_distribution("q", pdf, log_y=False)
-            self._plot_ebayes_comparison(pdf)
-            self._plot_volcano_plots(pdf, side_by_side=True)
-            self._plot_cluster_heatmap(pdf)
-            self._plot_pca(pdf=pdf)
-            self._plot_umap(pdf=pdf)
+        # Plotting options
+        self.umap_n_neighbors = self.export_config.get("umap_n_neighbors")
+
+    @log_time("Differential Expression - plotting")
+    def plot_all(self):
+        with PdfPages(self.export_config.get("path_plot")) as pdf:
+            self.pdf = pdf
+            self._plot_log2fc_distributions()
+            self._plot_residual_variance_hist()
+            self._plot_residual_heatmap()
+            self._plot_stat_distribution("p", log_y=False)
+            self._plot_stat_distribution("q", log_y=False)
+            self._plot_ebayes_comparison()
+            self._plot_volcano_plots()
+            self._plot_cluster_heatmap()
+            self._plot_pca()
+            self._plot_umap()
             if "EC_high_vs_EC_low" in self.contrast_names:
-                self._plot_spikein_separation("EC_high_vs_EC_low", pdf)
+                self._plot_spikein_separation("EC_high_vs_EC_low")
 
 
-    def _plot_log2fc_distributions(self, pdf):
+    def _plot_log2fc_distributions(self):
         fig, axs = plt.subplots(1, self.log2fc.shape[1], figsize=(4 * self.log2fc.shape[1], 4), sharey=True)
 
         for i, name in enumerate(self.contrast_names):
@@ -71,10 +77,10 @@ class DifferentialExpressionPlotter:
             ax.set_ylabel("Count")
 
         fig.tight_layout()
-        pdf.savefig(fig)
+        self.pdf.savefig(fig)
         plt.close(fig)
 
-    def _plot_residual_variance_hist(self, pdf):
+    def _plot_residual_variance_hist(self):
         if self.res_var is None:
             print("No residual variance found — skipping.")
             return
@@ -85,10 +91,10 @@ class DifferentialExpressionPlotter:
         ax.set_xlabel("Residual Variance")
         ax.set_ylabel("Protein Count")
         fig.tight_layout()
-        pdf.savefig(fig)
+        self.pdf.savefig(fig)
         plt.close(fig)
 
-    def _plot_residual_heatmap(self, pdf):
+    def _plot_residual_heatmap(self):
         if self.residuals is None:
             print("No residuals found — skipping.")
             return
@@ -104,10 +110,10 @@ class DifferentialExpressionPlotter:
         ax.set_xlabel("Proteins")
         ax.set_ylabel("Samples")
         fig.tight_layout()
-        pdf.savefig(fig)
+        self.pdf.savefig(fig)
         plt.close(fig)
 
-    def _plot_stat_distribution(self, stat_key, pdf, log_y=False):
+    def _plot_stat_distribution(self, stat_key, log_y=False):
         contrasts = self.contrast_names
         n_contrasts = len(contrasts)
 
@@ -135,10 +141,12 @@ class DifferentialExpressionPlotter:
 
         fig.tight_layout()
 
-        pdf.savefig(fig)
+        self.pdf.savefig(fig)
         plt.close(fig)
 
-    def _plot_volcano_plots(self, pdf, side_by_side=True):
+    def _plot_volcano_plots(self):
+        sign_threshold = self.analysis_config.get("volcano_sign_threshold", 0.05)
+
         for i, name in enumerate(self.contrast_names):
             logfc = self.log2fc[:, i]
             pvals_raw = self.p.iloc[:, i]
@@ -172,12 +180,12 @@ class DifferentialExpressionPlotter:
                 ax.scatter(base_logfc[circle_mask], -np.log10(base_p.iloc[circle_mask]), c=base_color[circle_mask], alpha=0.7, s=10)
                 ax.scatter(base_logfc[triangle_mask], -np.log10(base_p.iloc[triangle_mask]), c=base_color[triangle_mask], alpha=0.7, s=10, marker="^")
 
-                ax.axhline(-np.log10(0.05), color="black", linestyle="--", linewidth=0.8)
+                ax.axhline(-np.log10(sign_threshold), color="black", linestyle="--", linewidth=0.8)
                 ax.axvline(0, color="black", linestyle="--", linewidth=0.8)
 
                 for direction in ["up", "down"]:
                     sig_mask = (logfc > 0) if direction == "up" else (logfc < 0)
-                    sig_mask &= (qvals < 0.05) & ~both_missing
+                    sig_mask &= (qvals < sign_threshold) & ~both_missing
 
                     top = np.argsort(qvals[sig_mask])[:10]
                     selected = np.where(sig_mask)[0][top]
@@ -193,39 +201,25 @@ class DifferentialExpressionPlotter:
                         )
 
                 ax.set_xlabel("log2FC")
-                ax.set_ylabel("-log10(p)")
+                ax.set_ylabel("-log10(q)")
                 ax.set_title(title)
 
-            # Layout based on side_by_side
-            if side_by_side:
-                fig, axs = plt.subplots(1, 2, figsize=(14, 6))
-                plot_panel(axs[0], pvals_raw, qvals_raw, f"{name} (raw)")
-                plot_panel(axs[1], pvals_bayes, qvals_bayes, f"{name} (eBayes)")
-                axs[1].legend(
-                    handles=[
-                        plt.Line2D([0], [0], color="gray", marker="o", linestyle="None", label="Observed in both"),
-                        plt.Line2D([0], [0], color="blue", marker="^", linestyle="None", label="missing group1"),
-                        plt.Line2D([0], [0], color="green", marker="^", linestyle="None", label="missing group2"),
-                    ],
-                    title="Missingness",
-                    loc="upper right")
-            else:
-                fig, ax = plt.subplots(1, 1, figsize=(7, 6))
-                plot_panel(ax, pvals_bayes, qvals_bayes, f"{name} (eBayes)")
-                ax.legend(
-                    handles = [
-                        plt.Line2D([0], [0], color="gray", marker="o", linestyle="None", label="Observed in both"),
-                        plt.Line2D([0], [0], color="blue", marker="^", linestyle="None", label="missing from group1"),
-                        plt.Line2D([0], [0], color="green", marker="^", linestyle="None", label="missing from group2"),
-                    ],
-                    title="Missingness",
-                    loc="upper right")
+            fig, ax = plt.subplots(1, 1, figsize=(7, 6))
+            plot_panel(ax, qvals_bayes, qvals_bayes, f"{name} (eBayes)")
+            ax.legend(
+                handles = [
+                    plt.Line2D([0], [0], color="gray", marker="o", linestyle="None", label="Observed in both"),
+                    plt.Line2D([0], [0], color="blue", marker="^", linestyle="None", label=f"missing from {group1}"),
+                    plt.Line2D([0], [0], color="green", marker="^", linestyle="None", label=f"missing from {group2}"),
+                ],
+                title="Missingness",
+                loc="upper right")
 
             fig.tight_layout()
-            pdf.savefig(fig)
+            self.pdf.savefig(fig)
             plt.close(fig)
 
-    def _plot_ebayes_comparison(self, pdf):
+    def _plot_ebayes_comparison(self):
         if "p_ebayes" not in self.adata.varm:
             print("No eBayes stats found — skipping.")
             return
@@ -252,10 +246,10 @@ class DifferentialExpressionPlotter:
             axs[1].set_title(f"FDR comparison: {name}")
 
             fig.tight_layout()
-            pdf.savefig(fig)
+            self.pdf.savefig(fig)
             plt.close(fig)
 
-    def _plot_cluster_heatmap(self, pdf=None):
+    def _plot_cluster_heatmap(self):
         """
         Plot hierarchical clustering heatmap for samples based on protein expression.
         """
@@ -310,10 +304,10 @@ class DifferentialExpressionPlotter:
 
         g.ax_cbar.set_position((0.10, 0.735, 0.03, 0.17))
 
-        pdf.savefig(g.fig)
+        self.pdf.savefig(g.fig)
         plt.close(g.fig)
 
-    def _plot_pca(self, color_key="CONDITION", pdf=None):
+    def _plot_pca(self, color_key="CONDITION"):
         """
         Plot PCA of samples colored by condition.
         """
@@ -331,7 +325,7 @@ class DifferentialExpressionPlotter:
         pc1_var = var_ratio[0] * 100
         pc2_var = var_ratio[1] * 100
 
-        fig, ax = plt.subplots(figsize=(6, 5))
+        fig, ax = plt.subplots(figsize=(7, 6))
         sns.scatterplot(
             data=pc_df,
             x="PC1",
@@ -361,19 +355,17 @@ class DifferentialExpressionPlotter:
         ax.legend(title=color_key, loc="best", frameon=True)
         fig.tight_layout()
 
-        if pdf:
-            pdf.savefig(fig)
-            plt.close(fig)
-        else:
-            plt.show()
+        self.pdf.savefig(fig)
+        plt.close(fig)
 
-    def _plot_umap(self, color_key="CONDITION", pdf=None):
+    def _plot_umap(self, color_key="CONDITION"):
         """
         Plot UMAP of samples colored by condition.
         """
         if "X_umap" not in self.adata.obsm:
             if "neighbors" not in self.adata.uns:
-                sc.pp.neighbors(self.adata)
+                sc.pp.neighbors(self.adata,
+                                n_neighbors=self.umap_n_neighbors)
             sc.tl.umap(self.adata)
 
         umap_df = pd.DataFrame(
@@ -383,7 +375,7 @@ class DifferentialExpressionPlotter:
         )
         umap_df[color_key] = self.adata.obs[color_key].values
 
-        fig, ax = plt.subplots(figsize=(6, 5))
+        fig, ax = plt.subplots(figsize=(7, 6))
         sns.scatterplot(
             data=umap_df,
             x="UMAP1",
@@ -413,9 +405,9 @@ class DifferentialExpressionPlotter:
         ax.legend(title=color_key, loc="best", frameon=True)
         fig.tight_layout()
 
-        pdf.savefig(fig)
+        self.pdf.savefig(fig)
 
-    def _plot_spikein_separation(self, contrast_name: str, pdf):
+    def _plot_spikein_separation(self, contrast_name: str):
         if contrast_name not in self.contrast_names:
             print(f"Contrast '{contrast_name}' not found.")
             return
@@ -482,6 +474,6 @@ class DifferentialExpressionPlotter:
         # Clean up
         ax_hist.tick_params(axis="y", left=False, labelleft=False)
 
-        pdf.savefig(fig)
+        self.pdf.savefig(fig)
         plt.close(fig)
 
