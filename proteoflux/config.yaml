@@ -1,53 +1,63 @@
 dataset:
-  input_file: full_test.tsv
-  index_column: PG.ProteinGroups
-  signal_column: FG.MS2RawQuantity
-  qvalue_column: PG.Qvalue
-  pep_column: PG.PEP
-  condition_column: R.Condition
-  replicate_column: R.Replicate
-  filename_column: R.FileName
-  run_evidence_column: PG.RunEvidenceCount
-  fasta_column: PG.FastaFiles
-  protein_weight: PG.MolecularWeight
-  protein_descriptions: PG.ProteinDescriptions
-  gene_names: PG.Genes
+  input_file: "full_test2.tsv"
+  annotation_file: null
+  index_column: "PG.ProteinGroups"
+  signal_column: "FG.MS2RawQuantity"
+  qvalue_column: "PG.Qvalue"
+  pep_column: "PG.PEP"
+  condition_column: "R.Condition"
+  replicate_column: "R.Replicate"
+  filename_column: "R.FileName"
+  run_evidence_column: "PG.RunEvidenceCount"
+  fasta_column: "PG.FastaFiles"
+  protein_weight: "PG.MolecularWeight"
+  protein_descriptions: "PG.ProteinDescriptions"
+  gene_names: "PG.Genes"
 
 preprocessing:
-  filter_qvalue: 0.01
-  filter_pep: 0.2
-  filter_run_evidence_count: 3
-  contaminants_files:
-    - Contaminants_2022.fasta
-
+  filtering:
+    qvalue: 0.01
+    pep: 0.003
+    run_evidence_count: 3
+    contaminants_files:
+      - "Contaminants_2022.fasta"
   normalization:
     method:
-      - log2
-      - median_equalization
+      - "log2"
+      - "median_equalization"
     loess_span: 0.9
-
   imputation:
-    method: hybridknn
+    method: "tnknn"
     knn_k: 6
     knn_tn_perc: 0.75
     rf_max_iter: 20
     rf_random_state: 42
-
+    evaluation:
+      number_CV: 10
+      missing_total: 0.15
+      missing_mnar: 0.9
+      missing_quantile: 0.1
+      missing_q_lod: 0.05
   exports:
     normalization_plots: true
     imputation_plots: true
-    normalization_plot_path: 0_normalization_plots.pdf
-    imputation_plot_path: 1_imputation_plots.pdf
+    normalization_plot_path: "0_normalization_plots.pdf"
+    imputation_plot_path: "1_imputation_plots.pdf"
 
 analysis:
-  plot_extensive: true
-  extensive_plot_path: 2_extensive_de.pdf
-  export_csv: true
-  log2fc_path: 3_log2fc_report.csv
-  export_h5ad: true
-  h5ad_export_path: 4_processed_data.h5ad
+  use_r_limma: false
+  ebayes_method: "limma"
+  sign_threshold: 0.05
+  exports:
+    export_plot: true
+    export_table: true
+    export_h5ad: true
+    table_use_xlsx: true
+    path_plot: "2_extensive_de.pdf"
+    path_table: "3_log2fc_report.csv"
+    path_h5ad: "4_processed_data.h5ad"
+    umap_n_neighbors: 15
 
 design:
-  mode: default
-  group_column: CONDITION
-
+  mode: "default"
+  group_column: "CONDITION"

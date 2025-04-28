@@ -12,31 +12,31 @@ def run_pipeline(config: dict):
     adata = run_limma_pipeline(adata, config)
 
     analysis_config = config.get("analysis", {})
-    plotter = DifferentialExpressionPlotter(adata)
+    plotter = DifferentialExpressionPlotter(adata,
+                                            analysis_config)
 
-    if analysis_config.get("plot_extensive", True):
-        plotter.plot_all(analysis_config.get("extensive_plot_path"))
+    if analysis_config.get("export_plot", True):
+        plotter.plot_all()
 
-    if analysis_config.get("export_log2fc_csv", True):  # TODO: rename key
-        exporter = DEExporter(
-            adata,
-            output_path="DE_export",
-            use_xlsx=True,
-            sig_threshold=0.05,
-            include_uniprot_map=False
-        )
+    export_config = analysis_config.get("exports")
+    if analysis_config.get("export_table", True):
+        exporter = DEExporter(adata,
+                      output_path=export_config.get("path_table"),
+                              use_xlsx=export_config.get("table_use_xlsx"),
+                              sig_threshold=analysis_config.get("sign_threshold"),
+                             )
         exporter.export()
 
-    if analysis_config.get("export_h5ad", True):
-        exporter.export_adata(analysis_config.get("h5ad_export_path"))
+    if export_config.get("export_h5ad", True):
+        exporter.export_adata(export_config.get("path_h5ad"))
 
 @log_time("Proteoflux Pipeline - Dev")
 def main():
     config = {
             "dataset":
             {
-                "input_file": "full_test2.tsv",
-                #"input_file": "searle_test.tsv",
+                #"input_file": "full_test2.tsv",
+                "input_file": "searle_test.tsv",
                 "annotation_file": "annotation_test.tsv",
                 "index_column": "PG.ProteinGroups",
                 "signal_column": "FG.MS2RawQuantity",
@@ -47,8 +47,8 @@ def main():
                 "replicate_column": "R.Replicate",
                 "filename_column": "R.FileName",
                 "run_evidence_column": "PG.RunEvidenceCount",
-                #"fasta_column": "PG.FastaHeaders",
-                "fasta_column": "PG.FastaFiles",
+                "fasta_column": "PG.FastaHeaders",
+                #"fasta_column": "PG.FastaFiles",
                 "protein_weight": "PG.MolecularWeight",
                 "protein_descriptions": "PG.ProteinDescriptions",
                 "gene_names": "PG.Genes",
@@ -97,7 +97,7 @@ def main():
                 "sign_threshold": 0.15,
                 "exports":
                 {
-                    "export_plot": False,
+                    "export_plot": True,
                     "export_table": True,
                     "export_h5ad": True,
                     "table_use_xlsx": True,

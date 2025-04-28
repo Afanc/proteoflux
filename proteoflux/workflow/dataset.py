@@ -150,8 +150,6 @@ class Dataset:
     def get_anndata(self) -> ad.AnnData:
         """Export the processed dataset as an AnnData object."""
         start_time = time.perf_counter()
-        #self.adata.write("processed_data.h5ad", compression="gzip") #TODO adapt
-        #print(f"Exporting to .h5ad took {time.perf_counter() - start_time:.2f} seconds")
         return self.adata
 
 if __name__ == "__main__":
