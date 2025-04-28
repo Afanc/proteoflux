@@ -51,9 +51,15 @@ def get_imputer(**kwargs) -> Any:
         )
     elif method == "randomforest":
         return sklearn.impute.IterativeImputer(
-            estimator=sklearn.ensemble.HistGradientBoostingRegressor(),
+            estimator=sklearn.ensemble.HistGradientBoostingRegressor(
+                max_depth=kwargs.get("rf_max_depth", 6),
+                learning_rate=kwargs.get("rf_learning_rate", 0.1),
+                max_iter=kwargs.get("rf_n_estimators", 100)
+            ),
             random_state=kwargs.get("rf_random_state", 42),
             max_iter=kwargs.get("rf_max_iter", 20),
+            tol=kwargs.get("rf_tol", 5e-2),
+            n_nearest_features=kwargs.get("rf_nearest_features", 50),
         )
     else:
         raise ValueError(f"Invalid imputation method: {method}. And one is needed...")

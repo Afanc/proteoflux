@@ -16,10 +16,11 @@ def geometric_cv(values: np.ndarray, axis: int = 1) -> np.ndarray:
     Returns:
         np.ndarray: GCV values, one per feature.
     """
-    log_std = np.nanstd(values, axis=axis)
-    return np.sqrt(np.exp(log_std**2) - 1)
+    log2_std = np.nanstd(values, axis=axis, ddof=1)
+    ln2_squared = np.log(2)**2
+    return np.sqrt(np.exp(ln2_squared * log2_std**2) - 1)
 
-
+# TODO sketchy, abandon
 def log_cv(values: np.ndarray, axis: int = 1, log_base: float = 2) -> np.ndarray:
     """
     Computes %CV from log-transformed values.

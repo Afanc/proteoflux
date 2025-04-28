@@ -110,7 +110,9 @@ class ImputeEvaluator:
             results_df, values_df = self._evaluate_imputation()
             self._plot_regression(values_df["True Values"],
                                   values_df["Imputed Values"],
-                                  results_df)
+                                  results_df,
+                                  values_df["orig_missing"].to_numpy()
+                                  )
 
     def _plot_mvi_per_condition(self):
         """
@@ -226,7 +228,7 @@ class ImputeEvaluator:
             before_df=self.df_original,
             after_df=self.df_imputed_only,
             condition_mapping=self.condition_map,
-            metrics=["log_CV", "CV", "geometric_CV", "RMAD"],
+            metrics=["CV", "geometric_CV", "RMAD"],
             label_col="Imputation",
             before_label="Original",
             after_label="Imputed",
@@ -236,12 +238,18 @@ class ImputeEvaluator:
 
         metrics = {}
 
-        metrics['CV'] = agg_metrics["CV"]
-        metrics['log_CV'] = agg_metrics["log_CV"]
         metrics['geometric_CV'] = agg_metrics["geometric_CV"]
         metrics['RMAD'] = agg_metrics["RMAD"]
+        metrics['CV'] = agg_metrics["CV"]
 
         for k,v in metrics.items():
+            #TODO remove CV altogether eventually
+            title=f"{k} Per Condition (Original vs Imputed Values)"\
+                "using"
+            if k == "CV":
+                title += " | WARNING - don't trust CV in log scale ! "
+            #--
+
             fig, ax = plt.subplots(figsize=(12, 6))
             plot_aggregated_violin(
                 ax=ax,
@@ -423,6 +431,10 @@ class ImputeEvaluator:
         all_true_vals = []
         all_imputed_vals = []
 
+        # Boolean array: True where the value was originally imputed
+        orig_mask = self.df_imputed_only.notna().to_numpy()
+        all_orig_missing = []  # to collect per-test-point flag
+
         for fold in tqdm(range(n_cv), leave=False, desc="Cross-validation"):
             # Generate MV data
             mv_data = produce_balanced_mv(X_complete,
@@ -432,6 +444,9 @@ class ImputeEvaluator:
                                           q_lod=0.05)
 
             mask = mv_data['mask'].numpy().astype(bool)
+
+            # Track if the selected points were originally missing
+
             X_incomp = mv_data['X_incomp'].numpy()
 
             # Impute again using the same imputation method
@@ -462,8 +477,8 @@ class ImputeEvaluator:
 
             all_true_vals.extend(true_vals)
             all_imputed_vals.extend(imputed_vals)
+            all_orig_missing.extend(orig_mask[mask])
 
-            #TODO plotting a single fold
             if fold < 1:
                 perc_of_na = np.isnan(X_incomp).sum() / X_incomp.size * 100
                 mv_mask_original = np.isnan(self.df_original)
@@ -475,21 +490,35 @@ class ImputeEvaluator:
                 )
                 plot_missing_corr_heatmap(
                     data=pd.DataFrame(X_incomp, columns=self.numeric_columns),
+                    title="Missing Values Correlation Heatmap (CV Fold Example)"
                 )
                 self.pdf.savefig()
                 plt.close()
 
         results_df = pd.DataFrame(results)
 
+        # Remove duplicates for cleaner plotting
+        # Stack true, imputed, and mask into one array
+        merged = np.stack([all_true_vals, all_imputed_vals, all_orig_missing], axis=1)
+
+        # Find unique rows based on (true, imputed)
+        _, idx = np.unique(merged[:, :2], axis=0, return_index=True)
+
+        # Select unique entries
+        all_true_vals    = merged[idx, 0]
+        all_imputed_vals = merged[idx, 1]
+        all_orig_missing = merged[idx, 2].astype(bool)
+
         values_df = pd.DataFrame({
             "True Values": all_true_vals,
-            "Imputed Values": all_imputed_vals
+            "Imputed Values": all_imputed_vals,
+            "orig_missing": all_orig_missing,
         })
 
         return results_df, values_df
 
     def _plot_regression(self, true_vals: np.ndarray, imputed_vals: np.ndarray,
-                         results_df: pd.DataFrame):
+                         results_df: pd.DataFrame, orig_imputed_mask: Optional[np.ndarray] = None):
         """
         Plot scatter of imputed vs. true values with density coloring, and annotate with metrics.
 
@@ -498,6 +527,11 @@ class ImputeEvaluator:
             imputed_vals (np.ndarray): Imputed values.
             results_df (pd.DataFrame): DataFrame containing cross-validation results (with 'r2' and 'rmae').
         """
-        fig = plot_regression_scatter(true_vals, imputed_vals, results_df)
+        fig = plot_regression_scatter(
+            true_vals=true_vals,
+            imputed_vals=imputed_vals,
+            results_df=results_df,
+            orig_imputed_mask=orig_imputed_mask,
+            title="Imputation Regression Plot (CV Fold Example)")
         self.pdf.savefig(fig)
         plt.close(fig)

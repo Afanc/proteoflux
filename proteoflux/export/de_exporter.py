@@ -9,14 +9,12 @@ class DEExporter:
         output_path,
         use_xlsx=True,
         sig_threshold=0.05,
-        include_uniprot_map=False,
         uniprot_mapper=None,
     ):
         self.adata = adata
         self.output_path = Path(output_path)
         self.use_xlsx = use_xlsx
         self.sig_threshold = sig_threshold
-        self.include_uniprot_map = include_uniprot_map
         self.uniprot_mapper = uniprot_mapper
         self.contrasts = self.adata.uns.get("contrast_names", [])
 
@@ -111,12 +109,8 @@ class DEExporter:
         q_ebayes_annot = self._annotate_matrix(q_ebayes, q_ebayes, miss_ratios) if q_ebayes is not None else None
 
         # Metadata sheet
-        meta_cols = ["FASTA_HEADERS", "GENE_NAMES", "PROTEIN_DESCRIPTIONS"]
+        meta_cols = ["GENE_NAMES", "FASTA_HEADERS", "PROTEIN_DESCRIPTIONS"]
         meta_df = self.adata.var[meta_cols].copy() if all(c in self.adata.var.columns for c in meta_cols) else None
-
-        # Uniprot conversion placeholder
-        if self.include_uniprot_map and meta_df is not None and self.uniprot_mapper:
-            meta_df["UNIPROT_ID"] = meta_df["FASTA_HEADERS"].apply(self.uniprot_mapper)
 
         # Raw & X intensities
         raw = pd.DataFrame(self.adata.layers["raw"], index=self.adata.obs_names, columns=self.adata.var_names)
@@ -135,15 +129,15 @@ class DEExporter:
         tables = {
             "Log2FC": log2fc_annot,
             "Quantification Qvalue": q_ebayes_annot,
+            "Metadata": meta_df,
+            "Processed Log2 Intensities": X.T,
+            "Missingness": miss_ratios,
+            "Identification Qvalue": qval.T,
+            "Identification PEP": pep.T if pep is not None else None,
+            "Raw Intensities": raw.T,
             "T-statistics (raw)": t_raw,
             "P-values (raw)": p_raw,
             "Q-values (raw)": q_raw,
-            "Missingness": miss_ratios,
-            "Metadata": meta_df,
-            "Raw Intensities": raw.T,
-            "Processed Log2 Intensities": X.T,
-            "Identification Qvalue": qval.T,
-            "Identification PEP": pep.T if pep is not None else None,
         }
 
         if self.use_xlsx:

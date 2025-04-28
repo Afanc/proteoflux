@@ -7,6 +7,7 @@ from matplotlib.axes import Axes
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.patches as mpatches
+from matplotlib.lines import Line2D
 from scipy.stats import gaussian_kde
 from skmisc.loess import loess
 from sklearn.linear_model import RANSACRegressor
@@ -95,242 +96,6 @@ def plot_violin_on_axis(
         for label in ax.get_xticklabels():
             label.set_horizontalalignment('right')
 
-def plot_aggregated_violin2(
-    ax: Axes,
-    data: pd.DataFrame,
-    x: str = "Condition",
-    y: str = "Value",
-    hue: str = "Normalization",
-    title: str = "",
-    xlabel: str = None,
-    ylabel: str = None,
-    palette: dict = {"Before": "blue", "After": "red"},
-    density_norm: str = "width",
-    percentile_clip: float = 99.0,
-    show_outliers: bool = True,
-    outlier_jitter: float = 0.2,
-    outlier_size: int = 3,
-) -> None:
-    """
-    Violin + clipped outlier overlay. Shows outliers outside the violin with better spacing.
-    """
-
-    # Clipping thresholds
-    upper_clip = np.nanpercentile(data[y], 100 - (100 - percentile_clip))
-
-    mid = data[y] <= upper_clip
-    high = data[data[y] > upper_clip]
-
-    sns.violinplot(
-        x=x,
-        y=y,
-        hue=hue,
-        data=mid,
-        ax=ax,
-        inner="quart",
-        dodge=True,
-        density_norm=density_norm,
-        split=False,
-        palette=palette,
-        alpha=0.6,
-    )
-
-    # Plot upper outliers (top of violins)
-    if show_outliers and not high.empty:
-        sns.stripplot(
-            x=x,
-            y=y,
-            hue=hue,
-            data=high,
-            dodge=True,
-            jitter=outlier_jitter,
-            marker="^",
-            alpha=0.7,
-            size=outlier_size,
-            palette=palette,
-            ax=ax,
-            linewidth=0
-        )
-
-    ax.set_title(title)
-    ax.set_xlabel(xlabel or x)
-    ax.set_ylabel(ylabel or y)
-    ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.7)
-
-    ax.set_ylim(
-        bottom=-0.2,
-        top=min(upper_clip + 0.1 * abs(upper_clip), 2.0)
-    )
-
-    if hue:
-        ax.legend(title=hue, loc="upper right")
-
-def plot_aggregated_violin_good(
-    ax: Axes,
-    data: pd.DataFrame,
-    x: str = "Condition",
-    y: str = "Value",
-    hue: str = "Normalization",
-    title: str = "",
-    xlabel: str = None,
-    ylabel: str = None,
-    palette: dict = {"Before": "blue", "After": "red"},
-    density_norm: str = "width",
-    show_outliers: bool = True,
-    outlier_jitter: float = 0.15,
-    outlier_size: int = 4,
-    clip_quantile: float = 0.99
-) -> None:
-    """
-    Aggregated violin plot with upper outliers overlaid using stripplot.
-    """
-    # Compute upper clip values and separate outliers
-    clip_vals = data.groupby([x, hue])[y].quantile(clip_quantile).reset_index()
-    outliers = []
-
-    for _, row in clip_vals.iterrows():
-        mask = (
-            (data[x] == row[x]) &
-            (data[hue] == row[hue]) &
-            (data[y] > row[y])
-        )
-        outliers.append(data.loc[mask])
-
-    outliers_df = pd.concat(outliers) if outliers else pd.DataFrame(columns=data.columns)
-    clipped_data = data[~data.index.isin(outliers_df.index)]
-
-    # Violin plot
-    sns.violinplot(
-        x=x,
-        y=y,
-        hue=hue,
-        data=clipped_data,
-        ax=ax,
-        inner="quartile",
-        dodge=True,
-        density_norm=density_norm,
-        palette=palette,
-        alpha=0.5,
-        linewidth=1
-    )
-
-    # Upper outliers only
-    if show_outliers and not outliers_df.empty:
-        sns.stripplot(
-            x=x,
-            y=y,
-            hue=hue,
-            data=outliers_df,
-            ax=ax,
-            dodge=True,
-            jitter=outlier_jitter,
-            marker="o",
-            alpha=0.2,
-            size=outlier_size,
-            palette=palette,
-            linewidth=0,
-            legend=False  # handled below
-        )
-
-    # Clean legend
-    handles, labels = ax.get_legend_handles_labels()
-    unique = dict(zip(labels, handles))
-    ax.legend(unique.values(), unique.keys(), title=hue, loc="upper right")
-
-    # Axis & title
-    ax.set_title(title)
-    ax.set_xlabel(xlabel or x)
-    ax.set_ylabel(ylabel or y)
-    ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.7)
-
-    # Clip y-limits to 1.1× the max without squishing
-    upper_clip = clipped_data[y].quantile(clip_quantile)
-    ax.set_ylim(
-        top=max(1.1 * upper_clip, 1.5),
-        bottom=min(-0.1, clipped_data[y].min() - 0.1)
-    )
-
-#def plot_aggregated_violin(
-#    ax: Axes,
-#    data: pd.DataFrame,
-#    x: str = "Condition",
-#    y: str = "Value",
-#    hue: str = "Normalization",
-#    title: str = "",
-#    xlabel: str = None,
-#    ylabel: str = None,
-#    palette: dict = {"Before": "blue", "After": "red"},
-#    density_norm: str = "width",
-#    percentile_clip: float = 99.0,
-#) -> None:
-#    """
-#    Violin + outlier overlay. Clips both tails and adds scatterplot for outliers.
-#    """
-#    # Compute lower and upper clipping thresholds
-#    lower_clip = np.nanpercentile(data[y], 100 - percentile_clip)
-#    upper_clip = np.nanpercentile(data[y], percentile_clip)
-#
-#    # Separate data
-#    mid = data[(data[y] >= lower_clip) & (data[y] <= upper_clip)]
-#    low = data[data[y] < lower_clip]
-#    high = data[data[y] > upper_clip]
-#
-#    # Violin for main distribution
-#    sns.violinplot(
-#        x=x,
-#        y=y,
-#        hue=hue,
-#        data=mid,
-#        ax=ax,
-#        inner="quart",
-#        dodge=True,
-#        density_norm=density_norm,
-#        split=False,
-#        palette=palette,
-#        alpha=0.5,
-#    )
-#
-#    # Outliers below
-#    if not low.empty:
-#        sns.stripplot(
-#            x=x,
-#            y=y,
-#            hue=hue,
-#            data=low,
-#            ax=ax,
-#            dodge=True,
-#            jitter=True,
-#            marker="v",
-#            size=2,
-#            palette=palette,
-#            alpha=0.6,
-#            legend=False
-#        )
-#
-#    # Outliers above
-#    if not high.empty:
-#        sns.stripplot(
-#            x=x,
-#            y=y,
-#            hue=hue,
-#            data=high,
-#            ax=ax,
-#            dodge=True,
-#            jitter=True,
-#            marker="^",
-#            size=2,
-#            palette=palette,
-#            alpha=0.6,
-#            legend=False
-#        )
-#
-#    ax.set_title(title)
-#    ax.set_xlabel(xlabel or x)
-#    ax.set_ylabel(ylabel or y)
-#    ax.legend(title=hue, loc="upper right")
-#    ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.7)
-#    ax.set_ylim(top=upper_clip * 1.05)
-
 def plot_aggregated_violin(
     ax: Axes,
     data: pd.DataFrame,
@@ -341,7 +106,8 @@ def plot_aggregated_violin(
     xlabel: str = None,
     ylabel: str = None,
     palette: dict = {"Before": "blue", "After": "red"},
-    density_norm: str = "width"
+    density_norm: str = "width",
+    log_scale: bool = False,
 ) -> None:
     """
     General helper to plot aggregated violin plots from a DataFrame that contains:
@@ -371,6 +137,8 @@ def plot_aggregated_violin(
         alpha=0.5,
     )
 
+    if log_scale:
+        ax.set_yscale("log")
     ax.set_title(title)
     ax.set_xlabel(xlabel or x)
     ax.set_ylabel(ylabel or y)
@@ -624,7 +392,9 @@ def plot_cluster_heatmap(
     plt.subplots_adjust(**adjust_params)
     colorbar = g.cax
     colorbar.set_position([.05, .4, .02, .3])
-    colorbar.set_yticklabels(binary_labels)
+    if binary_labels is not None:
+        colorbar.set_yticklabels(binary_labels)
+    #colorbar.set_yticklabels(binary_labels)
 
     # If a legend mapping is provided, create a legend accordingly.
     if legend_title and legend_mapping is not None:
@@ -647,6 +417,7 @@ def plot_regression_scatter(
     true_vals: np.ndarray,
     imputed_vals: np.ndarray,
     results_df: pd.DataFrame,
+    orig_imputed_mask: Optional[np.ndarray] = None,
     figsize: Tuple[int, int] = (8, 8),
     cmap: str = "viridis",
     scatter_kwargs: Optional[dict] = None,
@@ -681,7 +452,7 @@ def plot_regression_scatter(
     if line_kwargs is None:
         line_kwargs = {"lw": 1.5, "linestyle": "--"}
 
-    # Compute density using gaussian_kde
+    # Compute density
     xy = np.vstack([true_vals, imputed_vals])
     density = gaussian_kde(xy)(xy)
 
@@ -689,17 +460,74 @@ def plot_regression_scatter(
     r2_mean, r2_std = results_df["r2"].mean(), results_df["r2"].std()
     rmae_mean, rmae_std = results_df["rmae"].mean(), results_df["rmae"].std()
 
-    # Create figure and axis
+    if scatter_kwargs is None:
+        scatter_kwargs = {"s": 10, "alpha": 0.5}
+    if line_kwargs is None:
+        line_kwargs = {"lw": 1.5, "linestyle": "--"}
+
     fig, ax = plt.subplots(figsize=figsize)
 
-    # Scatter plot with density coloring
-    scatter = ax.scatter(true_vals, imputed_vals, c=density, cmap=cmap, **scatter_kwargs)
-    ax.plot(
-        [true_vals.min(), true_vals.max()],
-        [true_vals.min(), true_vals.max()],
-        color=line_color,
-        **line_kwargs
-    )
+    scatter = None
+
+    if orig_imputed_mask is not None:
+        # plot regular points
+        mask_test = ~orig_imputed_mask
+        scatter = ax.scatter(
+            true_vals[mask_test],
+            imputed_vals[mask_test],
+            c=density[mask_test],
+            cmap=cmap,
+            marker='o',
+            **scatter_kwargs
+        )
+        # plot originally imputed points
+        ax.scatter(
+            true_vals[orig_imputed_mask],
+            imputed_vals[orig_imputed_mask],
+            marker='^',
+            color="red",
+            edgecolor="black",
+            linewidth=0.5,
+            **scatter_kwargs
+        )
+
+        # add manual legend for datapoints
+        legend_elements = [
+            Line2D([0], [0], marker='o', color='w', label='Test MV', markerfacecolor='gray', markersize=8),
+            Line2D([0], [0], marker='^', color='w', label='Original Imputed', markerfacecolor='red', markersize=8)
+        ]
+        ax.legend(handles=legend_elements, loc='lower right')
+    else:
+        # if no mask given, plot normally
+        scatter = ax.scatter(
+            true_vals,
+            imputed_vals,
+            c=density,
+            cmap=cmap,
+            marker='o',
+            **scatter_kwargs
+        )
+
+#
+#    # Compute density using gaussian_kde
+#    xy = np.vstack([true_vals, imputed_vals])
+#    density = gaussian_kde(xy)(xy)
+#
+#    # Compute metrics
+#    r2_mean, r2_std = results_df["r2"].mean(), results_df["r2"].std()
+#    rmae_mean, rmae_std = results_df["rmae"].mean(), results_df["rmae"].std()
+#
+#    # Create figure and axis
+#    fig, ax = plt.subplots(figsize=figsize)
+#
+#    # Scatter plot with density coloring
+#    scatter = ax.scatter(true_vals, imputed_vals, c=density, cmap=cmap, **scatter_kwargs)
+#    ax.plot(
+#        [true_vals.min(), true_vals.max()],
+#        [true_vals.min(), true_vals.max()],
+#        color=line_color,
+#        **line_kwargs
+#    )
 
     # Add colorbar for density
     cbar = fig.colorbar(scatter, ax=ax)

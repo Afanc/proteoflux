@@ -1,13 +1,16 @@
 import re
 import numpy as np
 import pandas as pd
+import scanpy as sc
 import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.gridspec import GridSpec
+import matplotlib.patches as mpatches
 from anndata import AnnData
 from typing import Optional, List, Union
 from proteoflux.utils.utils import logger, log_time
+from proteoflux.export.plot_utils import plot_cluster_heatmap
 
 class DifferentialExpressionPlotter:
     def __init__(
@@ -50,6 +53,9 @@ class DifferentialExpressionPlotter:
             self._plot_stat_distribution("q", pdf, log_y=False)
             self._plot_ebayes_comparison(pdf)
             self._plot_volcano_plots(pdf, side_by_side=True)
+            self._plot_cluster_heatmap(pdf)
+            self._plot_pca(pdf=pdf)
+            self._plot_umap(pdf=pdf)
             if "EC_high_vs_EC_low" in self.contrast_names:
                 self._plot_spikein_separation("EC_high_vs_EC_low", pdf)
 
@@ -102,26 +108,35 @@ class DifferentialExpressionPlotter:
         plt.close(fig)
 
     def _plot_stat_distribution(self, stat_key, pdf, log_y=False):
-        """
-        Compare raw vs eBayes distributions for p or q values using seaborn.
-        """
+        contrasts = self.contrast_names
+        n_contrasts = len(contrasts)
+
         raw = self.p if stat_key == "p" else self.q
         post = self.p_ebayes if stat_key == "p" else self.q_ebayes
 
-        for i, name in enumerate(self.contrast_names):
-            fig, ax = plt.subplots(figsize=(6, 4))
+        fig, axes = plt.subplots(1, n_contrasts, figsize=(4 * n_contrasts, 4))
 
-            sns.histplot(raw.iloc[:, i], bins=40, kde=True, stat="count", label=f"{stat_key} raw", ax=ax, color="gray", alpha=0.6)
-            sns.histplot(post.iloc[:, i], bins=40, kde=True, stat="count", label=f"{stat_key} eBayes", ax=ax, color="crimson", alpha=0.6)
+        bins = np.linspace(0, 1, 50)
+        colors = ["dodgerblue", "darkorange"]
 
-            ax.set_title(f"{stat_key.upper()} distribution: {name}")
-            ax.set_xlabel(stat_key)
-            ax.set_ylabel("count")
+        for i, contrast in enumerate(contrasts):
+            ax = axes[i]
+            sns.histplot(raw[contrast], bins=bins, color=colors[0], kde=True, alpha=0.5, ax=ax, stat="count", edgecolor=None)
+            sns.histplot(post[contrast], bins=bins, color=colors[1], kde=True, alpha=0.5, ax=ax, stat="count", edgecolor=None)
+            ax.set_xlim(0, 1)
+            ax.set_title(f"{stat_key}-values: {contrast}")
+            ax.legend([
+                f"Raw {stat_key}",
+                f"Empirical Bayes {stat_key}"
+            ])
             if log_y:
                 ax.set_yscale("log")
-            ax.legend()
-            pdf.savefig(fig)
-            plt.close(fig)
+            ax.set_ylabel("count")
+
+        fig.tight_layout()
+
+        pdf.savefig(fig)
+        plt.close(fig)
 
     def _plot_volcano_plots(self, pdf, side_by_side=True):
         for i, name in enumerate(self.contrast_names):
@@ -239,6 +254,166 @@ class DifferentialExpressionPlotter:
             fig.tight_layout()
             pdf.savefig(fig)
             plt.close(fig)
+
+    def _plot_cluster_heatmap(self, pdf=None):
+        """
+        Plot hierarchical clustering heatmap for samples based on protein expression.
+        """
+        # Get expression matrix (proteins × samples)
+        expr_df = pd.DataFrame(
+            self.adata.X.T,
+            index=self.adata.var_names,
+            columns=self.adata.obs_names
+        )
+
+        # Build sample condition mapping
+        if "CONDITION" in self.adata.obs.columns:
+            run_conditions = self.adata.obs["CONDITION"]
+            unique_conditions = sorted(run_conditions.unique())
+            condition_map = {cond: color for cond, color in zip(unique_conditions, sns.color_palette("tab10", n_colors=len(unique_conditions)))}
+            col_colors = run_conditions.map(condition_map)
+        else:
+            col_colors = None
+
+        # Perform clustering
+        g = sns.clustermap(
+            expr_df,
+            cmap="vlag",
+            row_cluster=True,
+            col_cluster=True,
+            col_colors=col_colors,
+            xticklabels=True,
+            yticklabels=False,
+            method="ward",
+            metric="euclidean",
+            figsize=(12, 10)
+        )
+
+        g.fig.suptitle("Hierarchical Clustering of Samples by Expression", fontsize=16, y=0.955)
+        g.ax_cbar.set_title("Expression", fontsize=9)
+
+        # Add condition legend
+        if col_colors is not None:
+            legend_patches = [
+                mpatches.Patch(color=condition_map[c], label=c) for c in unique_conditions
+            ]
+            g.ax_heatmap.legend(
+                handles=legend_patches,
+                title="Conditions",
+                loc="upper right",
+                fontsize=8,
+                bbox_to_anchor=(1.20, 1.0)
+            )
+
+        g.ax_heatmap.set_xticklabels(g.ax_heatmap.get_xticklabels(), rotation=45, ha="right", fontsize=8)
+        plt.tight_layout(rect=[0.02, 0.02, 0.98, 0.98])
+
+        g.ax_cbar.set_position((0.10, 0.735, 0.03, 0.17))
+
+        pdf.savefig(g.fig)
+        plt.close(g.fig)
+
+    def _plot_pca(self, color_key="CONDITION", pdf=None):
+        """
+        Plot PCA of samples colored by condition.
+        """
+        if "X_pca" not in self.adata.obsm:
+            sc.tl.pca(self.adata)
+
+        pc_df = pd.DataFrame(
+            self.adata.obsm["X_pca"][:, :2],
+            columns=["PC1", "PC2"],
+            index=self.adata.obs_names
+        )
+        pc_df[color_key] = self.adata.obs[color_key].values
+
+        var_ratio = self.adata.uns["pca"]["variance_ratio"]
+        pc1_var = var_ratio[0] * 100
+        pc2_var = var_ratio[1] * 100
+
+        fig, ax = plt.subplots(figsize=(6, 5))
+        sns.scatterplot(
+            data=pc_df,
+            x="PC1",
+            y="PC2",
+            hue=color_key,
+            palette="tab10",
+            edgecolor="black",
+            s=50,
+            alpha=0.8,
+            ax=ax
+        )
+
+        # Annotate points
+        palette = dict(zip(pc_df[color_key].unique(), sns.color_palette("tab10")))
+        x_median = pc_df["PC1"].median()
+        y_median = pc_df["PC2"].median()
+
+        for sample, (x, y) in pc_df[["PC1", "PC2"]].iterrows():
+            color = palette[pc_df.loc[sample, color_key]]
+            ha = "left" if x <= x_median else "right"
+            offset = 0.5 if ha == "left" else -0.5
+            ax.text(x + offset, y, sample, fontsize=7, color=color, ha=ha)
+
+        ax.set_title("PCA")
+        ax.set_xlabel(f"PC1 ({pc1_var:.1f}%)")
+        ax.set_ylabel(f"PC2 ({pc2_var:.1f}%)")
+        ax.legend(title=color_key, loc="best", frameon=True)
+        fig.tight_layout()
+
+        if pdf:
+            pdf.savefig(fig)
+            plt.close(fig)
+        else:
+            plt.show()
+
+    def _plot_umap(self, color_key="CONDITION", pdf=None):
+        """
+        Plot UMAP of samples colored by condition.
+        """
+        if "X_umap" not in self.adata.obsm:
+            if "neighbors" not in self.adata.uns:
+                sc.pp.neighbors(self.adata)
+            sc.tl.umap(self.adata)
+
+        umap_df = pd.DataFrame(
+            self.adata.obsm["X_umap"],
+            columns=["UMAP1", "UMAP2"],
+            index=self.adata.obs_names
+        )
+        umap_df[color_key] = self.adata.obs[color_key].values
+
+        fig, ax = plt.subplots(figsize=(6, 5))
+        sns.scatterplot(
+            data=umap_df,
+            x="UMAP1",
+            y="UMAP2",
+            hue=color_key,
+            palette="tab10",
+            edgecolor="black",
+            s=50,
+            alpha=0.8,
+            ax=ax
+        )
+
+        # Annotate points
+        palette = dict(zip(umap_df[color_key].unique(), sns.color_palette("tab10")))
+        x_median = umap_df["UMAP1"].median()
+        y_median = umap_df["UMAP2"].median()
+
+        for sample, (x, y) in umap_df[["UMAP1", "UMAP2"]].iterrows():
+            color = palette[umap_df.loc[sample, color_key]]
+            ha = "left" if x <= x_median else "right"
+            offset = 0.5 if ha == "left" else -0.5
+            ax.text(x + offset, y, sample, fontsize=7, color=color, ha=ha)
+
+        ax.set_title("UMAP")
+        ax.set_xlabel("UMAP1")
+        ax.set_ylabel("UMAP2")
+        ax.legend(title=color_key, loc="best", frameon=True)
+        fig.tight_layout()
+
+        pdf.savefig(fig)
 
     def _plot_spikein_separation(self, contrast_name: str, pdf):
         if contrast_name not in self.contrast_names:

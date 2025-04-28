@@ -263,7 +263,7 @@ class Preprocessor:
         postlog_mat = mat.copy()
         postlog_df = df.clone()
         models = None
-        scale_used = None
+        regression_scale_used = None
         regression_type_used = None
 
         if isinstance(normalization_method, str):
@@ -313,8 +313,11 @@ class Preprocessor:
         self.intermediate_results.add_df("normalized", df)
         self.intermediate_results.add_model("normalization", models)
         self.intermediate_results.add_metadata("normalization",
-                                               "scale_used",
-                                               scale_used)
+                                               "method",
+                                               self.normalization.get("method"))
+        self.intermediate_results.add_metadata("normalization",
+                                               "regression_scale_used",
+                                               regression_scale_used)
         self.intermediate_results.add_metadata("normalization",
                                                "regression_type_used",
                                                regression_type_used)
@@ -364,3 +367,7 @@ class Preprocessor:
         self.intermediate_results.add_matrix("imputed_only", imputed_only)
         self.intermediate_results.add_matrix("imputed", imputed_mat)
         self.intermediate_results.add_df("imputed", df)
+        self.intermediate_results.add_metadata("imputation",
+                                               "method",
+                                               self.imputation.get("method"))
+
