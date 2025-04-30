@@ -585,6 +585,8 @@ def plot_regression_scatter(
             **scatter_kwargs
         )
 
+    ax.plot([min(true_vals), max(true_vals)], [min(true_vals), max(true_vals)], '--', color='black', linewidth=1)
+
     # Add colorbar for density
     cbar = fig.colorbar(scatter, ax=ax)
     cbar.set_label("Density")
