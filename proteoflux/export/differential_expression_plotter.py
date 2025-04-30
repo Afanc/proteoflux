@@ -122,6 +122,9 @@ class DifferentialExpressionPlotter:
 
         fig, axes = plt.subplots(1, n_contrasts, figsize=(4 * n_contrasts, 4))
 
+        if n_contrasts == 1:
+            axes = [axes]
+
         bins = np.linspace(0, 1, 50)
         colors = ["dodgerblue", "darkorange"]
 
@@ -204,7 +207,7 @@ class DifferentialExpressionPlotter:
                 ax.set_ylabel("-log10(q)")
                 ax.set_title(title)
 
-            fig, ax = plt.subplots(1, 1, figsize=(7, 6))
+            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
             plot_panel(ax, qvals_bayes, qvals_bayes, f"{name} (eBayes)")
             ax.legend(
                 handles = [
@@ -213,7 +216,9 @@ class DifferentialExpressionPlotter:
                     plt.Line2D([0], [0], color="green", marker="^", linestyle="None", label=f"missing from {group2}"),
                 ],
                 title="Missingness",
-                loc="upper right")
+                loc="upper left",
+                bbox_to_anchor=(1.05, 1),
+                borderaxespad=0.)
 
             fig.tight_layout()
             self.pdf.savefig(fig)
@@ -280,7 +285,7 @@ class DifferentialExpressionPlotter:
             yticklabels=False,
             method="ward",
             metric="euclidean",
-            figsize=(12, 10)
+            figsize=(10, 10)
         )
 
         g.fig.suptitle("Hierarchical Clustering of Samples by Expression", fontsize=16, y=0.955)
@@ -325,7 +330,7 @@ class DifferentialExpressionPlotter:
         pc1_var = var_ratio[0] * 100
         pc2_var = var_ratio[1] * 100
 
-        fig, ax = plt.subplots(figsize=(7, 6))
+        fig, ax = plt.subplots(figsize=(10, 6))
         sns.scatterplot(
             data=pc_df,
             x="PC1",
@@ -345,14 +350,26 @@ class DifferentialExpressionPlotter:
 
         for sample, (x, y) in pc_df[["PC1", "PC2"]].iterrows():
             color = palette[pc_df.loc[sample, color_key]]
+
             ha = "left" if x <= x_median else "right"
-            offset = 0.5 if ha == "left" else -0.5
-            ax.text(x + offset, y, sample, fontsize=7, color=color, ha=ha)
+            # annotate with a 5-point horizontal offset
+            ax.annotate(
+                sample,
+                xy=(x, y),
+                xytext=(5 if ha=="left" else -5, 0),
+                textcoords="offset points",
+                ha=ha, va="center",
+                fontsize=7,
+                color=color
+            )
 
         ax.set_title("PCA")
         ax.set_xlabel(f"PC1 ({pc1_var:.1f}%)")
         ax.set_ylabel(f"PC2 ({pc2_var:.1f}%)")
-        ax.legend(title=color_key, loc="best", frameon=True)
+        ax.legend(title=color_key, frameon=True,
+                  loc="upper left",
+                  bbox_to_anchor=(1.05, 1),
+                  borderaxespad=0.)
         fig.tight_layout()
 
         self.pdf.savefig(fig)
@@ -375,7 +392,7 @@ class DifferentialExpressionPlotter:
         )
         umap_df[color_key] = self.adata.obs[color_key].values
 
-        fig, ax = plt.subplots(figsize=(7, 6))
+        fig, ax = plt.subplots(figsize=(10, 6))
         sns.scatterplot(
             data=umap_df,
             x="UMAP1",
@@ -388,21 +405,32 @@ class DifferentialExpressionPlotter:
             ax=ax
         )
 
-        # Annotate points
+        ## Annotate points
         palette = dict(zip(umap_df[color_key].unique(), sns.color_palette("tab10")))
         x_median = umap_df["UMAP1"].median()
         y_median = umap_df["UMAP2"].median()
-
         for sample, (x, y) in umap_df[["UMAP1", "UMAP2"]].iterrows():
             color = palette[umap_df.loc[sample, color_key]]
+
             ha = "left" if x <= x_median else "right"
-            offset = 0.5 if ha == "left" else -0.5
-            ax.text(x + offset, y, sample, fontsize=7, color=color, ha=ha)
+            # annotate with a 5-point horizontal offset
+            ax.annotate(
+                sample,
+                xy=(x, y),
+                xytext=(5 if ha=="left" else -5, 0),
+                textcoords="offset points",
+                ha=ha, va="center",
+                fontsize=7,
+                color=color
+            )
 
         ax.set_title("UMAP")
         ax.set_xlabel("UMAP1")
         ax.set_ylabel("UMAP2")
-        ax.legend(title=color_key, loc="best", frameon=True)
+        ax.legend(title=color_key, frameon=True,
+                  loc="upper left",
+                  bbox_to_anchor=(1.05, 1),
+                  borderaxespad=0.)
         fig.tight_layout()
 
         self.pdf.savefig(fig)

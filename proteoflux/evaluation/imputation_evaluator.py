@@ -167,6 +167,11 @@ class ImputeEvaluator:
             xtick_rotation=45,
             palette=self.sample_palette,
         )
+        ax.legend(handles=[
+            plt.Line2D([0], [0], color=color, lw=4, label=cond)
+            for cond, color in self.condition_color_map.items()
+        ], title="Condition", bbox_to_anchor=(1.01, 1), loc="upper left")
+
         plt.subplots_adjust(bottom=0.35)
         self.pdf.savefig(fig)
         plt.close(fig)
@@ -451,6 +456,7 @@ class ImputeEvaluator:
 
             # Track if the selected points were originally missing
             X_incomp = mv_data['X_incomp'].numpy()
+            filtered = ~orig_mask[mask]
 
             # Impute again using the same imputation method
             condition_map = self.results.dfs["condition_pivot"].to_pandas()
@@ -464,18 +470,23 @@ class ImputeEvaluator:
             X_reimputed = imputer.fit_transform(X_incomp)
 
             # Evaluate performance on artificially injected MV only
-            true_vals = X_complete[mask]
-            imputed_vals = X_reimputed[mask]
+            metric_true_vals = X_complete[mask][filtered]
+            metric_imputed_vals = X_reimputed[mask][filtered]
 
-            r2 = sklearn.metrics.r2_score(true_vals, imputed_vals)
-            mae = sklearn.metrics.median_absolute_error(true_vals, imputed_vals)
-            rmae = mae / np.median(true_vals)
+            r2 = sklearn.metrics.r2_score(metric_true_vals,
+                                          metric_imputed_vals)
+            mae = sklearn.metrics.median_absolute_error(metric_true_vals,
+                                                        metric_imputed_vals)
+            rmae = mae / np.median(metric_true_vals)
 
             results.append({
                 "fold": fold,
                 "r2": r2,
                 "rmae": rmae
             })
+
+            true_vals = X_complete[mask]
+            imputed_vals = X_reimputed[mask]
 
             all_true_vals.extend(true_vals)
             all_imputed_vals.extend(imputed_vals)

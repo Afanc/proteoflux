@@ -9,7 +9,7 @@ from proteoflux import templates
 app = typer.Typer(help="ProteoFlux: Reproducible proteomics workflows")
 
 @app.command()
-def init(path: Path = Path("config.yaml")):
+def init(path: Path = Path("proteoflux_config.yaml")):
     """
     Generate a config scaffold (basic template) at given path.
     """

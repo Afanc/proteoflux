@@ -10,7 +10,7 @@ import sklearn.preprocessing
 import sklearn.ensemble
 from skmisc.loess import loess
 
-from proteoflux.workflow.normalizers import regression_normalization
+from proteoflux.workflow.normalizers.regression_normalization import regression_normalization
 from proteoflux.workflow.imputer_factory import get_imputer
 from proteoflux.dataset.preprocessresults import PreprocessResults
 from proteoflux.dataset.intermediateresults import IntermediateResults
@@ -49,13 +49,13 @@ class Preprocessor:
         self.imputation = config.get("imputation")
 
         # Plotting
-        exports = config.get("exports")
+        self.exports = config.get("exports")
 
-        self.plot_normalization = exports.get("normalization_plots")
-        self.plot_imputation = exports.get("imputation_plots")
+        self.plot_normalization = self.exports.get("normalization_plots")
+        self.plot_imputation = self.exports.get("imputation_plots")
 
-        self.normalization_plot_path = exports.get("normalization_plot_path")
-        self.imputation_plot_path = exports.get("imputation_plot_path")
+        self.normalization_plot_path = self.exports.get("normalization_plot_path")
+        self.imputation_plot_path = self.exports.get("imputation_plot_path")
 
     def fit_transform(self, df: pl.DataFrame) -> PreprocessResults:
         """Applies preprocessing steps in sequence and returns structured results."""
@@ -292,12 +292,24 @@ class Preprocessor:
                 mat = qt.fit_transform(mat)
 
             elif method in {"global_linear", "global_loess", "local_linear", "local_loess"}:
-                scale_used = "global" if "global" in method else "local"
+                regression_scale_used = "global" if "global" in method else "local"
                 regression_type_used = "loess" if "loess" in method else "linear"
-                mat, models = regression_normalization(mat,
-                                       scale=scale_used,
-                                       regression_type=regression_type_used,
-                                       span=self.normalization.get("span"))
+
+                # build condition_labels in same column order as mat
+                sample_names = numeric_cols
+                cond_df = self.intermediate_results.dfs["condition_pivot"].to_pandas()
+                cond_df.columns = [c.capitalize() for c in cond_df.columns]
+                cond_map = cond_df.set_index("Sample")["Condition"]
+
+                condition_labels = [cond_map[s] for s in sample_names]
+
+                mat, models = regression_normalization(
+                    mat,
+                    scale=regression_scale_used,
+                    regression_type=regression_type_used,
+                    span=self.normalization.get("loess_span"),
+                    condition_labels=condition_labels
+                )
 
             elif method == "none":
                 print("Skipping normalization (raw data)")
@@ -323,6 +335,13 @@ class Preprocessor:
         self.intermediate_results.add_metadata("normalization",
                                                "regression_type_used",
                                                regression_type_used)
+        self.intermediate_results.add_metadata("normalization",
+                                               "span",
+                                               self.normalization.get("loess_span"))
+        self.intermediate_results.add_metadata("normalization",
+                                               "max_ma_plots",
+                                               self.exports.get("max_ma_plots", 15))
+
 
     @log_time("Imputation")
     def _impute(self) -> None:

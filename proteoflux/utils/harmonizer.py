@@ -43,6 +43,27 @@ class DataHarmonizer:
         annotation = annotation.with_columns(pl.col("FILENAME").str.strip_chars())
         df = df.with_columns(pl.col("FILENAME").str.strip_chars())
 
+        # ERROR when any annotation/data filename mismatches. Doesn't make sense to continue
+        ann_files = set(annotation.select("FILENAME").unique().to_series().to_list())
+        df_files  = set(df.select("FILENAME").unique().to_series().to_list())
+
+        only_in_ann = sorted(ann_files - df_files)
+        only_in_df  = sorted(df_files - ann_files)
+
+        if only_in_ann or only_in_df:
+            msg_parts = []
+            if only_in_ann:
+                msg_parts.append(
+                    f"Annotation file {self.annotation_file!r} contains {len(only_in_ann)} filenames not present in the data: {only_in_ann}"
+                )
+            if only_in_df:
+                msg_parts.append(
+                    f"Data contains {len(only_in_df)} filenames not found in annotation: {only_in_df}"
+                )
+            full_msg = "Filename mismatch detected:\n  " + "\n  ".join(msg_parts)
+            logger.error(full_msg)
+            raise ValueError(full_msg)
+
         # Now safe to join
         df = df.join(annotation, on="FILENAME", how="left")
 

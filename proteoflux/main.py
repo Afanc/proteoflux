@@ -35,8 +35,8 @@ def main():
     config = {
             "dataset":
             {
-                #"input_file": "full_test2.tsv",
-                "input_file": "searle_test.tsv",
+                "input_file": "full_test2.tsv",
+                #"input_file": "searle_test.tsv",
                 "annotation_file": "annotation_test.tsv",
                 "index_column": "PG.ProteinGroups",
                 "signal_column": "FG.MS2RawQuantity",
@@ -47,8 +47,8 @@ def main():
                 "replicate_column": "R.Replicate",
                 "filename_column": "R.FileName",
                 "run_evidence_column": "PG.RunEvidenceCount",
-                "fasta_column": "PG.FastaHeaders",
-                #"fasta_column": "PG.FastaFiles",
+                #"fasta_column": "PG.FastaHeaders",
+                "fasta_column": "PG.FastaFiles",
                 "protein_weight": "PG.MolecularWeight",
                 "protein_descriptions": "PG.ProteinDescriptions",
                 "gene_names": "PG.Genes",
@@ -64,7 +64,7 @@ def main():
                 },
                 "normalization":
                 {
-                    "method": ["log2", "median_equalization"],
+                    "method": ["log2", "local_loess"],
                     "loess_span": 0.9
                 },
                 "imputation":

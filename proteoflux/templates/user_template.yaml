@@ -20,7 +20,7 @@ preprocessing:
     pep: 0.003
     run_evidence_count: 3
     contaminants_files:
-      - "Contaminants_2022.fasta"
+      - "/mnt/NAS/Shared/fasta_files/Contaminants_2022.fasta"
   normalization:
     method:
       - "log2"
@@ -43,6 +43,7 @@ preprocessing:
     imputation_plots: true
     normalization_plot_path: "0_normalization_plots.pdf"
     imputation_plot_path: "1_imputation_plots.pdf"
+    max_ma_plots: 15
 
 analysis:
   use_r_limma: false

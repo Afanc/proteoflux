@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Optional, Union
+import warnings
 
 import numpy as np
 import seaborn as sns
@@ -12,6 +13,7 @@ from skmisc.loess import loess
 from proteoflux.export.plot_utils import plot_violin_on_axis, plot_aggregated_violin, plot_histogram, plot_MA
 from proteoflux.evaluation.evaluation_utils import compute_metrics, aggregate_metrics, prepare_long_df
 from proteoflux.dataset.intermediateresults import IntermediateResults
+from proteoflux.workflow.normalizers.regression_normalization import compute_reference_values
 from proteoflux.utils.utils import logger, log_time
 
 class NormalizerPlotter:
@@ -44,8 +46,9 @@ class NormalizerPlotter:
 
         self.normalization_method = self.results.metadata.get("normalization").get("method")
         self.models = self.results.models["normalization"]
-        self.scale = self.results.metadata["normalization"].get("scale", "global")
-        self.regression_type = self.results.metadata["normalization"].get("regression_type", "loess")
+        self.scale = self.results.metadata["normalization"].get("regression_scale_used", "global")
+        self.regression_type = self.results.metadata["normalization"].get("regression_type_used", "loess")
+        self.span = self.results.metadata["normalization"].get("span")
 
     @log_time("Normalization - plotting")
     def plot_all(self, filename: Union[str, Path] = "normalization_plots.pdf") -> None:
@@ -281,9 +284,6 @@ class NormalizerPlotter:
 
     def _plot_MA_plots(
         self,
-        scale: str = "global",
-        regression_type: Optional[str] = "loess",
-        span: float = 0.3,
         before_label: str = "Before",
         after_label: str = "After",
         before_color: str = "blue",
@@ -299,24 +299,46 @@ class NormalizerPlotter:
         normalized_mat = np.clip(self.normalized_df.to_numpy(), 1e-10, None)
         columns = self.original_df.columns
 
+        # Define max number of plots
+        max_ma_plots = self.results.metadata.get("normalization", {}).get("max_ma_plots")
+        if original_mat.shape[1] > max_ma_plots:
+            sample_indices = np.linspace(0, original_mat.shape[1]-1, min(max_ma_plots, original_mat.shape[1]), dtype=int)
+        else:
+            sample_indices = range(original_mat.shape[1])
+
+        # and regression type
         scale = self.scale
         regression_type = self.regression_type
+        span = self.span
 
-        # Choose reference (global or local)
-        if scale == "global":
-            reference_values = np.nanmean(original_mat, axis=1)
-        else:
-            reference_values = original_mat[:, 0]
-            reference_values = np.where(np.isnan(reference_values), np.nanmean(original_mat, axis=1), reference_values)
+        # rebuild the same per-sample condition_labels
+        sample_names = list(self.original_df.columns)
+        cond_df = self.results.dfs["condition_pivot"].to_pandas()
 
-        for sample_idx in range(original_mat.shape[1]):
+        # Standardize columns: rename all to lowercase for consistency
+        cond_df.columns = [c.lower() for c in cond_df.columns]
+        cond_map = cond_df.set_index("sample")["condition"].to_dict()
+        condition_labels = [cond_map[s] for s in sample_names]
+
+        # returns (n_prots x n_samps)
+        reference_matrix = compute_reference_values(
+            original_mat, scale, condition_labels
+        )
+
+        for sample_idx in sample_indices:
             fig, (ax_before, ax_after) = plt.subplots(1, 2, figsize=(15, 6))
+            sample_vals = original_mat[:, sample_idx]
+            sample_vals_after = normalized_mat[:, sample_idx]
 
-            M_before = np.nanmean(original_mat, axis=1)
-            A_before = original_mat[:, sample_idx] - reference_values
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="Mean of empty slice", category=RuntimeWarning)
+                ref_vals = reference_matrix[:, sample_idx]
+                M_before = (sample_vals + ref_vals) / 2
+                A_before = sample_vals - ref_vals
 
-            M_after = np.nanmean(normalized_mat, axis=1)
-            A_after = normalized_mat[:, sample_idx] - reference_values
+                ref_vals = reference_matrix[:, sample_idx]
+                M_after = (sample_vals_after + ref_vals) / 2
+                A_after = sample_vals_after - ref_vals
 
             model = self.models[sample_idx] if self.models else None
             sample_name = columns[sample_idx]
@@ -333,14 +355,15 @@ class NormalizerPlotter:
                 regression_type=regression_type,
                 refit=False,
                 random_state=42,
-                #title=f"MA Plot ({before_label}) - {sample_name}",
-                #title=f"{before_label} - {sample_name}",
                 xlabel="M (Mean Intensity)",
                 ylabel="A (Log-ratio or Difference)",
                 show_legend=show_legend,
             )
 
             reg_label = after_label if model is not None else "Indicative"
+            if regression_type is None:
+                regression_type = "loess"
+
             plot_MA(
                 ax=ax_after,
                 M=M_after,
@@ -353,8 +376,6 @@ class NormalizerPlotter:
                 regression_type=regression_type,
                 refit=True,
                 random_state=42,
-                #title=f"MA Plot ({after_label}) - {sample_name}",
-                #title=f"{after_label} - {sample_name}",
                 xlabel="M (Mean Intensity)",
                 ylabel="A (Log-ratio or Difference)",
                 show_legend=show_legend,

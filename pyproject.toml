@@ -26,6 +26,7 @@ dependencies = [
     "polars",
     "openpyxl",
     "xlsxwriter",
+    "rpy2",
 ]
 
 [project.scripts]

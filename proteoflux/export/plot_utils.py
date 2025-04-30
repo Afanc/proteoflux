@@ -171,7 +171,20 @@ def plot_MA(
     M_clean = M[mask]
     A_clean = A[mask]
 
-    ax.scatter(M_clean, A_clean, color=color, alpha=0.2, label=label, s=8, zorder=2)
+    density = None
+    if M_clean.shape[0] > 2000: #super hard-coded but I think that's fine
+        xy = np.vstack([M_clean, A_clean])
+        density = gaussian_kde(xy)(xy)
+
+    ax.scatter(M_clean,
+               A_clean,
+               c=density if density is not None else color,
+               cmap="viridis" if density is not None else None,
+               alpha=0.2,
+               label=label,
+               s=8,
+               zorder=2)
+
     ax.axhline(y=0, color='black', linestyle='--', linewidth=1)
     ax.set_ylim(*ylim)
 
@@ -301,6 +314,61 @@ def plot_missing_corr_heatmap(
     additional_title: Optional[str] = None
 ):
     """
+    Plots a correlation heatmap of missing values.
+
+    Uses msno.heatmap for small datasets (≤15 samples),
+    falls back to seaborn heatmap of pairwise correlation between missingness vectors for larger ones.
+
+    Args:
+        data (pd.DataFrame): DataFrame containing missing values.
+    """
+    n_samples = data.shape[1]
+
+    plt.figure(figsize=figsize)
+
+    if n_samples > 15:
+        # Use seaborn heatmap for large sample sets
+        missing_bin = data.isna().astype(int)
+        corr = np.corrcoef(missing_bin.T)
+
+        sns.heatmap(
+            corr,
+            xticklabels=data.columns,
+            yticklabels=data.columns,
+            cmap="coolwarm",
+            vmin=-1,
+            vmax=1,
+            square=True,
+            cbar_kws={"shrink": 0.8}
+        )
+        plt.title(suptitle or title, fontsize=16)
+        if additional_title:
+            plt.suptitle(additional_title, fontsize=10, y=1.05)
+
+    else:
+        # Use msno.heatmap for smaller sets
+        msno.heatmap(data, figsize=figsize, fontsize=fontsize)
+        if adjust_params is None:
+            adjust_params = {"left": 0.25, "bottom": 0.25, "top": 0.85}
+        plt.subplots_adjust(**adjust_params)
+        plt.suptitle(suptitle if suptitle is not None else title, fontsize=20, y=0.955)
+        if additional_title:
+            plt.title(
+                "Nullity correlation: -1 (mutual exclusivity), 0 (independent), +1 (co-occurring)",
+                fontsize=10,
+                y=1.05
+            )
+
+def old_plot_missing_corr_heatmap(
+    data: pd.DataFrame,
+    figsize: Tuple[int, int] = (12, 8),
+    fontsize: int = 8,
+    title: str = "Missing Values Correlation Heatmap",
+    adjust_params: Optional[Dict[str, float]] = None,
+    suptitle: Optional[str] = None,
+    additional_title: Optional[str] = None
+):
+    """
     Plots a correlation heatmap of missing values using msno.heatmap.
 
     Args:
@@ -394,7 +462,6 @@ def plot_cluster_heatmap(
     colorbar.set_position([.05, .4, .02, .3])
     if binary_labels is not None:
         colorbar.set_yticklabels(binary_labels)
-    #colorbar.set_yticklabels(binary_labels)
 
     # If a legend mapping is provided, create a legend accordingly.
     if legend_title and legend_mapping is not None:
@@ -507,27 +574,6 @@ def plot_regression_scatter(
             marker='o',
             **scatter_kwargs
         )
-
-#
-#    # Compute density using gaussian_kde
-#    xy = np.vstack([true_vals, imputed_vals])
-#    density = gaussian_kde(xy)(xy)
-#
-#    # Compute metrics
-#    r2_mean, r2_std = results_df["r2"].mean(), results_df["r2"].std()
-#    rmae_mean, rmae_std = results_df["rmae"].mean(), results_df["rmae"].std()
-#
-#    # Create figure and axis
-#    fig, ax = plt.subplots(figsize=figsize)
-#
-#    # Scatter plot with density coloring
-#    scatter = ax.scatter(true_vals, imputed_vals, c=density, cmap=cmap, **scatter_kwargs)
-#    ax.plot(
-#        [true_vals.min(), true_vals.max()],
-#        [true_vals.min(), true_vals.max()],
-#        color=line_color,
-#        **line_kwargs
-#    )
 
     # Add colorbar for density
     cbar = fig.colorbar(scatter, ax=ax)
