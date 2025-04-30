@@ -44,20 +44,20 @@ class StatisticalTester:
             "q": q_val,
         }
 
-    def compute_missingness(self, qvalue_matrix: np.ndarray, conditions: List[str]) -> pd.DataFrame:
-        """
-        Returns a DataFrame of shape (proteins x conditions) with ratio of missing q-values.
-        """
-        n_proteins, n_samples = qvalue_matrix.shape
-        df = pd.DataFrame(qvalue_matrix, columns=conditions)
+    def compute_missingness(self, intensity_matrix: np.ndarray, conditions: List[str]) -> pd.DataFrame:
+        condition_array = np.array(conditions)
+        unique_conditions = np.unique(condition_array)
 
+        # Proceed with regular missingness calculation
         ratios = {}
-        for condition in np.unique(conditions):
-            mask = (np.array(conditions) == condition)
-            ratio = np.isnan(qvalue_matrix[:, mask]).sum(axis=1) / mask.sum()
-            ratios[condition] = ratio
+        for cond in unique_conditions:
+            mask = condition_array == cond
+            submatrix = intensity_matrix[:, mask]
+            ratio = np.isnan(submatrix).sum(axis=1) / mask.sum()
+            ratios[cond] = ratio
 
-        return pd.DataFrame(ratios, index=self.protein_ids)
+        df = pd.DataFrame(ratios, index=self.protein_ids)
+        return df
 
     def export_to_anndata(self, adata, stats_dict, missingness_dict):
         """

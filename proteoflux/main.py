@@ -30,6 +30,8 @@ def run_pipeline(config: dict):
     if export_config.get("export_h5ad", True):
         exporter.export_adata(export_config.get("path_h5ad"))
 
+    #debug_protein_view(adata, "Q29RF7")
+
 @log_time("Proteoflux Pipeline - Dev")
 def main():
     config = {

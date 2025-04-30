@@ -171,8 +171,9 @@ def plot_MA(
     M_clean = M[mask]
     A_clean = A[mask]
 
+    # density when lots of datapoints, super hard-coded but I think that's fine
     density = None
-    if M_clean.shape[0] > 2000: #super hard-coded but I think that's fine
+    if M_clean.shape[0] > 2000 and np.std(A_clean) > 1e-6 and np.std(M_clean) > 1e-6:
         xy = np.vstack([M_clean, A_clean])
         density = gaussian_kde(xy)(xy)
 
@@ -518,6 +519,15 @@ def plot_regression_scatter(
         scatter_kwargs = {"s": 10, "alpha": 0.5}
     if line_kwargs is None:
         line_kwargs = {"lw": 1.5, "linestyle": "--"}
+
+    # also super hard-coded but I think that's fine. Kde will explode otherwise.
+    max_points = 5000
+    if true_vals.shape[0] > max_points:
+        idx = np.random.choice(true_vals.shape[0], size=max_points, replace=False)
+        true_vals = true_vals[idx]
+        imputed_vals = imputed_vals[idx]
+        if orig_imputed_mask is not None:
+            orig_imputed_mask = orig_imputed_mask[idx]
 
     # Compute density
     xy = np.vstack([true_vals, imputed_vals])

@@ -148,7 +148,8 @@ class DifferentialExpressionPlotter:
         plt.close(fig)
 
     def _plot_volcano_plots(self):
-        sign_threshold = self.analysis_config.get("volcano_sign_threshold", 0.05)
+        sign_threshold = self.analysis_config.get("sign_threshold", 0.05)
+        volcano_top_annotated = self.analysis_config.get("exports").get("volcano_top_annotated", 10)
 
         for i, name in enumerate(self.contrast_names):
             logfc = self.log2fc[:, i]
@@ -190,7 +191,7 @@ class DifferentialExpressionPlotter:
                     sig_mask = (logfc > 0) if direction == "up" else (logfc < 0)
                     sig_mask &= (qvals < sign_threshold) & ~both_missing
 
-                    top = np.argsort(qvals[sig_mask])[:10]
+                    top = np.argsort(qvals[sig_mask])[:volcano_top_annotated]
                     selected = np.where(sig_mask)[0][top]
 
                     for j in selected:

@@ -60,9 +60,9 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     adata.varm["q_ebayes"] = bayes_stats["q_ebayes"]
 
     # missingness per contrast
-    qvals = adata.layers["qvalue"].T
+    raw_matrix = adata.layers["raw"].T
     conditions = adata.obs[config["design"]["group_column"]].values
-    miss = tester.compute_missingness(qvals, conditions)
+    miss = tester.compute_missingness(raw_matrix, conditions)
     adata.uns["missingness"] = miss
 
     return adata
