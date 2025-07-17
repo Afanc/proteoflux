@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 from proteoflux.evaluation.evaluation_utils import prepare_long_df, aggregate_metrics
-from proteoflux.panel_app.components.plot_utils import plot_stacked_proteins_by_category, plot_violins, compute_metric_by_condition, get_color_map, plot_cluster_heatmap_plotly
+from proteoflux.panel_app.components.plot_utils import plot_stacked_proteins_by_category, plot_violins, compute_metric_by_condition, get_color_map, plot_cluster_heatmap_plotly, plot_volcanoes
 from proteoflux.panel_app.components.normalization_plots import plot_cv_by_condition #better, other place
 
 from proteoflux.utils.utils import logger, log_time
@@ -115,4 +115,29 @@ def plot_h_clustering_heatmap(im):
         cond_series=cond_ser.reindex(df_z.columns),
         title="Clustergram of All Samples"
     )
+    return fig
+
+@log_time("Plotting Volcano Plots")
+def plot_volcanoes_wrapper(
+    state,
+    sign_threshold: float = 0.05,
+    width: int = 900,
+    height: int = 600,
+    show_measured: bool = True,
+    show_imp_cond1:  bool = True,
+    show_imp_cond2:  bool = True,
+    contrast: str = None,
+) -> go.Figure:
+    # simply forward the SessionState + args into the pure util
+    fig =  plot_volcanoes(
+        state=state,               # if `im` is your SessionState
+        contrast=contrast,
+        sign_threshold=sign_threshold,
+        width=width,
+        height=height,
+        show_measured=show_measured,
+        show_imp_cond1=show_imp_cond1,
+        show_imp_cond2=show_imp_cond2
+    )
+
     return fig

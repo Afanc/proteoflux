@@ -671,6 +671,360 @@ def plot_cluster_heatmap_plotly(
 
     return fig
 
+@log_time("Plotting Volcano Plots")
+def plot_volcanoes(
+    state,
+    contrast: str,
+    sign_threshold: float = 0.05,
+    width: int = 900,
+    height: int = 600,
+    show_measured: bool = True,
+    show_imp_cond1: bool = True,
+    show_imp_cond2: bool = True,
+) -> go.Figure:
+    """
+    Single‐contrast volcano with separate toggles for:
+      • measured in both
+      • imputed in condition1
+      • imputed in condition2
+    """
+    adata = state.adata
+    # prepare data
+    df_fc = pd.DataFrame(
+        adata.varm["log2fc"],
+        index=adata.var_names,
+        columns=adata.uns["contrast_names"]
+    )
+    df_q  = pd.DataFrame(
+        adata.varm.get("q_ebayes", adata.varm["q"]),
+        index=adata.var_names,
+        columns=adata.uns["contrast_names"]
+    )
+    x = df_fc[contrast]
+    y = -np.log10(df_q[contrast])
+
+    # missingness masks
+    miss = pd.DataFrame(adata.uns["missingness"])
+    grp1, grp2 = contrast.split("_vs_")
+    a = miss[grp1].values >= 1.0
+    b = miss[grp2].values >= 1.0
+    measured_mask = (~a & ~b)
+    imp1_mask     = (a & ~b)
+    imp2_mask     = (b & ~a)
+
+    # significance coloring
+    sig_up   = (df_q[contrast] < sign_threshold) & (x > 0)
+    sig_down = (df_q[contrast] < sign_threshold) & (x < 0)
+    colors   = np.where(sig_up, "red",
+                np.where(sig_down, "blue", "gray"))
+
+    fig = go.Figure()
+
+    # measured
+    if show_measured:
+        fig.add_trace(go.Scattergl(
+            x=x[measured_mask], y=y[measured_mask],
+            mode="markers",
+            marker=dict(symbol="circle",
+                        color=colors[measured_mask],
+                        size=6),
+            name="Observed in both",
+            text=adata.var["GENE_NAMES"][measured_mask],
+            hovertemplate="Gene: %{text}<br>log2FC: %{x:.2f}<br>-log10(q): %{y:.2f}<extra></extra>"
+        ))
+    # imputed cond1
+    if show_imp_cond1:
+        fig.add_trace(go.Scattergl(
+            x=x[imp1_mask], y=y[imp1_mask],
+            mode="markers",
+            marker=dict(symbol="triangle-up",
+                        color=colors[imp1_mask],
+                        size=6, opacity=0.5),
+            name=f"Imputed in {grp1}",
+            text=adata.var["GENE_NAMES"][imp1_mask],
+            hovertemplate="Gene: %{text}<br>log2FC: %{x:.2f}<br>-log10(q): %{y:.2f}<extra></extra>"
+        ))
+    # imputed cond2
+    if show_imp_cond2:
+        fig.add_trace(go.Scattergl(
+            x=x[imp2_mask], y=y[imp2_mask],
+            mode="markers",
+            marker=dict(symbol="triangle-down",
+                        color=colors[imp2_mask],
+                        size=6, opacity=0.5),
+            name=f"Imputed in {grp2}",
+            text=adata.var["GENE_NAMES"][imp2_mask],
+            hovertemplate="Gene: %{text}<br>log2FC: %{x:.2f}<br>-log10(q): %{y:.2f}<extra></extra>"
+        ))
+
+    # threshold & axes with padding
+    thr_y = -np.log10(sign_threshold)
+    all_x = np.concatenate([
+        x[measured_mask] if show_measured else np.array([]),
+        x[imp1_mask]     if show_imp_cond1 else np.array([]),
+        x[imp2_mask]     if show_imp_cond2 else np.array([]),
+    ])
+    all_y = np.concatenate([
+        y[measured_mask] if show_measured else np.array([]),
+        y[imp1_mask]     if show_imp_cond1 else np.array([]),
+        y[imp2_mask]     if show_imp_cond2 else np.array([]),
+    ])
+    if all_x.size == 0:
+        # no points to show → default safe view
+        xmin, xmax = -1.0, 1.0
+        ymin, ymax = 0.0, 1.0
+    else:
+        xmin, xmax = float(all_x.min()), float(all_x.max())
+        ymin, ymax = float(all_y.min()), float(all_y.max())
+    pad_x = (xmax - xmin) * 0.05
+    pad_y = (ymax - ymin) * 0.05
+
+    fig.update_layout(
+        title=dict(text=f"{contrast}",
+                        x=0.5),
+        showlegend=False,
+        shapes=[
+            dict(type="line",
+                 x0=xmin-pad_x, x1=xmax+pad_x,
+                 y0=thr_y,      y1=thr_y,
+                 line=dict(color="black", dash="dash")),
+            dict(type="line",
+                 x0=0,           x1=0,
+                 y0=ymin-pad_y,  y1=ymax+pad_y,
+                 line=dict(color="black", dash="dash")),
+        ],
+        xaxis=dict(title="log2 Fold Change", range=[xmin-pad_x, xmax+pad_x]),
+        yaxis=dict(title="-log10(q-value)",    range=[ymin-pad_y, ymax+pad_y]),
+        width=width, height=height,
+    )
+
+    # annotations
+    up   = int(((x > 0) & (df_q[contrast] < sign_threshold) & np.isin(x, all_x)).sum())
+    down = int(((x < 0) & (df_q[contrast] < sign_threshold) & np.isin(x, all_x)).sum())
+    rest = int(len(all_x) - up - down)
+    fig.update_layout(annotations=[
+        dict(x=0.05, y=0.95, xref="paper", yref="paper",
+             text=f"<b>{down}</b>", bgcolor="blue", font=dict(color="white"), showarrow=False),
+        dict(x=0.4875, y=0.95, xref="paper", yref="paper",
+             text=f"<b>{rest}</b>", bgcolor="lightgrey", font=dict(color="black"), showarrow=False),
+        dict(x=0.95, y=0.95, xref="paper", yref="paper",
+             text=f"<b>{up}</b>", bgcolor="red", font=dict(color="white"), showarrow=False),
+    ])
+
+    return fig
+
+def plot_volcanoes_works(
+    state,
+    sign_threshold: float = 0.05,
+    width: int = 900,
+    height: int = 600,
+) -> go.Figure:
+    """
+    A single Figure showing all contrasts as traces, with a dropdown
+    menu to select which volcano is visible.
+    """
+    # 1) grab DE results
+    adata = state.adata
+    contrasts = adata.uns.get(
+        "contrast_names",
+        [f"C{i}" for i in range(adata.varm["log2fc"].shape[1])]
+    )
+    df_fc = pd.DataFrame(
+        adata.varm["log2fc"], index=adata.var_names, columns=contrasts
+    )
+    df_q = pd.DataFrame(
+        adata.varm.get("q_ebayes", adata.varm["q"]),
+        index=adata.var_names,
+        columns=contrasts
+    )
+
+    # 2) get missingness per protein × condition
+    miss_df = pd.DataFrame(adata.uns.get("missingness", {}))  # vars × conditions :contentReference[oaicite:5]{index=5}
+
+    fig = go.Figure()
+
+    # 3) build two traces per contrast
+    for i, c in enumerate(contrasts):
+        # split into group1 vs group2
+        group1, group2 = c.split("_vs_")
+        missing_a = miss_df[group1].values >= 1.0
+        missing_b = miss_df[group2].values >= 1.0
+        both_missing    = missing_a & missing_b
+        measured_mask   = (~missing_a) & (~missing_b)
+        imp_a_mask      = missing_a & ~missing_b   # imputed in group1 only
+        imp_b_mask      = missing_b & ~missing_a   # imputed in group2 only
+
+        # fold‐change & sign‐stats
+        x = df_fc[c]
+        y = -np.log10(df_q[c])
+        sig_up   = (df_q[c] < sign_threshold) & (x > 0)
+        sig_down = (df_q[c] < sign_threshold) & (x < 0)
+        colors   = np.where(sig_up, "red",
+                     np.where(sig_down, "blue", "gray"))
+
+        # measured (circles)
+        fig.add_trace(go.Scattergl(
+            x=x[measured_mask], y=y[measured_mask],
+            mode="markers",
+            marker=dict(symbol="circle",
+                        color=colors[measured_mask],
+                        size=6),
+            name=f"Observed in both",
+            visible=(i == 0),
+            text=adata.var["GENE_NAMES"][measured_mask],
+            hovertemplate=(
+                "Gene: %{text}<br>"
+                "log2FC: %{x:.2f}<br>"
+                "-log10(q): %{y:.2f}<extra></extra>"
+            )
+        ))
+
+        # imputed (triangles)
+        fig.add_trace(go.Scattergl(
+            x=x[imp_a_mask], y=y[imp_a_mask],
+            mode="markers",
+            marker=dict(symbol="triangle-up",
+                        color=colors[imp_a_mask],
+                        size=6,
+                        opacity=0.5),
+            name=f"Fully Imputed in {group1}",
+            visible=(i == 0),
+            text=adata.var["GENE_NAMES"][imp_a_mask],
+            hovertemplate=(
+                "Gene: %{text}<br>"
+                "log2FC: %{x:.2f}<br>"
+                "-log10(q): %{y:.2f}<extra></extra>"
+            )
+        ))
+
+        # imputed in group2 (triangle-down)
+        fig.add_trace(go.Scattergl(
+            x=x[imp_b_mask], y=y[imp_b_mask],
+            mode="markers",
+            marker=dict(symbol="triangle-down",
+                        color=colors[imp_b_mask],
+                        size=6,
+                        opacity=0.5),
+            name=f"Fully Imputed in {group2}",
+            visible=(i == 0),
+            text=adata.var["GENE_NAMES"][imp_b_mask],
+            hovertemplate=(
+                "Gene: %{text}<br>"
+                "log2FC: %{x:.2f}<br>"
+                "-log10(q): %{y:.2f}<extra></extra>"
+            )
+        ))
+
+    # 4) compute per-contrast ranges & dashed threshold/zero lines
+    thr_y = -np.log10(sign_threshold)
+    margin = 0.05
+    x_ranges = {}
+    y_ranges = {}
+    shapes_map = {}
+    for c in contrasts:
+        xi = df_fc[c]
+        yi = -np.log10(df_q[c])
+        # combine only plotted points (never both_missing)
+        # but since both_missing not plotted, we can use full xi/yi
+        xmin, xmax = float(xi.min()), float(xi.max())
+        ymin, ymax = float(yi.min()), float(yi.max())
+        pad_x = (xmax - xmin) * margin
+        pad_y = (ymax - ymin) * margin
+        x_ranges[c] = [xmin - pad_x, xmax + pad_x]
+        y_ranges[c] = [ymin - pad_y, ymax + pad_y]
+        shapes_map[c] = [
+            dict(type="line",
+                 x0=x_ranges[c][0], x1=x_ranges[c][1],
+                 y0=thr_y,         y1=thr_y,
+                 line=dict(color="black", dash="dash")),
+            dict(type="line",
+                 x0=0,               x1=0,
+                 y0=y_ranges[c][0],  y1=y_ranges[c][1],
+                 line=dict(color="black", dash="dash")),
+        ]
+
+    # 4a) build per‐contrast annotation boxes
+    annotations_map = {}
+    for c in contrasts:
+        x = df_fc[c]
+        q = df_q[c]
+        # counts
+        up_count   = int(((q < sign_threshold) & (x >  0)).sum())
+        down_count = int(((q < sign_threshold) & (x <  0)).sum())
+        rest_count = int(len(x) - up_count - down_count)
+
+        annotations_map[c] = [
+            dict(
+                x=0.05, y=0.95,                   # left
+                xref="paper", yref="paper",
+                text=f"<b>{up_count}</b>",
+                showarrow=False,
+                align="center",
+                bgcolor="blue",
+                font=dict(color="white")
+            ),
+            dict(
+                x=0.4875, y=0.95,                   # center
+                xref="paper", yref="paper",
+                text=f"<b>{rest_count}</b>",
+                showarrow=False,
+                align="center",
+                bgcolor="lightgrey",
+                font=dict(color="black")
+            ),
+            dict(
+                x=0.95, y=0.95,                   # right
+                xref="paper", yref="paper",
+                text=f"<b>{down_count}</b>",
+                showarrow=False,
+                align="center",
+                bgcolor="red",
+                font=dict(color="white")
+            ),
+        ]
+
+    # 5) initial layout using first contrast
+    first = contrasts[0]
+    fig.update_layout(
+        title=dict(text=f"Volcano Plot: {first}",
+                        x=0.5),
+        xaxis=dict(title="log2 Fold Change", range=x_ranges[first]),
+        yaxis=dict(title="-log10(q-value)",    range=y_ranges[first]),
+        shapes=shapes_map[first],
+        annotations= annotations_map[first],
+        width=width, height=height,
+    )
+
+    # 6) dropdown to toggle which pair of traces is visible
+    buttons = []
+    n_tr = len(contrasts) * 3
+    for i, c in enumerate(contrasts):
+        # each block of 3 traces (measured, imp_A, imp_B) belongs to contrast i
+        vis = [(j // 3 == i) for j in range(n_tr)]
+        buttons.append(dict(
+            label=c,
+            method="update",
+            args=[
+                {"visible": vis},
+                {
+                    "title.text": f"Volcano Plot: {c}",
+                    "xaxis.range": x_ranges[c],
+                    "yaxis.range": y_ranges[c],
+                    "shapes": shapes_map[c],
+                    "annotations":  annotations_map[c],   # ← new!
+                }
+            ]
+        ))
+    fig.update_layout(updatemenus=[dict(
+        active=0,
+        buttons=buttons,
+        x=0, y=1.1,
+        xanchor="left", yanchor="top",
+    )])
+
+    return fig
+
+
 def plot_histogram_plotly(
     df: Optional[pd.DataFrame] = None,
     value_col: str = "Intensity",

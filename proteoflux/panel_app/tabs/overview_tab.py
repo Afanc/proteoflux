@@ -3,7 +3,8 @@ from proteoflux.panel_app.session_state import SessionState
 from proteoflux.panel_app.components.overview_plots import (
     plot_barplot_proteins_per_sample,
     plot_violin_cv_rmad_per_condition,
-    plot_h_clustering_heatmap
+    plot_h_clustering_heatmap,
+    plot_volcanoes_wrapper
 )
 from proteoflux.panel_app.components.plot_utils import plot_pca_2d, plot_umap_2d
 from proteoflux.panel_app.components.texts import (
@@ -14,12 +15,6 @@ from proteoflux.utils.utils import logger, log_time
 
 pn.extension("plotly")
 
-# this doesn't do anything !
-#pn.extension(
-#    template="fast",
-#    loading_spinner="dots",
-#    loading_color="#00aa41",
-#)
 
 @log_time("Preparing Overview Tab")
 def overview_tab(state: SessionState):
@@ -43,32 +38,76 @@ def overview_tab(state: SessionState):
     cv_pane   = pn.pane.Plotly(cv_fig,  height=500, sizing_mode="stretch_width")
 
     ## UMAP and PCA
-    pca_pane = pn.pane.Plotly(plot_pca_2d(state.adata),
-                              height=500,
-                              sizing_mode="stretch_width")
-    umap_pane = pn.pane.Plotly(plot_umap_2d(state.adata),
-                               height=600,
-                               sizing_mode="stretch_width")
+    #pca_pane = pn.pane.Plotly(plot_pca_2d(state.adata),
+    #                          height=500,
+    #                          sizing_mode="stretch_width")
+    #umap_pane = pn.pane.Plotly(plot_umap_2d(state.adata),
+    #                           height=600,
+    #                           sizing_mode="stretch_width")
 
-    ## hierch. clustering
-
-    # this doesn't do anything !
-    #def _make_cluster_plot():
-    #    # this only runs when the pane actually needs to render
-    #    return plot_h_clustering_heatmap(im)
-
-    #h_clustering_pane = pn.panel(
-    #    _make_cluster_plot,
-    #    loading=True,            # show spinner while _make_cluster_plot runs
-    #    height=800,
-    #    sizing_mode="stretch_width"
-    #)
-
-    h_clustering_pane = pn.pane.Plotly(plot_h_clustering_heatmap(im),
-                                       height=800,
-                                       sizing_mode="stretch_width")
+    #h_clustering_pane = pn.pane.Plotly(plot_h_clustering_heatmap(im),
+    #                                   height=800,
+    #                                   sizing_mode="stretch_width")
 
     ## Volcanoes
+    contrasts = state.adata.uns["contrast_names"]
+
+    contrast_sel = pn.widgets.Select(
+        name="Contrast",
+        options=contrasts,
+        value=contrasts[0],
+    )
+    show_measured = pn.widgets.Toggle(name="Observed in Both", button_type="default", button_style="outline", value=True)
+    show_imp_cond1 = pn.widgets.Toggle(name=f"▲ Fully Imputed in {contrasts[0].split('_vs_')[0]}", button_type="default", button_style="outline", value=True)
+    show_imp_cond2 = pn.widgets.Toggle(name=f"▲ Fully Imputed in {contrasts[0].split('_vs_')[1]}", button_type="default", button_style="outline", value=True)
+
+    volcano_dmap = pn.bind(
+        plot_volcanoes_wrapper,
+        state=state,
+        contrast=contrast_sel,
+        show_measured=show_measured,
+        show_imp_cond1=show_imp_cond1,
+        show_imp_cond2=show_imp_cond2,
+        sign_threshold=0.05,
+        width=900,
+        height=600,
+    )
+
+    # 3) assemble into a layout, no legend‐based toggles
+    volcano_pane = pn.Column(
+        pn.Row(
+            contrast_sel,
+            pn.Spacer(width=160),
+            pn.Row(
+                show_measured,
+                show_imp_cond1,
+                show_imp_cond2,
+                margin=(20,0,0,0),
+            ),
+            sizing_mode="fixed",
+            width=300,
+            height=160,
+        ),
+        pn.panel(volcano_dmap,
+                 width=900,
+                 height=800,
+                 margin=(-50, 0, 0, 0)),
+        width=1200,
+        sizing_mode="stretch_width"
+    )
+    #volcano_pane = pn.Column(
+    #    pn.Row(contrast_sel, show_measured, show_imp_cond1, show_imp_cond2, sizing_mode="stretch_width"),
+    #    pn.panel(volcano_dmap, sizing_mode="stretch_width", height=600),
+    #    sizing_mode="fixed"
+    #)
+
+#    volcano_fig  = plot_volcanoes_wrapper(state, sign_threshold=0.05)
+#    volcano_pane = pn.pane.Plotly(
+#        volcano_fig,
+#        height=600,
+#        sizing_mode="stretch_width"
+#    )
+
 
     # Texts
     intro_text = pn.pane.Markdown("some config text",
@@ -86,9 +125,10 @@ def overview_tab(state: SessionState):
         pn.pane.Markdown("##   Metrics per Condition"),
         pn.Row(rmad_pane, cv_pane, sizing_mode="stretch_width"),
         pn.pane.Markdown("##   Clustering"),
-        pn.Row(pca_pane, umap_pane, sizing_mode="stretch_width"),
-        h_clustering_pane,
+        #pn.Row(pca_pane, umap_pane, sizing_mode="stretch_width"),
+        #h_clustering_pane,
         pn.pane.Markdown("##   Volcano plots"),
+        volcano_pane,
 
         sizing_mode="stretch_both",
     )
