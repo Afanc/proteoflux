@@ -28,7 +28,7 @@ class Dataset:
 
         # Dataset-specific config
         dataset_cfg = kwargs.get("dataset", {})
-        self.file_path = dataset_cfg.get("input_file", "whatever.tsv")
+        self.file_path = dataset_cfg.get("input_file", None)
         self.load_method = dataset_cfg.get("load_method", 'polars')
 
         # Harmonizer setup
@@ -90,13 +90,6 @@ class Dataset:
         Returns:
             pl.DataFrame: The preprocessed data.
         """
-        # and do some sanity checks
-        #print("\n🔍 Q8N9Z9 at start:")
-        #check_prot = df.filter(df["INDEX"] == "Q3LI55;Q8IUC1;Q8IUC1").select(['CONDITION', "REPLICATE", "SIGNAL", "QVALUE", "PEP"])
-        #print(check_prot)
-        #check_prot = df.filter(df["INDEX"] == "Q3LI55;Q8IUC1;Q8IUC1").select(['CONDITION', "REPLICATE", "SIGNAL", "QVALUE", "PEP"])
-        #print(check_prot)
-
         preprocessed_results = self.preprocessor.fit_transform(df)
 
         return preprocessed_results

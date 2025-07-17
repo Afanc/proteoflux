@@ -1,12 +1,21 @@
-from proteoflux.workflow.dataset import Dataset
-from proteoflux.analysis.limma_pipeline import run_limma_pipeline
-from proteoflux.export.differential_expression_plotter import DifferentialExpressionPlotter
-from proteoflux.export.de_exporter import DEExporter
+#from proteoflux.workflow.dataset import Dataset
+#from proteoflux.analysis.limma_pipeline import run_limma_pipeline
+#from proteoflux.export.differential_expression_plotter import DifferentialExpressionPlotter
+#from proteoflux.export.de_exporter import DEExporter
 from proteoflux.utils.utils import debug_protein_view, logger, log_time
+from proteoflux.panel_app.session_state import SessionState
 
 # main.py
 @log_time("Proteoflux Pipeline")
 def run_pipeline(config: dict):
+    (SessionState()
+        .load_and_pipeline()
+        #.setup_analysis()
+        #.export_plots()
+        #.export_tables_and_h5ad()
+    )
+
+def run_pipeline_old(config: dict):
     dataset = Dataset(**config)
     adata = dataset.get_anndata()
     adata = run_limma_pipeline(adata, config)
@@ -37,9 +46,10 @@ def main():
     config = {
             "dataset":
             {
-                "input_file": "full_test2.tsv",
-                #"input_file": "searle_test.tsv",
-                "annotation_file": "annotation_test.tsv",
+                #"input_file": "full_test2.tsv",
+                "input_file": "searle_test.tsv",
+                "annotation_file": None,
+                #"annotation_file": "annotation_test.tsv",
                 "index_column": "PG.ProteinGroups",
                 "signal_column": "FG.MS2RawQuantity",
                 #"signal_column": "PG.Quantity",
@@ -49,8 +59,8 @@ def main():
                 "replicate_column": "R.Replicate",
                 "filename_column": "R.FileName",
                 "run_evidence_column": "PG.RunEvidenceCount",
-                #"fasta_column": "PG.FastaHeaders",
-                "fasta_column": "PG.FastaFiles",
+                "fasta_column": "PG.FastaHeaders",
+                #"fasta_column": "PG.FastaFiles",
                 "protein_weight": "PG.MolecularWeight",
                 "protein_descriptions": "PG.ProteinDescriptions",
                 "gene_names": "PG.Genes",
@@ -87,7 +97,7 @@ def main():
                 },
                 "exports":
                 {
-                    "normalization_plots": True,
+                    "normalization_plots": False,
                     "imputation_plots": False,
                     "normalization_plot_path": "0_normalization_plots.pdf",
                     "imputation_plot_path": "1_imputation_plots.pdf"},
@@ -99,7 +109,7 @@ def main():
                 "sign_threshold": 0.15,
                 "exports":
                 {
-                    "export_plot": True,
+                    "export_plot": False,
                     "export_table": True,
                     "export_h5ad": True,
                     "table_use_xlsx": True,
@@ -131,6 +141,7 @@ def main():
 
     export_config = analysis_config.get("exports")
     if analysis_config.get("export_table", True):
+        print(adata)
         exporter = DEExporter(adata,
                       output_path=export_config.get("path_table"),
                               use_xlsx=export_config.get("table_use_xlsx"),

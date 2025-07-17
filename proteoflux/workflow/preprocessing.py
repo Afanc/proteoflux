@@ -149,7 +149,11 @@ class Preprocessor:
         grouped by protein INDEX. Assumes all column names are capitalized.
         """
         df = self.intermediate_results.dfs["filtered_final/RE"]
-        keep_cols = {"INDEX", "FASTA_HEADERS", "GENE_NAMES", "PROTEIN_DESCRIPTIONS", "PROTEIN_WEIGHT"}
+        keep_cols = {"INDEX",
+                     "FASTA_HEADERS",
+                     "GENE_NAMES",
+                     "PROTEIN_DESCRIPTIONS",
+                     "PROTEIN_WEIGHT"}
         existing = [col for col in df.columns if col in keep_cols]
         df = df.select(existing).unique(subset=["INDEX"]).sort("INDEX")
 

@@ -62,4 +62,3 @@ class IntermediateResults:
         if step not in ["normalization", "imputation"]:
             raise ValueError("step must be 'normalization' or 'imputation'")
         self.models[step] = model
-

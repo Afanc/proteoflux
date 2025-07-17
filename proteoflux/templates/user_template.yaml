@@ -58,6 +58,7 @@ analysis:
     path_table: "3_log2fc_report.csv"
     path_h5ad: "4_processed_data.h5ad"
     umap_n_neighbors: 15
+    pca_umap_max_annotations: 15
     volcano_top_annotated: 10
 
 design:
