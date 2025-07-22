@@ -79,9 +79,9 @@ class Preprocessor:
 
         # Final step: returning the structured data class
         return PreprocessResults(
-            processed=self.intermediate_results.dfs.get("imputed"),
             filtered=self.intermediate_results.dfs.get("raw_df"),
             lognormalized=self.intermediate_results.dfs.get("postlog"),
+            processed=self.intermediate_results.dfs.get("imputed"),
             qvalues=self.intermediate_results.dfs.get("qvalues"),
             pep=self.intermediate_results.dfs.get("pep"),
             condition_pivot=self.intermediate_results.dfs.get("condition_pivot"),

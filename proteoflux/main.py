@@ -1,45 +1,41 @@
-#from proteoflux.workflow.dataset import Dataset
-#from proteoflux.analysis.limma_pipeline import run_limma_pipeline
+from proteoflux.workflow.dataset import Dataset
+from proteoflux.analysis.limma_pipeline import run_limma_pipeline
 #from proteoflux.export.differential_expression_plotter import DifferentialExpressionPlotter
-#from proteoflux.export.de_exporter import DEExporter
+from proteoflux.export.de_exporter import DEExporter
 from proteoflux.utils.utils import debug_protein_view, logger, log_time
 from proteoflux.panel_app.session_state import SessionState
 
-# main.py
+@log_time("Proteoflux Pipeline")
+#def run_pipeline(config: dict):
+#    (SessionState()
+#        .load_and_pipeline()
+#        #.setup_analysis()
+#        #.export_plots()
+#        #.export_tables_and_h5ad()
+#    )
+
 @log_time("Proteoflux Pipeline")
 def run_pipeline(config: dict):
-    (SessionState()
-        .load_and_pipeline()
-        #.setup_analysis()
-        #.export_plots()
-        #.export_tables_and_h5ad()
-    )
-
-def run_pipeline_old(config: dict):
     dataset = Dataset(**config)
     adata = dataset.get_anndata()
     adata = run_limma_pipeline(adata, config)
 
     analysis_config = config.get("analysis", {})
-    plotter = DifferentialExpressionPlotter(adata,
-                                            analysis_config)
+    #plotter = DifferentialExpressionPlotter(adata,
+    #                                        analysis_config)
 
-    if analysis_config.get("export_plot", True):
-        plotter.plot_all()
+    #if analysis_config.get("export_plot", True):
+    #    plotter.plot_all()
 
     export_config = analysis_config.get("exports")
     if analysis_config.get("export_table", True):
         exporter = DEExporter(adata,
                       output_path=export_config.get("path_table"),
-                              use_xlsx=export_config.get("table_use_xlsx"),
                               sig_threshold=analysis_config.get("sign_threshold"),
                              )
         exporter.export()
 
-    if export_config.get("export_h5ad", True):
-        exporter.export_adata(export_config.get("path_h5ad"))
-
-    #debug_protein_view(adata, "Q29RF7")
+    exporter.export_adata(export_config.get("path_h5ad"))
 
 @log_time("Proteoflux Pipeline - Dev")
 def main():

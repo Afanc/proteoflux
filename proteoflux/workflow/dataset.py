@@ -99,12 +99,14 @@ class Dataset:
         """Convert the data to an AnnData object for downstream analysis."""
 
         # Extract matrices
-        filtered_mat = self.preprocessed_data.filtered
-        processed_mat = self.preprocessed_data.processed
-        lognorm_mat = self.preprocessed_data.lognormalized
+        # store unfiltered ?
+        filtered_mat = self.preprocessed_data.filtered #filtered before log
+        lognorm_mat = self.preprocessed_data.lognormalized #post log
+        processed_mat = self.preprocessed_data.processed # post norm
         qval_mat = self.preprocessed_data.qvalues
         pep_mat = self.preprocessed_data.pep
         condition_df = self.preprocessed_data.condition_pivot.to_pandas().set_index("Sample")
+
         protein_meta_df = self.preprocessed_data.protein_meta.to_pandas().set_index("INDEX")
 
         # Use filtered_mat to infer sample names (columns) and protein IDs (rows)
@@ -121,6 +123,7 @@ class Dataset:
 
         # Create var and obs metadata
         sample_names = [col for col in processed_mat.columns if col != "INDEX"]
+
         obs = condition_df.loc[sample_names]
 
         # Final AnnData
@@ -129,6 +132,8 @@ class Dataset:
             obs=obs,
             var=protein_meta_df,
         )
+
+        df = pd.DataFrame(self.adata.X.T, columns=self.adata.obs.index.tolist())
 
         # Attach layers
         self.adata.layers["raw"] = raw.T
