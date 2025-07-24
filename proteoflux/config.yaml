@@ -20,7 +20,7 @@ preprocessing:
     pep: 0.003
     run_evidence_count: 3
     contaminants_files:
-      - "Contaminants_2022.fasta"
+      - "data/Contaminants_2022.fasta"
   normalization:
     method:
       - "log2"
@@ -50,13 +50,19 @@ analysis:
   sign_threshold: 0.05
   exports:
     export_plot: true
-    export_table: true
+    export_table: false
     table_use_xlsx: true
-    path_plot: "2_extensive_de.pdf"
-    path_table: "3_log2fc_report.csv"
-    path_h5ad: "proteoflux_results.h5ad"
+    path_plot: "data/proteoflux_report.pdf"
+    path_table: "data/proteoflux_table.xslx"
+    path_h5ad: "data/proteoflux_results.h5ad"
     umap_n_neighbors: 15
     volcano_top_annotated: 20
+  title: "Proteoflux Analysis Report"
+  intro_text: |
+    This report summarizes the proteomic analysis pipeline applied to your dataset.
+    We performed filtering to remove low-confidence identifications and contaminants, normalized intensities,
+    imputed missing values, and finally ran Differential Expression analysis using limma.
+  footer_text: "Proteomics Core Facility - Biozentrum - University of Basel"
 
 design:
   mode: "default"

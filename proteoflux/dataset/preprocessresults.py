@@ -10,3 +10,7 @@ class PreprocessResults:
     pep: pl.DataFrame
     condition_pivot: pl.DataFrame
     protein_meta: pl.DataFrame
+    removed_contaminants: pl.DataFrame #wrong, dict, correct later
+    removed_qvalue: pl.DataFrame
+    removed_pep: pl.DataFrame
+    removed_RE: pl.DataFrame

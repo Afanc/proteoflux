@@ -86,6 +86,10 @@ class Preprocessor:
             pep=self.intermediate_results.dfs.get("pep"),
             condition_pivot=self.intermediate_results.dfs.get("condition_pivot"),
             protein_meta=self.intermediate_results.dfs.get("protein_metadata"),
+            removed_contaminants=   self.intermediate_results.metadata.get("filtering").get("removed_contaminants"),
+            removed_qvalue=         self.intermediate_results.metadata.get("filtering").get("removed_qvalue"),
+            removed_pep=            self.intermediate_results.metadata.get("filtering").get("removed_pep"),
+            removed_RE=             self.intermediate_results.metadata.get("filtering").get("removed_RE"),
         )
 
     @log_time("Filtering")
@@ -111,8 +115,32 @@ class Preprocessor:
         for path in self.remove_contaminants:
             all_contaminants |= load_contaminant_accessions(path)
 
-        # Filter out any rows with a matching accession in the INDEX
-        return df.filter(~pl.col("INDEX").is_in(list(all_contaminants)))
+        mask_keep = ~pl.col("INDEX").is_in(list(all_contaminants))
+
+        # keep & drop
+        df_kept    = df.filter(mask_keep)
+        df_dropped = df.filter(~mask_keep)
+
+        # stash both
+        #self.intermediate_results.add_df("filtered_contaminants", df_kept)
+
+        dropped_dict = {
+            "INDEX":      [str(x) for x in df_dropped["INDEX"].to_list()],
+            "GENE_NAMES": [str(x) for x in df_dropped["GENE_NAMES"].to_list()],
+            "FILENAME":   [str(x) for x in df_dropped["FILENAME"].to_list()],
+            "CONDITION":  [str(x) for x in df_dropped["CONDITION"].to_list()],
+        }
+
+        self.intermediate_results.add_metadata(
+            "filtering",
+            "removed_contaminants",
+            dropped_dict
+        )
+
+        return df_kept
+
+        ## Filter out any rows with a matching accession in the INDEX
+        #return df.filter(~pl.col("INDEX").is_in(list(all_contaminants)))
 
     def _filter_by_stat(self, df: pl.DataFrame, stat: str) -> pl.DataFrame:
         """Filters out rows based on Q-value and PEP thresholds."""
@@ -124,10 +152,22 @@ class Preprocessor:
             values = df[stat].to_numpy()
             self.intermediate_results.add_array(f"{stat.lower()}_array", values)
 
-            df = df.filter(df[stat] <= threshold)
-            self.intermediate_results.add_metadata("filtering", stat, threshold)
+            df_kept    = df.filter(df[stat] <= threshold)
+            df_dropped = df.filter(df[stat] >  threshold)
+            dropped_dict = {
+                "INDEX":      [str(x) for x in df_dropped["INDEX"].to_list()],
+                "GENE_NAMES": [str(x) for x in df_dropped["GENE_NAMES"].to_list()],
+                "FILENAME":   [str(x) for x in df_dropped["FILENAME"].to_list()],
+                "CONDITION":  [str(x) for x in df_dropped["CONDITION"].to_list()],
+            }
 
-        return df
+            self.intermediate_results.add_metadata("filtering", f"removed_{stat}", dropped_dict)
+
+        return df_kept
+            #df = df.filter(df[stat] <= threshold)
+            #self.intermediate_results.add_metadata("filtering", stat, threshold)
+
+        #return df
 
     def _filter_by_run_evidence(self, df: pl.DataFrame) -> pl.DataFrame:
         """Filters out proteins with insufficient run evidence."""
@@ -135,11 +175,23 @@ class Preprocessor:
             values = df["RUN_EVIDENCE_COUNT"].to_numpy()
             self.intermediate_results.add_array("run_evidence_count_array", values)
 
-            df = df.filter(df["RUN_EVIDENCE_COUNT"] >= self.filter_run_evidence_count)
-            self.intermediate_results.add_metadata(
-                        "filtering",
-                        "RUN_EVIDENCE_COUNT",
-                        self.filter_run_evidence_count)
+            df_kept    = df.filter(pl.col("RUN_EVIDENCE_COUNT") >= self.filter_run_evidence_count)
+            df_dropped = df.filter(pl.col("RUN_EVIDENCE_COUNT") <  self.filter_run_evidence_count)
+            dropped_dict = {
+                "INDEX":      [str(x) for x in df_dropped["INDEX"].to_list()],
+                "GENE_NAMES": [str(x) for x in df_dropped["GENE_NAMES"].to_list()],
+                "FILENAME":   [str(x) for x in df_dropped["FILENAME"].to_list()],
+                "CONDITION":  [str(x) for x in df_dropped["CONDITION"].to_list()],
+            }
+
+            self.intermediate_results.add_metadata("filtering", f"removed_RE", dropped_dict)
+
+        return df_kept
+            #df = df.filter(df["RUN_EVIDENCE_COUNT"] >= self.filter_run_evidence_count)
+            #self.intermediate_results.add_metadata(
+            #            "filtering",
+            #            "RUN_EVIDENCE_COUNT",
+            #            self.filter_run_evidence_count)
 
         return df
 

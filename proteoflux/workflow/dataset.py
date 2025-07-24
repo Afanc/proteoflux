@@ -141,6 +141,16 @@ class Dataset:
         self.adata.layers["qvalue"] = qval.T
         self.adata.layers["pep"] = pep.T
 
+        # Attach filtered data
+        if self.preprocessed_data.removed_contaminants is not None:
+            self.adata.uns["removed_contaminants"] = self.preprocessed_data.removed_contaminants
+        if self.preprocessed_data.removed_qvalue is not None:
+            self.adata.uns["removed_qvalue"] = self.preprocessed_data.removed_qvalue
+        if self.preprocessed_data.removed_pep is not None:
+            self.adata.uns["removed_pep"] = self.preprocessed_data.removed_pep
+        if self.preprocessed_data.removed_RE is not None:
+            self.adata.uns["removed_RE"] = self.preprocessed_data.removed_RE
+
         # check index is fine between proteins and matrix index
         assert list(protein_meta_df.index) == list(protein_index)
 
@@ -152,13 +162,7 @@ class Dataset:
 
 if __name__ == "__main__":
     # for testing
-    #file_path = "whatever_test.tsv"
-    #file_path = "full_test2.tsv"
-    #file_path = "searle_test.tsv"
     file_path = "searle_test2.tsv"
-    # big dataset
-    #file_path = "jpieters_massive.tsv"
-    #file_path = "sgagnieux_massive.tsv"
 
     # load dataset
     dataset = Dataset(file_path)

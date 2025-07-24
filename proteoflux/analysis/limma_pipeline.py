@@ -88,7 +88,7 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     out.varm["q_ebayes"]   = q_ebayes
 
     # clustering
-    out = run_clustering(out, n_pcs=out.X.shape[0]-1)
+    #out = run_clustering(out, n_pcs=out.X.shape[0]-1)
 
     # metadata
     out.uns["contrast_names"] = list(contrast_df.columns)
