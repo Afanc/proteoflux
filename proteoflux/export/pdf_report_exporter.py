@@ -196,6 +196,9 @@ class ReportPlotter:
         normalization = preproc.get("normalization", {})
         imputation  = preproc.get("imputation", {})
         de_method   = self.analysis_config.get("ebayes_method", "limma")
+        analysis_type = self.analysis_config.get("analysis_type", "")
+        xlsx_export = os.path.basename(self.analysis_config.get('exports').get('path_table'))
+        h5ad_export = os.path.basename(self.analysis_config.get('exports').get('path_h5ad'))
 
         # Layout parameters
         line_height = 0.03
@@ -223,15 +226,19 @@ class ReportPlotter:
                 y -= 0.5 * line_height
 
         # Summary generated files
-        fig.text(x0, y, "Output:", ha="left", va="top",
-                 fontsize=14, weight="semibold")
+        fig.text(x0, y, "Analysis Type: ",
+                 ha="left", va="top", fontsize=12, weight="semibold")
+        fig.text(x0 + 0.14, y, f"{analysis_type}",
+                 ha="left", va="top", fontsize=12)
         y -= line_height
-        xlsx_export = os.path.basename(self.analysis_config.get('exports').get('path_table'))
-        h5ad_export = os.path.basename(self.analysis_config.get('exports').get('path_h5ad'))
-        fig.text(x0, y, "The following files were generated:", ha="left", va="top", fontsize=12)
-        y -= line_height
+
+        fig.text(x0, y, "Output files:", ha="left", va="top",
+                 fontsize=12, weight="semibold")
+        #y -= line_height
+        #fig.text(x0, y, "The following files were generated:", ha="left", va="top", fontsize=12)
+        y -= 0.8 * line_height
         fig.text(x0+0.05, y, f"- {xlsx_export} (full data table)", ha="left", va="top", fontsize=12)
-        y -= line_height
+        y -= 0.8 * line_height
         fig.text(x0+0.05, y, f"- {h5ad_export} (compressed, viewable in ProteoViewer)", ha="left", va="top", fontsize=12)
         y -= line_height
 
@@ -253,7 +260,7 @@ class ReportPlotter:
         fig.text(x0 + 0.06, y,
                  f"- Contaminants ({', '.join(base_names)}): {n_cont} PSM removed",
                  ha="left", va="top", fontsize=11)
-        y -= line_height
+        y -= 0.8 * line_height
 
         # 2) q-value threshold
         if "qvalue" in filtering:
@@ -262,7 +269,7 @@ class ReportPlotter:
             fig.text(x0 + 0.06, y,
                      f"- q-value ≤ {filtering['qvalue']}: {n_q} PSM removed",
                      ha="left", va="top", fontsize=11)
-            y -= line_height
+            y -= 0.8 * line_height
 
         # 3) PEP threshold
         if "pep" in filtering:
@@ -271,7 +278,7 @@ class ReportPlotter:
             fig.text(x0 + 0.06, y,
                      f"- PEP ≤ {filtering['pep']}: {n_p} PSM removed",
                      ha="left", va="top", fontsize=11)
-            y -= line_height
+            y -= 0.8 * line_height
 
         # 4) Run evidence count
         if "run_evidence_count" in filtering:
@@ -286,19 +293,37 @@ class ReportPlotter:
         norm_methods = normalization.get("method", [])
         if isinstance(norm_methods, list):
             norm_methods = "+".join(norm_methods)
-        fig.text(x0 + 0.02, y, f"- Normalization ({norm_methods})",
+        if "loess" in norm_methods:
+            loess_span = preproc.get("normalization").get("loess_span")
+            norm_methods += f" (loess_span={loess_span})"
+
+        fig.text(x0 + 0.02, y, f"- Normalization: {norm_methods}",
                  ha="left", va="top", fontsize=12)
         y -= line_height
 
         # Imputation
-        imp_method = imputation.get("method", "")
-        fig.text(x0 + 0.02, y, f"- Imputation ({imp_method})",
+        imp = preproc.get("imputation", {})
+        imp_method = imp.get("method", "")
+        if "knn" in imp_method:
+            extras = []
+            if "knn_k" in imp:
+                extras.append(f"k={imp['knn_k']}")
+            if "tnknn" in imp_method and "knn_tn_perc" in imp:
+                extras.append(f"tn_perc={imp['knn_tn_perc']}")
+            if extras:
+                imp_method += " (" + ", ".join(extras) + ")"
+
+        if "rf" in imp_method:
+            rf_max_iter = preproc.get("imputation").get("rf_max_iter")
+            imp_method += f", rf_max_iter={rf_max_iter}"
+
+        fig.text(x0 + 0.02, y, f"- Imputation: {imp_method} ",
                  ha="left", va="top", fontsize=12)
         y -= line_height
 
         # Differential Expression
         fig.text(x0 + 0.02, y,
-                 f"- Differential expression (eBayes via {de_method})",
+                 f"- Differential expression: eBayes via {de_method}",
                  ha="left", va="top", fontsize=12)
         y -= line_height
 
@@ -322,7 +347,7 @@ class ReportPlotter:
         for name, ver in pkgs.items():
             fig.text(x0 + 0.02, y, f"- {name}: {ver}",
                      ha="left", va="top", fontsize=12)
-            y -= line_height
+            y -= 0.8*line_height
 
         y -= line_height
 

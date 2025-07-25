@@ -45,8 +45,9 @@ preprocessing:
     imputation_plot_path: "1_imputation_plots.pdf"
 
 analysis:
-  use_r_limma: false
-  ebayes_method: "limma"
+  analysis_type: "DIA"
+  #use_r_limma: false
+  #ebayes_method: "limma"
   sign_threshold: 0.05
   exports:
     export_plot: true
