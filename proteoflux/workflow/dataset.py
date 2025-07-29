@@ -102,7 +102,8 @@ class Dataset:
         # store unfiltered ?
         filtered_mat = self.preprocessed_data.filtered #filtered before log
         lognorm_mat = self.preprocessed_data.lognormalized #post log
-        processed_mat = self.preprocessed_data.processed # post norm
+        normalized_mat = self.preprocessed_data.normalized # post norm
+        processed_mat = self.preprocessed_data.processed # post impu
         qval_mat = self.preprocessed_data.qvalues
         pep_mat = self.preprocessed_data.pep
         condition_df = self.preprocessed_data.condition_pivot.to_pandas().set_index("Sample")
@@ -119,6 +120,7 @@ class Dataset:
         qval, _ = polars_matrix_to_numpy(qval_mat, index_col="INDEX")
         pep, _ = polars_matrix_to_numpy(pep_mat, index_col="INDEX")
         lognorm, _ = polars_matrix_to_numpy(lognorm_mat, index_col="INDEX")
+        normalized, _ = polars_matrix_to_numpy(normalized_mat, index_col="INDEX")
         raw, _ = polars_matrix_to_numpy(filtered_mat, index_col="INDEX")
 
         # Create var and obs metadata
@@ -138,6 +140,7 @@ class Dataset:
         # Attach layers
         self.adata.layers["raw"] = raw.T
         self.adata.layers["lognorm"] = lognorm.T
+        self.adata.layers["normalized"] = normalized.T
         self.adata.layers["qvalue"] = qval.T
         self.adata.layers["pep"] = pep.T
 
@@ -150,6 +153,24 @@ class Dataset:
             self.adata.uns["removed_pep"] = self.preprocessed_data.removed_pep
         if self.preprocessed_data.removed_RE is not None:
             self.adata.uns["removed_RE"] = self.preprocessed_data.removed_RE
+
+        self.adata.uns["preprocessing"] = {
+            "filtering": {
+                "contaminants_files":    self.preprocessor.remove_contaminants,
+                "qvalue_threshold":      self.preprocessor.filter_qvalue,
+                "pep_threshold":         self.preprocessor.filter_pep,
+                "run_evidence_count":    self.preprocessor.filter_run_evidence_count,
+            },
+            "normalization": self.preprocessor.normalization,
+            "imputation":    self.preprocessor.imputation,
+        }
+
+        # Store the *analysis* parameters (you can later read these
+        # when building your summary in the app)
+        self.adata.uns["analysis"] = {
+            "analysis_type": "DIA",
+            "de_method":     "limma_ebayes",
+        }
 
         # check index is fine between proteins and matrix index
         assert list(protein_meta_df.index) == list(protein_index)

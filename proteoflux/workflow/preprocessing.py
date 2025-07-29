@@ -81,6 +81,7 @@ class Preprocessor:
         return PreprocessResults(
             filtered=self.intermediate_results.dfs.get("raw_df"),
             lognormalized=self.intermediate_results.dfs.get("postlog"),
+            normalized=self.intermediate_results.dfs.get("normalized"),
             processed=self.intermediate_results.dfs.get("imputed"),
             qvalues=self.intermediate_results.dfs.get("qvalues"),
             pep=self.intermediate_results.dfs.get("pep"),

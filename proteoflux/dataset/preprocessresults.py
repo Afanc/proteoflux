@@ -3,9 +3,10 @@ import polars as pl
 
 @dataclass
 class PreprocessResults:
+    lognormalized: pl.DataFrame
+    normalized: pl.DataFrame
     processed: pl.DataFrame
     filtered: pl.DataFrame
-    lognormalized: pl.DataFrame
     qvalues: pl.DataFrame
     pep: pl.DataFrame
     condition_pivot: pl.DataFrame
