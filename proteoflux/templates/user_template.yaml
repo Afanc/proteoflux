@@ -32,35 +32,17 @@ preprocessing:
     knn_tn_perc: 0.75
     rf_max_iter: 20
     rf_random_state: 42
-    evaluation:
-      number_CV: 10
-      missing_total: 0.15
-      missing_mnar: 0.9
-      missing_quantile: 0.1
-      missing_q_lod: 0.05
-  exports:
-    normalization_plots: true
-    imputation_plots: true
-    normalization_plot_path: "0_normalization_plots.pdf"
-    imputation_plot_path: "1_imputation_plots.pdf"
-    max_ma_plots: 15
 
 analysis:
-  use_r_limma: false
-  ebayes_method: "limma"
+  analysis_type: "DIA"
   sign_threshold: 0.05
   exports:
     export_plot: true
     export_table: true
     export_h5ad: true
-    table_use_xlsx: true
-    path_plot: "2_extensive_de.pdf"
-    path_table: "3_log2fc_report.csv"
-    path_h5ad: "4_processed_data.h5ad"
+    path_plot: "proteoflux_report.pdf"
+    path_table: "proteoflux_table.xlsx"
+    path_h5ad: "proteoflux_results.h5ad"
     umap_n_neighbors: 15
     pca_umap_max_annotations: 15
     volcano_top_annotated: 10
-
-design:
-  mode: "default"
-  group_column: "CONDITION"

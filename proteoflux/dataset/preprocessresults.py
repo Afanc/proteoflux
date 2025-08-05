@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import polars as pl
+from typing import Dict
 
 @dataclass
 class PreprocessResults:
@@ -11,7 +12,7 @@ class PreprocessResults:
     pep: pl.DataFrame
     condition_pivot: pl.DataFrame
     protein_meta: pl.DataFrame
-    removed_contaminants: pl.DataFrame #wrong, dict, correct later
-    removed_qvalue: pl.DataFrame
-    removed_pep: pl.DataFrame
-    removed_RE: pl.DataFrame
+    meta_cont: Dict
+    meta_qvalue: Dict
+    meta_pep: Dict
+    meta_rec: Dict

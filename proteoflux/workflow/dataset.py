@@ -145,21 +145,13 @@ class Dataset:
         self.adata.layers["pep"] = pep.T
 
         # Attach filtered data
-        if self.preprocessed_data.removed_contaminants is not None:
-            self.adata.uns["removed_contaminants"] = self.preprocessed_data.removed_contaminants
-        if self.preprocessed_data.removed_qvalue is not None:
-            self.adata.uns["removed_qvalue"] = self.preprocessed_data.removed_qvalue
-        if self.preprocessed_data.removed_pep is not None:
-            self.adata.uns["removed_pep"] = self.preprocessed_data.removed_pep
-        if self.preprocessed_data.removed_RE is not None:
-            self.adata.uns["removed_RE"] = self.preprocessed_data.removed_RE
 
         self.adata.uns["preprocessing"] = {
             "filtering": {
-                "contaminants_files":    self.preprocessor.remove_contaminants,
-                "qvalue_threshold":      self.preprocessor.filter_qvalue,
-                "pep_threshold":         self.preprocessor.filter_pep,
-                "run_evidence_count":    self.preprocessor.filter_run_evidence_count,
+                "cont":    self.preprocessed_data.meta_cont,
+                "qvalue":  self.preprocessed_data.meta_qvalue,
+                "pep":     self.preprocessed_data.meta_pep,
+                "rec":     self.preprocessed_data.meta_rec,
             },
             "normalization": self.preprocessor.normalization,
             "imputation":    self.preprocessor.imputation,

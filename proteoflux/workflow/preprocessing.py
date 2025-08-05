@@ -48,14 +48,14 @@ class Preprocessor:
         # Imputation
         self.imputation = config.get("imputation")
 
-        # Plotting
         self.exports = config.get("exports")
 
-        self.plot_normalization = self.exports.get("normalization_plots")
-        self.plot_imputation = self.exports.get("imputation_plots")
+        # Plotting
+        #self.plot_normalization = self.exports.get("normalization_plots")
+        #self.plot_imputation = self.exports.get("imputation_plots")
 
-        self.normalization_plot_path = self.exports.get("normalization_plot_path")
-        self.imputation_plot_path = self.exports.get("imputation_plot_path")
+        #self.normalization_plot_path = self.exports.get("normalization_plot_path")
+        #self.imputation_plot_path = self.exports.get("imputation_plot_path")
 
     def fit_transform(self, df: pl.DataFrame) -> PreprocessResults:
         """Applies preprocessing steps in sequence and returns structured results."""
@@ -87,10 +87,10 @@ class Preprocessor:
             pep=self.intermediate_results.dfs.get("pep"),
             condition_pivot=self.intermediate_results.dfs.get("condition_pivot"),
             protein_meta=self.intermediate_results.dfs.get("protein_metadata"),
-            removed_contaminants=   self.intermediate_results.metadata.get("filtering").get("removed_contaminants"),
-            removed_qvalue=         self.intermediate_results.metadata.get("filtering").get("removed_qvalue"),
-            removed_pep=            self.intermediate_results.metadata.get("filtering").get("removed_pep"),
-            removed_RE=             self.intermediate_results.metadata.get("filtering").get("removed_RE"),
+            meta_cont = self.intermediate_results.metadata.get("filtering").get("meta_cont"),
+            meta_qvalue = self.intermediate_results.metadata.get("filtering").get("meta_qvalue"),
+            meta_pep =  self.intermediate_results.metadata.get("filtering").get("meta_pep"),
+            meta_rec =  self.intermediate_results.metadata.get("filtering").get("meta_rec"),
         )
 
     @log_time("Filtering")
@@ -121,27 +121,22 @@ class Preprocessor:
         # keep & drop
         df_kept    = df.filter(mask_keep)
         df_dropped = df.filter(~mask_keep)
-
-        # stash both
-        #self.intermediate_results.add_df("filtered_contaminants", df_kept)
+        mask_bools = df.select(mask_keep.alias("keep")).get_column("keep").to_list()
 
         dropped_dict = {
-            "INDEX":      [str(x) for x in df_dropped["INDEX"].to_list()],
-            "GENE_NAMES": [str(x) for x in df_dropped["GENE_NAMES"].to_list()],
-            "FILENAME":   [str(x) for x in df_dropped["FILENAME"].to_list()],
-            "CONDITION":  [str(x) for x in df_dropped["CONDITION"].to_list()],
+            "files": self.remove_contaminants,
+            "values": mask_bools,
+            "number_kept": len(df_kept),
+            "number_dropped": len(df_dropped),
         }
 
         self.intermediate_results.add_metadata(
             "filtering",
-            "removed_contaminants",
+            "meta_cont",
             dropped_dict
         )
 
         return df_kept
-
-        ## Filter out any rows with a matching accession in the INDEX
-        #return df.filter(~pl.col("INDEX").is_in(list(all_contaminants)))
 
     def _filter_by_stat(self, df: pl.DataFrame, stat: str) -> pl.DataFrame:
         """Filters out rows based on Q-value and PEP thresholds."""
@@ -156,19 +151,15 @@ class Preprocessor:
             df_kept    = df.filter(df[stat] <= threshold)
             df_dropped = df.filter(df[stat] >  threshold)
             dropped_dict = {
-                "INDEX":      [str(x) for x in df_dropped["INDEX"].to_list()],
-                "GENE_NAMES": [str(x) for x in df_dropped["GENE_NAMES"].to_list()],
-                "FILENAME":   [str(x) for x in df_dropped["FILENAME"].to_list()],
-                "CONDITION":  [str(x) for x in df_dropped["CONDITION"].to_list()],
+                "threshold": threshold,
+                "raw_values": values,
+                "number_kept": len(df_kept),
+                "number_dropped": len(df_dropped),
             }
 
-            self.intermediate_results.add_metadata("filtering", f"removed_{stat}", dropped_dict)
+            self.intermediate_results.add_metadata("filtering", f"meta_{stat.lower()}", dropped_dict)
 
         return df_kept
-            #df = df.filter(df[stat] <= threshold)
-            #self.intermediate_results.add_metadata("filtering", stat, threshold)
-
-        #return df
 
     def _filter_by_run_evidence(self, df: pl.DataFrame) -> pl.DataFrame:
         """Filters out proteins with insufficient run evidence."""
@@ -179,22 +170,15 @@ class Preprocessor:
             df_kept    = df.filter(pl.col("RUN_EVIDENCE_COUNT") >= self.filter_run_evidence_count)
             df_dropped = df.filter(pl.col("RUN_EVIDENCE_COUNT") <  self.filter_run_evidence_count)
             dropped_dict = {
-                "INDEX":      [str(x) for x in df_dropped["INDEX"].to_list()],
-                "GENE_NAMES": [str(x) for x in df_dropped["GENE_NAMES"].to_list()],
-                "FILENAME":   [str(x) for x in df_dropped["FILENAME"].to_list()],
-                "CONDITION":  [str(x) for x in df_dropped["CONDITION"].to_list()],
+                "threshold": self.filter_run_evidence_count,
+                "raw_values": values,
+                "number_kept": len(df_kept),
+                "number_dropped": len(df_dropped),
             }
 
-            self.intermediate_results.add_metadata("filtering", f"removed_RE", dropped_dict)
+            self.intermediate_results.add_metadata("filtering", f"meta_rec", dropped_dict)
 
         return df_kept
-            #df = df.filter(df["RUN_EVIDENCE_COUNT"] >= self.filter_run_evidence_count)
-            #self.intermediate_results.add_metadata(
-            #            "filtering",
-            #            "RUN_EVIDENCE_COUNT",
-            #            self.filter_run_evidence_count)
-
-        return df
 
     def _get_protein_metadata(self) -> None:
         """
@@ -291,10 +275,6 @@ class Preprocessor:
             pl.DataFrame: Normalized dataframe (Polars).
         """
         self._normalize_matrix()
-
-        if self.plot_normalization:
-            plotter = NormalizerPlotter(self.intermediate_results)
-            plotter.plot_all(self.normalization_plot_path)
 
     @log_time("Normalization - computation")
     def _normalize_matrix(self) -> None:
@@ -395,9 +375,6 @@ class Preprocessor:
         self.intermediate_results.add_metadata("normalization",
                                                "span",
                                                self.normalization.get("loess_span"))
-        self.intermediate_results.add_metadata("normalization",
-                                               "max_ma_plots",
-                                               self.exports.get("max_ma_plots", 15))
 
 
     @log_time("Imputation")
@@ -413,11 +390,6 @@ class Preprocessor:
             pl.DataFrame: Normalized dataframe (Polars).
         """
         results = self._impute_matrix()
-
-        if self.plot_imputation:
-            plotter = ImputeEvaluator(self.intermediate_results,
-                                      self.imputation)
-            plotter.plot_all(self.imputation_plot_path)
 
     @log_time("Imputation - computation")
     def _impute_matrix(self) -> None:

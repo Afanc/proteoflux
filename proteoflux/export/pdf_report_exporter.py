@@ -254,9 +254,10 @@ class ReportPlotter:
 
         # 1) Contaminants
         cont_cfg   = filtering.get("contaminants_files", [])
+        flt_meta = self.adata.uns.get("preprocessing").get("filtering")
         base_names = [os.path.basename(f) for f in cont_cfg]
-        removed_cont = self.adata.uns.get("removed_contaminants", {})
-        n_cont = f"{len(removed_cont.get("INDEX", [])):,}".replace(",", "'")
+        removed_cont = flt_meta.get("cont").get("number_dropped", 0)
+        n_cont = f"{removed_cont}".replace(",", "'")
         fig.text(x0 + 0.06, y,
                  f"- Contaminants ({', '.join(base_names)}): {n_cont} PSM removed",
                  ha="left", va="top", fontsize=11)
@@ -264,8 +265,8 @@ class ReportPlotter:
 
         # 2) q-value threshold
         if "qvalue" in filtering:
-            removed_q = self.adata.uns.get("removed_qvalue", {})
-            n_q = f"{len(removed_q.get("INDEX", [])):,}".replace(",","'")
+            removed_q = flt_meta.get("qvalue").get("number_dropped", 0)
+            n_q = f"{removed_q}".replace(",","'")
             fig.text(x0 + 0.06, y,
                      f"- q-value ≤ {filtering['qvalue']}: {n_q} PSM removed",
                      ha="left", va="top", fontsize=11)
@@ -273,8 +274,8 @@ class ReportPlotter:
 
         # 3) PEP threshold
         if "pep" in filtering:
-            removed_p = self.adata.uns.get("removed_pep", {})
-            n_p = f"{len(removed_p.get("INDEX", [])):,}".replace(",", "'")
+            removed_pep = flt_meta.get("pep").get("number_dropped", 0)
+            n_p = f"{removed_pep}".replace(",", "'")
             fig.text(x0 + 0.06, y,
                      f"- PEP ≤ {filtering['pep']}: {n_p} PSM removed",
                      ha="left", va="top", fontsize=11)
@@ -282,8 +283,8 @@ class ReportPlotter:
 
         # 4) Run evidence count
         if "run_evidence_count" in filtering:
-            removed_r = self.adata.uns.get("removed_RE", {})
-            n_r = f"{len(removed_r.get("INDEX", [])):,}".replace(",", "'")
+            removed_rec = flt_meta.get("rec").get("number_dropped", 0)
+            n_r = f"{removed_rec}".replace(",", "'")
             fig.text(x0 + 0.06, y,
                      f"- Min. run evidence count = {filtering['run_evidence_count']}: {n_r} PSM removed",
                      ha="left", va="top", fontsize=11)

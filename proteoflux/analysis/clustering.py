@@ -85,3 +85,36 @@ def run_clustering(
     adata.uns['feature_order']   = features[leaves_f].tolist()
 
     return adata
+
+@log_time("Running missingness clustering pipeline")
+def run_clustering_missingness(
+    adata: AnnData,
+    layer: str = "normalized",
+    hierarchical_method: str = "ward",
+    hierarchical_metric: str = "euclidean",
+) -> AnnData:
+    """
+    Compute hierarchical clustering on the missingness pattern of adata[layer].
+
+    - adata.uns['missing_sample_linkage']: linkage matrix for samples
+    - adata.uns['missing_sample_order']  : list of sample names in clustered order
+    - adata.uns['missing_feature_linkage']: linkage matrix for features
+    - adata.uns['missing_feature_order']  : list of feature names in clustered order
+    """
+    # 1) Build binary missingness: samples × features
+    mat = adata.layers[layer]
+    missing = np.isnan(mat).astype(int)
+
+    # 2) Cluster samples (columns in your heatmap)
+    sample_linkage = sch.linkage(missing, method=hierarchical_method, metric=hierarchical_metric)
+    leaves_s       = sch.leaves_list(sample_linkage)
+    adata.uns['missing_sample_linkage'] = sample_linkage
+    adata.uns['missing_sample_order']   = adata.obs_names[leaves_s].tolist()
+
+    # 3) Cluster features (rows in your heatmap)
+    feature_linkage = sch.linkage(missing.T, method=hierarchical_method, metric=hierarchical_metric)
+    leaves_f        = sch.leaves_list(feature_linkage)
+    adata.uns['missing_feature_linkage'] = feature_linkage
+    adata.uns['missing_feature_order']   = adata.var_names[leaves_f].tolist()
+
+    return adata

@@ -1,3 +1,4 @@
+import warnings
 import anndata as ad
 import pandas as pd
 import numpy as np
@@ -8,21 +9,30 @@ from statsmodels.stats.multitest import multipletests
 from itertools import combinations
 from proteoflux.utils.utils import log_time
 from proteoflux.stats import StatisticalTester
-from proteoflux.analysis.clustering import run_clustering
+from proteoflux.analysis.clustering import run_clustering, run_clustering_missingness
+
+warnings.filterwarnings(
+    "ignore",
+    message="divide by zero encountered in divide",
+    category=RuntimeWarning,
+    module=r"inmoose\.limma\.decidetests"
+)
+warnings.filterwarnings(
+    "ignore",
+    message="invalid value encountered in divide",
+    category=RuntimeWarning,
+    module=r"inmoose\.limma\.decidetests"
+)
 
 @log_time("pyLimma pipeline")
 def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
-    # 1) Optional: fall back to R-limma
-    if config.get("analysis", {}).get("use_r_limma", False):
-        from proteoflux.analysis.r_limma_pipeline import run_r_limma_pipeline
-        return run_r_limma_pipeline(adata, config)
 
     # 2) Read design column & one-hot encode
-    group_col = config["design"]["group_column"]
+    #group_col = config["design"]["group_column"]
     obs       = adata.obs.copy()
-    levels    = sorted(obs[group_col].unique())
+    levels    = sorted(obs["CONDITION"].unique())
     for lvl in levels:
-        obs[lvl] = (obs[group_col] == lvl).astype(int)
+        obs[lvl] = (obs["CONDITION"] == lvl).astype(int)
 
     # 3) Patsy design (one column per level, no intercept)
     formula   = "0 + " + " + ".join(levels)
@@ -87,18 +97,20 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     out.varm["p_ebayes"]   = p_ebayes
     out.varm["q_ebayes"]   = q_ebayes
 
-    # clustering
-    out = run_clustering(out, n_pcs=out.X.shape[0]-1)
-
     # metadata
     out.uns["contrast_names"] = list(contrast_df.columns)
 
     # === Missingness exactly as before ===
     missing_df = StatisticalTester.compute_missingness(
         intensity_matrix = adata.layers["qvalue"].T,
-        conditions       = adata.obs[group_col].tolist(),
+        conditions       = adata.obs['CONDITION'].tolist(),
         feature_ids      = adata.var_names.tolist(),
     )
     out.uns["missingness"] = missing_df
+
+    # clustering
+    out = run_clustering(out, n_pcs=out.X.shape[0]-1)
+    out = run_clustering_missingness(out)
+
 
     return out
