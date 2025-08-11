@@ -3,7 +3,9 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import warnings
+from datetime import datetime
 from proteoflux.utils.utils import logger, log_time
+from importlib.metadata import version as _pkg_version, PackageNotFoundError
 
 class DEExporter:
     def __init__(
@@ -176,5 +178,16 @@ class DEExporter:
                 self.adata.obs[col] = self.adata.obs[col].astype("category")
             if col in self.adata.var.columns:
                 self.adata.var[col] = self.adata.var[col].astype("category")
+
+        meta = self.adata.uns.get("proteoflux", {})
+        if not isinstance(meta, dict):
+            meta = {}
+        try:
+            pf_version = _pkg_version("proteoflux")
+        except PackageNotFoundError:
+            pf_version = "0+unknown"
+        meta.setdefault("pf_version", pf_version)
+        meta.setdefault("created_at", datetime.now().isoformat(timespec="seconds") + "Z")
+        self.adata.uns["proteoflux"] = meta
 
         self.adata.write(h5ad_path, compression="gzip")

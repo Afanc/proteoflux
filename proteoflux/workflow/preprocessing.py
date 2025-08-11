@@ -203,19 +203,44 @@ class Preprocessor:
 
         self.intermediate_results.add_df("condition_pivot", condition_mapping)
 
+    # using a trick because polars>=1.31 does aggregate filling with 0s ! Instead of nan ! 
     def _pivot_df(self,
                   df: pl.DataFrame,
                   sample_col: str,
                   protein_col: str,
                   values_col: str,
                   aggregate_fn: str) -> pl.DataFrame:
+         # 1) Map the requested agg name to a Polars expression
+         fn_map = {
+             "sum":    pl.col(values_col).sum(),
+             "mean":   pl.col(values_col).mean(),
+             "min":    pl.col(values_col).min(),
+             "max":    pl.col(values_col).max(),
+             "median": pl.col(values_col).median(),
+         }
+         if aggregate_fn not in fn_map:
+             raise ValueError(f"Unsupported aggregate_fn '{aggregate_fn}'")
 
-         return df.pivot(
-            index=protein_col,
-            columns=sample_col,
-            values=values_col,
-            aggregate_function=aggregate_fn,
-        ).rename({col: col for col in df[sample_col].unique()})
+         # 2) Pre-aggregate so (protein, sample) is unique
+         df_agg = (
+             df
+             .group_by([protein_col, sample_col], maintain_order=True)
+             .agg(fn_map[aggregate_fn].alias(values_col))
+         )
+
+         # 3) Pivot WITHOUT a second aggregation step:
+         #    missing groups → Polars nulls
+         pivot_df = df_agg.pivot(
+             index=protein_col,
+             columns=sample_col,
+             values=values_col,
+         )
+
+         # 4) Ensure those nulls become np.nan in your NumPy arrays
+         pivot_df = pivot_df.fill_null(np.nan)
+
+         # 5) Rename back to the original sample names
+         return pivot_df.rename({c: c for c in df[sample_col].unique()})
 
     def _pivot_data(self) -> None:
         """
@@ -276,7 +301,6 @@ class Preprocessor:
         """
         self._normalize_matrix()
 
-    @log_time("Normalization - computation")
     def _normalize_matrix(self) -> None:
 
         """
@@ -391,7 +415,6 @@ class Preprocessor:
         """
         results = self._impute_matrix()
 
-    @log_time("Imputation - computation")
     def _impute_matrix(self) -> None:
         """Applies imputation to missing values."""
 

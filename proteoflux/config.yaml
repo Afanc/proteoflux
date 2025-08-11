@@ -32,22 +32,9 @@ preprocessing:
     knn_tn_perc: 0.75
     rf_max_iter: 20
     rf_random_state: 42
-    evaluation:
-      number_CV: 10
-      missing_total: 0.15
-      missing_mnar: 0.9
-      missing_quantile: 0.1
-      missing_q_lod: 0.05
-  exports:
-    normalization_plots: false
-    imputation_plots: false
-    normalization_plot_path: "0_normalization_plots.pdf"
-    imputation_plot_path: "1_imputation_plots.pdf"
 
 analysis:
   analysis_type: "DIA"
-  #use_r_limma: false
-  #ebayes_method: "limma"
   sign_threshold: 0.05
   exports:
     export_plot: true
@@ -64,7 +51,3 @@ analysis:
     We performed filtering to remove low-confidence identifications and contaminants, normalized intensities,
     imputed missing values, and finally ran Differential Expression analysis using limma.
   footer_text: "Proteomics Core Facility - Biozentrum - University of Basel"
-
-design:
-  mode: "default"
-  group_column: "CONDITION"

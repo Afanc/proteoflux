@@ -22,13 +22,13 @@ dependencies = [
     "missingno",
     "torch",
     "fastcluster",
-    "anndata",
+    "anndata==0.11.4",
     "pyarrow",
     "polars",
     "openpyxl",
     "xlsxwriter",
     "InquirerPy",
-    "inmoose",
+    "inmoose==0.7.8",
 ]
 
 [project.scripts]

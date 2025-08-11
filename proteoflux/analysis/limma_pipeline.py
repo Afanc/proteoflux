@@ -11,20 +11,7 @@ from proteoflux.utils.utils import log_time
 from proteoflux.stats import StatisticalTester
 from proteoflux.analysis.clustering import run_clustering, run_clustering_missingness
 
-warnings.filterwarnings(
-    "ignore",
-    message="divide by zero encountered in divide",
-    category=RuntimeWarning,
-    module=r"inmoose\.limma\.decidetests"
-)
-warnings.filterwarnings(
-    "ignore",
-    message="invalid value encountered in divide",
-    category=RuntimeWarning,
-    module=r"inmoose\.limma\.decidetests"
-)
-
-@log_time("pyLimma pipeline")
+@log_time("Analysis pipeline")
 def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
 
     # 2) Read design column & one-hot encode
@@ -45,6 +32,9 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
 
     # 5) Fit linear model & contrasts
     fit_imo = imo.lmFit(df_X, design=design_dm)
+
+    resid_var = np.asarray(fit_imo.sigma, dtype=np.float32) ** 2
+    adata.uns["residual_variance"] = resid_var
 
     # auto-generate all pairwise contrasts
     contrast_defs = [f"{a} - {b}" for a, b in combinations(levels, 2)]
@@ -71,7 +61,9 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     ]).T
 
     # === MODERATED (post-eBayes) statistics ===
-    fit_imo    = imo.eBayes(fit_imo)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        fit_imo    = imo.eBayes(fit_imo)
+
     s2post     = fit_imo.s2_post.to_numpy()       # (n_genes,)
     se_ebayes  = stdu * np.sqrt(s2post[:, np.newaxis])
     t_ebayes   = fit_imo.t.values
@@ -87,10 +79,8 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     out.varm["log2fc"]  = coefs
     out.varm["se_raw"]  = se_raw
     out.varm["t_raw"]   = t_raw
-    #out.varm["p_raw"]   = p_raw #future
-    out.varm["p"]   = p_raw
-    #out.varm["q_raw"]   = q_raw #same
-    out.varm["q"]   = q_raw
+    out.varm["p_raw"]   = p_raw
+    out.varm["q_raw"]   = q_raw
     # moderated statistics
     out.varm["se_ebayes"]  = se_ebayes
     out.varm["t_ebayes"]   = t_ebayes
@@ -108,9 +98,16 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     )
     out.uns["missingness"] = missing_df
 
-    # clustering
-    out = run_clustering(out, n_pcs=out.X.shape[0]-1)
-    out = run_clustering_missingness(out)
-
-
     return out
+    # clustering
+    #out = run_clustering(out, n_pcs=out.X.shape[0]-1)
+    #out = run_clustering_missingness(out)
+
+
+@log_time("Clustering")
+def clustering_pipeline(adata: ad.AnnData) -> ad.AnnData:
+    adata = run_clustering(adata, n_pcs=adata.X.shape[0]-1)
+    adata = run_clustering_missingness(adata)
+
+    return adata
+

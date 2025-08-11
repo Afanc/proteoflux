@@ -10,6 +10,7 @@ import seaborn as sns
 import matplotlib
 import proteoflux
 import inmoose
+import polars
 import scipy
 import sklearn
 import skmisc
@@ -339,6 +340,7 @@ class ReportPlotter:
             "inmoose":      inmoose.__version__,
             "numpy":        np.__version__,
             "pandas":       pd.__version__,
+            "polars":       polars.__version__,
             "anndata":      anndata.__version__,
             "scanpy":       sc.__version__,
             "scipy":        scipy.__version__,
@@ -502,7 +504,7 @@ class ReportPlotter:
                 ax.set_title(title)
 
             fig, ax = plt.subplots(1, 1, figsize=(10, 6))
-            plot_panel(ax, qvals_bayes, qvals_bayes, f"{name} (eBayes)")
+            plot_panel(ax, qvals_bayes, qvals_bayes, f"{name}")
 
             fig.tight_layout()
             self.pdf.savefig(fig)
