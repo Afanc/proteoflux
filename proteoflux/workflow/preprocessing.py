@@ -48,14 +48,14 @@ class Preprocessor:
         # Imputation
         self.imputation = config.get("imputation")
 
-        # Plotting
         self.exports = config.get("exports")
 
-        self.plot_normalization = self.exports.get("normalization_plots")
-        self.plot_imputation = self.exports.get("imputation_plots")
+        # Plotting
+        #self.plot_normalization = self.exports.get("normalization_plots")
+        #self.plot_imputation = self.exports.get("imputation_plots")
 
-        self.normalization_plot_path = self.exports.get("normalization_plot_path")
-        self.imputation_plot_path = self.exports.get("imputation_plot_path")
+        #self.normalization_plot_path = self.exports.get("normalization_plot_path")
+        #self.imputation_plot_path = self.exports.get("imputation_plot_path")
 
     def fit_transform(self, df: pl.DataFrame) -> PreprocessResults:
         """Applies preprocessing steps in sequence and returns structured results."""
@@ -79,13 +79,18 @@ class Preprocessor:
 
         # Final step: returning the structured data class
         return PreprocessResults(
-            processed=self.intermediate_results.dfs.get("imputed"),
             filtered=self.intermediate_results.dfs.get("raw_df"),
             lognormalized=self.intermediate_results.dfs.get("postlog"),
+            normalized=self.intermediate_results.dfs.get("normalized"),
+            processed=self.intermediate_results.dfs.get("imputed"),
             qvalues=self.intermediate_results.dfs.get("qvalues"),
             pep=self.intermediate_results.dfs.get("pep"),
             condition_pivot=self.intermediate_results.dfs.get("condition_pivot"),
             protein_meta=self.intermediate_results.dfs.get("protein_metadata"),
+            meta_cont = self.intermediate_results.metadata.get("filtering").get("meta_cont"),
+            meta_qvalue = self.intermediate_results.metadata.get("filtering").get("meta_qvalue"),
+            meta_pep =  self.intermediate_results.metadata.get("filtering").get("meta_pep"),
+            meta_rec =  self.intermediate_results.metadata.get("filtering").get("meta_rec"),
         )
 
     @log_time("Filtering")
@@ -111,8 +116,27 @@ class Preprocessor:
         for path in self.remove_contaminants:
             all_contaminants |= load_contaminant_accessions(path)
 
-        # Filter out any rows with a matching accession in the INDEX
-        return df.filter(~pl.col("INDEX").is_in(list(all_contaminants)))
+        mask_keep = ~pl.col("INDEX").is_in(list(all_contaminants))
+
+        # keep & drop
+        df_kept    = df.filter(mask_keep)
+        df_dropped = df.filter(~mask_keep)
+        mask_bools = df.select(mask_keep.alias("keep")).get_column("keep").to_list()
+
+        dropped_dict = {
+            "files": self.remove_contaminants,
+            "values": mask_bools,
+            "number_kept": len(df_kept),
+            "number_dropped": len(df_dropped),
+        }
+
+        self.intermediate_results.add_metadata(
+            "filtering",
+            "meta_cont",
+            dropped_dict
+        )
+
+        return df_kept
 
     def _filter_by_stat(self, df: pl.DataFrame, stat: str) -> pl.DataFrame:
         """Filters out rows based on Q-value and PEP thresholds."""
@@ -124,10 +148,18 @@ class Preprocessor:
             values = df[stat].to_numpy()
             self.intermediate_results.add_array(f"{stat.lower()}_array", values)
 
-            df = df.filter(df[stat] <= threshold)
-            self.intermediate_results.add_metadata("filtering", stat, threshold)
+            df_kept    = df.filter(df[stat] <= threshold)
+            df_dropped = df.filter(df[stat] >  threshold)
+            dropped_dict = {
+                "threshold": threshold,
+                "raw_values": values,
+                "number_kept": len(df_kept),
+                "number_dropped": len(df_dropped),
+            }
 
-        return df
+            self.intermediate_results.add_metadata("filtering", f"meta_{stat.lower()}", dropped_dict)
+
+        return df_kept
 
     def _filter_by_run_evidence(self, df: pl.DataFrame) -> pl.DataFrame:
         """Filters out proteins with insufficient run evidence."""
@@ -135,13 +167,18 @@ class Preprocessor:
             values = df["RUN_EVIDENCE_COUNT"].to_numpy()
             self.intermediate_results.add_array("run_evidence_count_array", values)
 
-            df = df.filter(df["RUN_EVIDENCE_COUNT"] >= self.filter_run_evidence_count)
-            self.intermediate_results.add_metadata(
-                        "filtering",
-                        "RUN_EVIDENCE_COUNT",
-                        self.filter_run_evidence_count)
+            df_kept    = df.filter(pl.col("RUN_EVIDENCE_COUNT") >= self.filter_run_evidence_count)
+            df_dropped = df.filter(pl.col("RUN_EVIDENCE_COUNT") <  self.filter_run_evidence_count)
+            dropped_dict = {
+                "threshold": self.filter_run_evidence_count,
+                "raw_values": values,
+                "number_kept": len(df_kept),
+                "number_dropped": len(df_dropped),
+            }
 
-        return df
+            self.intermediate_results.add_metadata("filtering", f"meta_rec", dropped_dict)
+
+        return df_kept
 
     def _get_protein_metadata(self) -> None:
         """
@@ -149,7 +186,11 @@ class Preprocessor:
         grouped by protein INDEX. Assumes all column names are capitalized.
         """
         df = self.intermediate_results.dfs["filtered_final/RE"]
-        keep_cols = {"INDEX", "FASTA_HEADERS", "GENE_NAMES", "PROTEIN_DESCRIPTIONS", "PROTEIN_WEIGHT"}
+        keep_cols = {"INDEX",
+                     "FASTA_HEADERS",
+                     "GENE_NAMES",
+                     "PROTEIN_DESCRIPTIONS",
+                     "PROTEIN_WEIGHT"}
         existing = [col for col in df.columns if col in keep_cols]
         df = df.select(existing).unique(subset=["INDEX"]).sort("INDEX")
 
@@ -162,19 +203,44 @@ class Preprocessor:
 
         self.intermediate_results.add_df("condition_pivot", condition_mapping)
 
+    # using a trick because polars>=1.31 does aggregate filling with 0s ! Instead of nan ! 
     def _pivot_df(self,
                   df: pl.DataFrame,
                   sample_col: str,
                   protein_col: str,
                   values_col: str,
                   aggregate_fn: str) -> pl.DataFrame:
+         # 1) Map the requested agg name to a Polars expression
+         fn_map = {
+             "sum":    pl.col(values_col).sum(),
+             "mean":   pl.col(values_col).mean(),
+             "min":    pl.col(values_col).min(),
+             "max":    pl.col(values_col).max(),
+             "median": pl.col(values_col).median(),
+         }
+         if aggregate_fn not in fn_map:
+             raise ValueError(f"Unsupported aggregate_fn '{aggregate_fn}'")
 
-         return df.pivot(
-            index=protein_col,
-            columns=sample_col,
-            values=values_col,
-            aggregate_function=aggregate_fn,
-        ).rename({col: col for col in df[sample_col].unique()})
+         # 2) Pre-aggregate so (protein, sample) is unique
+         df_agg = (
+             df
+             .group_by([protein_col, sample_col], maintain_order=True)
+             .agg(fn_map[aggregate_fn].alias(values_col))
+         )
+
+         # 3) Pivot WITHOUT a second aggregation step:
+         #    missing groups → Polars nulls
+         pivot_df = df_agg.pivot(
+             index=protein_col,
+             columns=sample_col,
+             values=values_col,
+         )
+
+         # 4) Ensure those nulls become np.nan in your NumPy arrays
+         pivot_df = pivot_df.fill_null(np.nan)
+
+         # 5) Rename back to the original sample names
+         return pivot_df.rename({c: c for c in df[sample_col].unique()})
 
     def _pivot_data(self) -> None:
         """
@@ -235,11 +301,6 @@ class Preprocessor:
         """
         self._normalize_matrix()
 
-        if self.plot_normalization:
-            plotter = NormalizerPlotter(self.intermediate_results)
-            plotter.plot_all(self.normalization_plot_path)
-
-    @log_time("Normalization - computation")
     def _normalize_matrix(self) -> None:
 
         """
@@ -338,9 +399,6 @@ class Preprocessor:
         self.intermediate_results.add_metadata("normalization",
                                                "span",
                                                self.normalization.get("loess_span"))
-        self.intermediate_results.add_metadata("normalization",
-                                               "max_ma_plots",
-                                               self.exports.get("max_ma_plots", 15))
 
 
     @log_time("Imputation")
@@ -357,12 +415,6 @@ class Preprocessor:
         """
         results = self._impute_matrix()
 
-        if self.plot_imputation:
-            plotter = ImputeEvaluator(self.intermediate_results,
-                                      self.imputation)
-            plotter.plot_all(self.imputation_plot_path)
-
-    @log_time("Imputation - computation")
     def _impute_matrix(self) -> None:
         """Applies imputation to missing values."""
 

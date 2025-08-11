@@ -4,13 +4,17 @@ import pandas as pd
 import scanpy as sc
 import matplotlib.pyplot as plt
 import seaborn as sns
+import matplotlib
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.gridspec import GridSpec
 import matplotlib.patches as mpatches
 from anndata import AnnData
 from typing import Optional, List, Union, Dict
 from proteoflux.utils.utils import logger, log_time
-from proteoflux.export.plot_utils import plot_cluster_heatmap
+from proteoflux.export.plot_utils import plot_cluster_heatmap, plot_aggregated_violin
+from proteoflux.evaluation.evaluation_utils import compute_metrics
+
+matplotlib.use("Agg")
 
 class DifferentialExpressionPlotter:
     def __init__(
@@ -64,7 +68,6 @@ class DifferentialExpressionPlotter:
             self._plot_umap()
             if "EC_high_vs_EC_low" in self.contrast_names:
                 self._plot_spikein_separation("EC_high_vs_EC_low")
-
 
     def _plot_log2fc_distributions(self):
         fig, axs = plt.subplots(1, self.log2fc.shape[1], figsize=(4 * self.log2fc.shape[1], 4), sharey=True)
@@ -317,6 +320,8 @@ class DifferentialExpressionPlotter:
         """
         Plot PCA of samples colored by condition.
         """
+        max_annotations = self.export_config.get("pca_umap_max_annotations", 15)
+
         if "X_pca" not in self.adata.obsm:
             sc.tl.pca(self.adata)
 
@@ -349,20 +354,21 @@ class DifferentialExpressionPlotter:
         x_median = pc_df["PC1"].median()
         y_median = pc_df["PC2"].median()
 
-        for sample, (x, y) in pc_df[["PC1", "PC2"]].iterrows():
-            color = palette[pc_df.loc[sample, color_key]]
+        if len(pc_df) <= max_annotations:
+            for sample, (x, y) in pc_df[["PC1", "PC2"]].iterrows():
+                color = palette[pc_df.loc[sample, color_key]]
 
-            ha = "left" if x <= x_median else "right"
-            # annotate with a 5-point horizontal offset
-            ax.annotate(
-                sample,
-                xy=(x, y),
-                xytext=(5 if ha=="left" else -5, 0),
-                textcoords="offset points",
-                ha=ha, va="center",
-                fontsize=7,
-                color=color
-            )
+                ha = "left" if x <= x_median else "right"
+                # annotate with a 5-point horizontal offset
+                ax.annotate(
+                    sample,
+                    xy=(x, y),
+                    xytext=(5 if ha=="left" else -5, 0),
+                    textcoords="offset points",
+                    ha=ha, va="center",
+                    fontsize=7,
+                    color=color
+                )
 
         ax.set_title("PCA")
         ax.set_xlabel(f"PC1 ({pc1_var:.1f}%)")
@@ -380,6 +386,8 @@ class DifferentialExpressionPlotter:
         """
         Plot UMAP of samples colored by condition.
         """
+        max_annotations = self.export_config.get("pca_umap_max_annotations", 15)
+
         if "X_umap" not in self.adata.obsm:
             if "neighbors" not in self.adata.uns:
                 sc.pp.neighbors(self.adata,
@@ -410,20 +418,22 @@ class DifferentialExpressionPlotter:
         palette = dict(zip(umap_df[color_key].unique(), sns.color_palette("tab10")))
         x_median = umap_df["UMAP1"].median()
         y_median = umap_df["UMAP2"].median()
-        for sample, (x, y) in umap_df[["UMAP1", "UMAP2"]].iterrows():
-            color = palette[umap_df.loc[sample, color_key]]
 
-            ha = "left" if x <= x_median else "right"
-            # annotate with a 5-point horizontal offset
-            ax.annotate(
-                sample,
-                xy=(x, y),
-                xytext=(5 if ha=="left" else -5, 0),
-                textcoords="offset points",
-                ha=ha, va="center",
-                fontsize=7,
-                color=color
-            )
+        if len(umap_df) <= max_annotations:
+            for sample, (x, y) in umap_df[["UMAP1", "UMAP2"]].iterrows():
+                color = palette[umap_df.loc[sample, color_key]]
+
+                ha = "left" if x <= x_median else "right"
+                # annotate with a 5-point horizontal offset
+                ax.annotate(
+                    sample,
+                    xy=(x, y),
+                    xytext=(5 if ha=="left" else -5, 0),
+                    textcoords="offset points",
+                    ha=ha, va="center",
+                    fontsize=7,
+                    color=color
+                )
 
         ax.set_title("UMAP")
         ax.set_xlabel("UMAP1")

@@ -26,6 +26,9 @@ class IntermediateResults:
     # Index columns (proteins) used for matching consistently across DataFrames
     index: Optional[np.ndarray] = None
 
+    # Dicts of various types
+    dicts: Optional[Dict] = None
+
     def set_columns_and_index(self, df: pl.DataFrame, index_col: str = "INDEX"):
         """Set columns and index once from a pivoted DataFrame."""
         self.columns = [col for col in df.columns if col != index_col]
@@ -62,4 +65,3 @@ class IntermediateResults:
         if step not in ["normalization", "imputation"]:
             raise ValueError("step must be 'normalization' or 'imputation'")
         self.models[step] = model
-

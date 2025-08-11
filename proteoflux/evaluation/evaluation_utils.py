@@ -37,9 +37,30 @@ def CV(values: np.ndarray, axis: int = 1, log_base: float = 2) -> np.ndarray:
     std = np.nanstd(linear_values, axis=axis)
     mean = np.clip(np.nanmean(linear_values, axis=axis), 1e-6, None)
 
-    cv = std/mean
+    cv = 100 * std/mean
 
     return cv
+
+def rMAD(values: np.ndarray, axis: int = 1, log_base: float = 2) -> np.ndarray:
+    """
+    Computes %rMAD from log-transformed values -> transform back into linear scale and calculate rMAD
+
+    Parameters:
+        values: Log-transformed intensity matrix.
+        axis: Axis for computation.
+        log_base: Log base of the transformation (default: 2).
+
+    Returns:
+        Vector of %rMAD estimates.
+    """
+    linear = log_base**values
+
+    med = np.nanmedian(linear, axis=axis)
+    mad = np.nanmedian(np.abs(linear - med[:, None]), axis=axis)
+
+    rmad = 100 * mad / np.clip(med, 1e-6, None)
+
+    return rmad
 
 def compute_metrics(mat: np.ndarray, metrics: List[str] = ["CV", "MAD"]) -> Dict[str, np.ndarray]:
     """
@@ -62,7 +83,7 @@ def compute_metrics(mat: np.ndarray, metrics: List[str] = ["CV", "MAD"]) -> Dict
                                (one value per feature) as values.
     """
     if metrics is None:
-        metrics = ["CV", "MAD", "PEV"]
+        metrics = ["CV", "RMAD"]
 
     result = {}
     with warnings.catch_warnings():
@@ -72,15 +93,12 @@ def compute_metrics(mat: np.ndarray, metrics: List[str] = ["CV", "MAD"]) -> Dict
         stds    = np.nanstd(mat, axis=1, ddof=1)
         CVs = CV(mat, axis=1, log_base=2)
         geometric_cvs = geometric_cv(mat, axis=1)
-        mads = np.nanmedian(np.abs(mat - medians[:, None]), axis=1)
-        rmads = mads/medians
+        rmads = rMAD(mat, axis=1, log_base=2)
 
         if "CV" in metrics:
             result["CV"] = CVs
         if "geometric_CV" in metrics:
             result["geometric_CV"] = geometric_cvs
-        if "MAD" in metrics:
-            result["MAD"] = mads
         if "RMAD" in metrics:
             result["RMAD"] = rmads
         if "PEV" in metrics:

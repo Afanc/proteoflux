@@ -28,7 +28,7 @@ class Dataset:
 
         # Dataset-specific config
         dataset_cfg = kwargs.get("dataset", {})
-        self.file_path = dataset_cfg.get("input_file", "whatever.tsv")
+        self.file_path = dataset_cfg.get("input_file", None)
         self.load_method = dataset_cfg.get("load_method", 'polars')
 
         # Harmonizer setup
@@ -90,13 +90,6 @@ class Dataset:
         Returns:
             pl.DataFrame: The preprocessed data.
         """
-        # and do some sanity checks
-        #print("\n🔍 Q8N9Z9 at start:")
-        #check_prot = df.filter(df["INDEX"] == "Q3LI55;Q8IUC1;Q8IUC1").select(['CONDITION', "REPLICATE", "SIGNAL", "QVALUE", "PEP"])
-        #print(check_prot)
-        #check_prot = df.filter(df["INDEX"] == "Q3LI55;Q8IUC1;Q8IUC1").select(['CONDITION', "REPLICATE", "SIGNAL", "QVALUE", "PEP"])
-        #print(check_prot)
-
         preprocessed_results = self.preprocessor.fit_transform(df)
 
         return preprocessed_results
@@ -106,12 +99,15 @@ class Dataset:
         """Convert the data to an AnnData object for downstream analysis."""
 
         # Extract matrices
-        filtered_mat = self.preprocessed_data.filtered
-        processed_mat = self.preprocessed_data.processed
-        lognorm_mat = self.preprocessed_data.lognormalized
+        # store unfiltered ?
+        filtered_mat = self.preprocessed_data.filtered #filtered before log
+        lognorm_mat = self.preprocessed_data.lognormalized #post log
+        normalized_mat = self.preprocessed_data.normalized # post norm
+        processed_mat = self.preprocessed_data.processed # post impu
         qval_mat = self.preprocessed_data.qvalues
         pep_mat = self.preprocessed_data.pep
         condition_df = self.preprocessed_data.condition_pivot.to_pandas().set_index("Sample")
+
         protein_meta_df = self.preprocessed_data.protein_meta.to_pandas().set_index("INDEX")
 
         # Use filtered_mat to infer sample names (columns) and protein IDs (rows)
@@ -124,10 +120,12 @@ class Dataset:
         qval, _ = polars_matrix_to_numpy(qval_mat, index_col="INDEX")
         pep, _ = polars_matrix_to_numpy(pep_mat, index_col="INDEX")
         lognorm, _ = polars_matrix_to_numpy(lognorm_mat, index_col="INDEX")
+        normalized, _ = polars_matrix_to_numpy(normalized_mat, index_col="INDEX")
         raw, _ = polars_matrix_to_numpy(filtered_mat, index_col="INDEX")
 
         # Create var and obs metadata
         sample_names = [col for col in processed_mat.columns if col != "INDEX"]
+
         obs = condition_df.loc[sample_names]
 
         # Final AnnData
@@ -137,11 +135,34 @@ class Dataset:
             var=protein_meta_df,
         )
 
+        df = pd.DataFrame(self.adata.X.T, columns=self.adata.obs.index.tolist())
+
         # Attach layers
         self.adata.layers["raw"] = raw.T
         self.adata.layers["lognorm"] = lognorm.T
+        self.adata.layers["normalized"] = normalized.T
         self.adata.layers["qvalue"] = qval.T
         self.adata.layers["pep"] = pep.T
+
+        # Attach filtered data
+
+        self.adata.uns["preprocessing"] = {
+            "filtering": {
+                "cont":    self.preprocessed_data.meta_cont,
+                "qvalue":  self.preprocessed_data.meta_qvalue,
+                "pep":     self.preprocessed_data.meta_pep,
+                "rec":     self.preprocessed_data.meta_rec,
+            },
+            "normalization": self.preprocessor.normalization,
+            "imputation":    self.preprocessor.imputation,
+        }
+
+        # Store the *analysis* parameters (you can later read these
+        # when building your summary in the app)
+        self.adata.uns["analysis"] = {
+            "analysis_type": "DIA",
+            "de_method":     "limma_ebayes",
+        }
 
         # check index is fine between proteins and matrix index
         assert list(protein_meta_df.index) == list(protein_index)
@@ -154,13 +175,7 @@ class Dataset:
 
 if __name__ == "__main__":
     # for testing
-    #file_path = "whatever_test.tsv"
-    #file_path = "full_test2.tsv"
-    #file_path = "searle_test.tsv"
     file_path = "searle_test2.tsv"
-    # big dataset
-    #file_path = "jpieters_massive.tsv"
-    #file_path = "sgagnieux_massive.tsv"
 
     # load dataset
     dataset = Dataset(file_path)

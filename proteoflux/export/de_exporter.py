@@ -1,8 +1,11 @@
+import h5py
 import pandas as pd
 import numpy as np
 from pathlib import Path
 import warnings
+from datetime import datetime
 from proteoflux.utils.utils import logger, log_time
+from importlib.metadata import version as _pkg_version, PackageNotFoundError
 
 class DEExporter:
     def __init__(
@@ -66,7 +69,7 @@ class DEExporter:
             "ProteoFlux Differential Expression Export\n"
             "\n"
             "Sheet Descriptions:\n"
-            "- Summary sheet: Log2 fold changes across contrasts, q values associated and raw Intensities\n"
+            "- Summary sheet: Log2 fold changes across contrasts, q and p values associated and raw Intensities\n"
             "- Log2FC: Annotated log2 fold changes across contrasts\n"
             "- Quantification Qvalue: Corresponding q-values (eBayes)\n"
             "- T-statistics (raw): Classical t-statistics (pre-eBayes)\n"
@@ -105,6 +108,7 @@ class DEExporter:
         # Gather dataframes
         log2fc = self._get_dataframe("log2fc")
         q_ebayes = self._get_dataframe("q_ebayes")
+        p_ebayes = self._get_dataframe("p_ebayes")
 
         miss_ratios = self.adata.uns.get("missingness", None)
 
@@ -131,14 +135,21 @@ class DEExporter:
 
         # Summary sheet
         summary_df = None
-        log2fc_renamed = log2fc.copy().add_prefix("log2FC_")
+        #log2fc_renamed = log2fc.copy().add_prefix("log2FC_")
+        log2fc_renamed = log2fc_annot.copy().add_prefix("log2FC_")
         qval_renamed = q_ebayes.copy().add_prefix("Q_")
+        pval_renamed = p_ebayes.copy().add_prefix("P_")
         raw_renamed = raw.T.copy().add_prefix("Raw_")
-        summary_df = pd.concat([log2fc_renamed, qval_renamed, raw_renamed], axis=1)
+
+        summary_df = pd.concat([meta_df,
+                                log2fc_renamed,
+                                qval_renamed,
+                                pval_renamed,
+                                raw_renamed], axis=1)
 
         # Tables to export
         tables = {
-            "Summary (log2FC + Q + raw)": summary_df,
+            "Summary": summary_df,
             "Log2FC": log2fc_annot,
             "Quantification Qvalue": q_ebayes_annot,
             "Metadata": meta_df,
@@ -167,5 +178,16 @@ class DEExporter:
                 self.adata.obs[col] = self.adata.obs[col].astype("category")
             if col in self.adata.var.columns:
                 self.adata.var[col] = self.adata.var[col].astype("category")
+
+        meta = self.adata.uns.get("proteoflux", {})
+        if not isinstance(meta, dict):
+            meta = {}
+        try:
+            pf_version = _pkg_version("proteoflux")
+        except PackageNotFoundError:
+            pf_version = "0+unknown"
+        meta.setdefault("pf_version", pf_version)
+        meta.setdefault("created_at", datetime.now().isoformat(timespec="seconds") + "Z")
+        self.adata.uns["proteoflux"] = meta
 
         self.adata.write(h5ad_path, compression="gzip")
