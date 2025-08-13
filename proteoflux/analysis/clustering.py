@@ -105,15 +105,6 @@ def run_clustering_missingness(
     mat = adata.layers[layer]
     missing = np.isnan(mat).astype(int)
 
-    #sample_linkage  = sch.linkage(missing,      method=hierarchical_method, metric=hierarchical_metric)
-    #feature_linkage = sch.linkage(missing.T,    method=hierarchical_method, metric=hierarchical_metric)
-
-    ## store both linkage matrices and the orders
-    #adata.uns['missing_sample_linkage']   = sample_linkage
-    #adata.uns['missing_sample_order']     = adata.obs_names[sch.leaves_list(sample_linkage)].tolist()
-    #adata.uns['missing_feature_linkage']  = feature_linkage
-    #adata.uns['missing_feature_order']    = adata.var_names[sch.leaves_list(feature_linkage)].tolist()
-
     # 2) Cluster samples (columns in your heatmap)
     sample_linkage = sch.linkage(missing, method=hierarchical_method, metric=hierarchical_metric)
     leaves_s       = sch.leaves_list(sample_linkage)
@@ -124,6 +115,7 @@ def run_clustering_missingness(
     feature_linkage = sch.linkage(missing.T, method=hierarchical_method, metric=hierarchical_metric)
     leaves_f        = sch.leaves_list(feature_linkage)
     adata.uns['missing_feature_linkage'] = feature_linkage
-    adata.uns['missing_feature_order']   = adata.var_names[leaves_f].tolist()
+    #adata.uns['missing_feature_order']   = adata.var_names[leaves_f].tolist()
+    adata.uns['missing_feature_order'] = adata.var_names.tolist()
 
     return adata

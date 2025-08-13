@@ -106,7 +106,11 @@ class Dataset:
         processed_mat = self.preprocessed_data.processed # post impu
         qval_mat = self.preprocessed_data.qvalues
         pep_mat = self.preprocessed_data.pep
+        sc_mat = self.preprocessed_data.spectral_counts
         condition_df = self.preprocessed_data.condition_pivot.to_pandas().set_index("Sample")
+
+        pep_wide_mat  = self.preprocessed_data.peptides_wide
+        pep_cent_mat  = self.preprocessed_data.peptides_centered
 
         protein_meta_df = self.preprocessed_data.protein_meta.to_pandas().set_index("INDEX")
 
@@ -119,6 +123,7 @@ class Dataset:
         # Layers
         qval, _ = polars_matrix_to_numpy(qval_mat, index_col="INDEX")
         pep, _ = polars_matrix_to_numpy(pep_mat, index_col="INDEX")
+        sc, _ = polars_matrix_to_numpy(sc_mat, index_col="INDEX")
         lognorm, _ = polars_matrix_to_numpy(lognorm_mat, index_col="INDEX")
         normalized, _ = polars_matrix_to_numpy(normalized_mat, index_col="INDEX")
         raw, _ = polars_matrix_to_numpy(filtered_mat, index_col="INDEX")
@@ -143,6 +148,7 @@ class Dataset:
         self.adata.layers["normalized"] = normalized.T
         self.adata.layers["qvalue"] = qval.T
         self.adata.layers["pep"] = pep.T
+        self.adata.layers["spectral_counts"] = sc.T
 
         # Attach filtered data
 
@@ -157,6 +163,43 @@ class Dataset:
             "imputation":    self.preprocessor.imputation,
         }
 
+
+        # Peptide tables
+        sample_names = [c for c in processed_mat.columns if c != "INDEX"]
+
+        # numeric sample cols that exist in peptide tables
+        use_cols_w = ["PEPTIDE_ID"] + [c for c in sample_names if c in pep_wide_mat.columns]
+        use_cols_c = ["PEPTIDE_ID"] + [c for c in sample_names if c in pep_cent_mat.columns]
+
+        pep_wide_numeric = pep_wide_mat.select(use_cols_w)
+        pep_cent_numeric = pep_cent_mat.select(use_cols_c)
+
+        # matrices (+ row order)
+        pep_raw, pep_idx  = polars_matrix_to_numpy(pep_wide_numeric, index_col="PEPTIDE_ID")
+        pep_cent, pep_idx2 = polars_matrix_to_numpy(pep_cent_numeric, index_col="PEPTIDE_ID")
+        assert list(pep_idx) == list(pep_idx2)
+
+        # row meta (INDEX, PEPTIDE_SEQ) aligned to pep_idx — keep as lists (not DataFrame)
+        rowmeta = (
+            pep_wide_mat.select(["PEPTIDE_ID","INDEX","PEPTIDE_SEQ"])
+                        .unique()
+                        .to_pandas()
+                        .set_index("PEPTIDE_ID")
+                        .loc[pep_idx]
+        )
+        pep_protein_index = rowmeta["INDEX"].astype(str).tolist()
+        peptide_seq   = rowmeta["PEPTIDE_SEQ"].astype(str).tolist()
+
+        # final HDF5-friendly structure
+        self.adata.uns["peptides"] = {
+            "rows": [str(x) for x in pep_idx],                         # PEPTIDE_ID "{INDEX}|{SEQ}"
+            "protein_index": pep_protein_index,                             # one per row
+            "peptide_seq": peptide_seq,                                 # one per row
+            "cols": [c for c in sample_names if c in pep_wide_mat.columns],  # samples
+            "raw":     np.asarray(pep_raw,  dtype=np.float32),          # (n_peptides × n_samples)
+            "centered":np.asarray(pep_cent, dtype=np.float32),
+        }
+
         # Store the *analysis* parameters (you can later read these
         # when building your summary in the app)
         self.adata.uns["analysis"] = {
@@ -166,7 +209,6 @@ class Dataset:
 
         # check index is fine between proteins and matrix index
         assert list(protein_meta_df.index) == list(protein_index)
-
 
     def get_anndata(self) -> ad.AnnData:
         """Export the processed dataset as an AnnData object."""
