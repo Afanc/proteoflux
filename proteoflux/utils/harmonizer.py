@@ -19,6 +19,9 @@ class DataHarmonizer:
         "protein_weight": "PROTEIN_WEIGHT",
         "protein_descriptions": "PROTEIN_DESCRIPTIONS",
         "gene_names": "GENE_NAMES",
+        "precursors_exp_column": "PRECURSORS_EXP",
+        "ibaq_column": "IBAQ",
+        "peptide_seq_column":   "PEPTIDE_LSEQ",
     }
 
     def __init__(self, column_config: dict):

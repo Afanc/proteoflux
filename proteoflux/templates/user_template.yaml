@@ -9,10 +9,13 @@ dataset:
   replicate_column: "R.Replicate"
   filename_column: "R.FileName"
   run_evidence_column: "PG.RunEvidenceCount"
+  precursors_exp_column: "PG.NrOfPrecursorsIdentified (Experiment-wide)"
+  ibaq_column: "PG.IBAQ"
   fasta_column: "PG.FastaHeaders"
   protein_weight: "PG.MolecularWeight"
   protein_descriptions: "PG.ProteinDescriptions"
   gene_names: "PG.Genes"
+  peptide_seq_column: "FG.LabeledSequence"
 
 preprocessing:
   filtering:

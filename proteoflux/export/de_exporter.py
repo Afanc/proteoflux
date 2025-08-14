@@ -64,6 +64,30 @@ class DEExporter:
                                 columns=self.contrasts)
         return None
 
+    def _peptide_frames(self):
+
+        pep = self.adata.uns["peptides"]
+
+        # Build left-side peptide metadata from provided arrays
+        meta = pd.DataFrame(
+            {
+                "PEPTIDE_ID": pep["rows"],
+                "PROTEIN_INDEX": pep["protein_index"],
+                "PEPTIDE_SEQ": pep["peptide_seq"],
+            },
+            index=pep["rows"],
+        )
+
+        # Samples are in pep["cols"]; data in pep["raw"] and pep["centered"]
+        raw_df = pd.DataFrame(pep["raw"], index=pep["rows"], columns=pep["cols"])
+        centered_df = pd.DataFrame(pep["centered"], index=pep["rows"], columns=pep["cols"])
+
+        # Prepend metadata
+        raw_df = pd.concat([meta, raw_df], axis=1)
+        centered_df = pd.concat([meta, centered_df], axis=1)
+
+        return raw_df, centered_df
+
     def _export_excel(self, tables: dict):
         description = (
             "ProteoFlux Differential Expression Export\n"
@@ -77,6 +101,7 @@ class DEExporter:
             "- Q-values (raw): Classical unmoderated q-values\n"
             "- Missingness: Ratio of missing values per group\n"
             "- Metadata: FASTA headers, gene names, UniProt info\n"
+            "- Spectral Counts: mean run-evidence counts per (protein × sample)\n"
             "- Raw Intensities: Untransformed signal matrix\n"
             "- Processed Log2 Intensities: Normalized, imputed data\n"
             "- Identification Qvalue: PSM-level q-values (from search engine)\n"
@@ -117,7 +142,7 @@ class DEExporter:
         q_ebayes_annot = self._annotate_matrix(q_ebayes, q_ebayes, miss_ratios) if q_ebayes is not None else None
 
         # Metadata sheet
-        meta_cols = ["GENE_NAMES", "FASTA_HEADERS", "PROTEIN_DESCRIPTIONS"]
+        meta_cols = ["GENE_NAMES", "FASTA_HEADERS", "PROTEIN_DESCRIPTIONS", "PRECURSORS_EXP"]
         meta_df = self.adata.var[meta_cols].copy() if all(c in self.adata.var.columns for c in meta_cols) else None
 
         # Raw & X intensities
@@ -128,6 +153,10 @@ class DEExporter:
         pep = None
         if "pep" in self.adata.layers:
             pep = pd.DataFrame(self.adata.layers["pep"], index=self.adata.obs_names, columns=self.adata.var_names)
+        spectral_counts = pd.DataFrame(self.adata.layers.get("spectral_counts"), index=self.adata.obs_names, columns=self.adata.var_names)
+
+        # Peptide tables (wide and centered)
+        pep_wide_df, pep_centered_df = self._peptide_frames()
 
         t_raw = self._get_dataframe("t")
         p_raw = self._get_dataframe("p")
@@ -157,10 +186,13 @@ class DEExporter:
             "Missingness": miss_ratios,
             "Identification Qvalue": qval.T,
             "Identification PEP": pep.T if pep is not None else None,
+            "Spectral Counts": spectral_counts.T,
             "Raw Intensities": raw.T,
             "T-statistics (raw)": t_raw,
             "P-values (raw)": p_raw,
             "Q-values (raw)": q_raw,
+            "Peptides (wide)": pep_wide_df,
+            "Peptides (centered)": pep_centered_df,
         }
 
         if self.use_xlsx:

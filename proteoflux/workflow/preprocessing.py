@@ -85,8 +85,11 @@ class Preprocessor:
             processed=self.intermediate_results.dfs.get("imputed"),
             qvalues=self.intermediate_results.dfs.get("qvalues"),
             pep=self.intermediate_results.dfs.get("pep"),
+            spectral_counts=self.intermediate_results.dfs.get("spectral_counts"),
             condition_pivot=self.intermediate_results.dfs.get("condition_pivot"),
             protein_meta=self.intermediate_results.dfs.get("protein_metadata"),
+            peptides_wide=self.intermediate_results.dfs.get("peptides_wide"),
+            peptides_centered=self.intermediate_results.dfs.get("peptides_centered"),
             meta_cont = self.intermediate_results.metadata.get("filtering").get("meta_cont"),
             meta_qvalue = self.intermediate_results.metadata.get("filtering").get("meta_qvalue"),
             meta_pep =  self.intermediate_results.metadata.get("filtering").get("meta_pep"),
@@ -191,19 +194,22 @@ class Preprocessor:
                      "GENE_NAMES",
                      "PROTEIN_DESCRIPTIONS",
                      "PROTEIN_WEIGHT",
-                     "RUN_EVIDENCE_COUNT",
-                     "PG.IBAQ"}
+                     "IBAQ",
+                     "PRECURSORS_EXP"}
         existing = [col for col in df.columns if col in keep_cols]
 
         # --- make sure numeric columns are truly numeric ---
         df = df.select(existing)
         casts = []
-        if "PG.IBAQ" in df.columns:
-            casts.append(pl.col("PG.IBAQ").cast(pl.Float64, strict=False))       # non-numeric -> null
+        if "IBAQ" in df.columns:
+            casts.append(pl.col("IBAQ").cast(pl.Float64, strict=False))
         if "PROTEIN_WEIGHT" in df.columns:
             casts.append(pl.col("PROTEIN_WEIGHT").cast(pl.Float64, strict=False))
         if "RUN_EVIDENCE_COUNT" in df.columns:
             casts.append(pl.col("RUN_EVIDENCE_COUNT").cast(pl.Int64, strict=False))
+        if "PRECURSORS_EXP" in df.columns:
+            casts.append(pl.col("PRECURSORS_EXP").cast(pl.Int64, strict=False))
+
         if casts:
             df = df.with_columns(casts)
 
@@ -257,6 +263,63 @@ class Preprocessor:
          # 5) Rename back to the original sample names
          return pivot_df.rename({c: c for c in df[sample_col].unique()})
 
+    def _build_peptide_tables(self) -> None:
+        df = self.intermediate_results.dfs["filtered_final/RE"]
+
+        needed = {"INDEX", "FILENAME", "SIGNAL", "PEPTIDE_LSEQ"}
+        if not needed.issubset(df.columns):
+            return
+
+        # normalize sequence: drop Oxidation[...] and trim outer "_"
+        seq_clean = (
+            pl.col("PEPTIDE_LSEQ")
+              .str.replace_all(r"(?i)\[Oxidation[^\]]*\]", "")
+              .str.replace_all(r"^_+|_+$", "")
+              .alias("PEPTIDE_SEQ")
+        )
+
+        base = df.select(
+            pl.col("INDEX"),
+            pl.col("FILENAME"),
+            pl.col("SIGNAL"),
+            seq_clean,
+        ).with_columns(
+            (pl.col("INDEX").cast(pl.Utf8) + pl.lit("|") + pl.col("PEPTIDE_SEQ")).alias("PEPTIDE_ID")
+        )
+
+        # pivot with your helper (sum duplicates)
+        pep_pivot = self._pivot_df(
+            df=base.select(["PEPTIDE_ID", "FILENAME", "SIGNAL"]),
+            sample_col="FILENAME",
+            protein_col="PEPTIDE_ID",
+            values_col="SIGNAL",
+            aggregate_fn="sum",
+        )
+
+        # readable columns
+        id_map = base.select(["PEPTIDE_ID", "INDEX", "PEPTIDE_SEQ"]).unique()
+        pep_wide = pep_pivot.join(id_map, on="PEPTIDE_ID", how="left")
+
+        # centered (row / row-mean ignoring NaNs)
+        sample_cols = [c for c in pep_wide.columns if c not in ("PEPTIDE_ID","INDEX","PEPTIDE_SEQ")]
+        row_sum = pl.sum_horizontal(
+            *[pl.when(pl.col(c).is_nan()).then(0.0).otherwise(pl.col(c)) for c in sample_cols]
+        )
+        # Row-wise count of non-NaN cells
+        pep_centered = (
+            pep_wide
+            .with_columns(
+                pl.mean_horizontal([
+                    pl.when(pl.col(c).is_nan()).then(None).otherwise(pl.col(c))
+                    for c in sample_cols
+                ]).alias("__rowmean__")
+            )
+            .with_columns([(pl.col(c) / pl.col("__rowmean__")).alias(c) for c in sample_cols])
+            .drop("__rowmean__")
+        )
+
+        return pep_wide, pep_centered
+
     def _pivot_data(self) -> None:
         """
         Converts the dataset from long format (one row per protein per sample)
@@ -297,10 +360,25 @@ class Preprocessor:
                                     values_col='PEP',
                                     aggregate_fn='mean'
                                     )
+        rec_pivot = None
+        if "RUN_EVIDENCE_COUNT" in df.columns :
+            rec_pivot = self._pivot_df(
+                                    df=df,
+                                    sample_col='FILENAME',
+                                    protein_col='INDEX',
+                                    values_col='RUN_EVIDENCE_COUNT',
+                                    aggregate_fn='mean'
+                                    )
+
+        raw_pep_pivot, centered_pep_pivot = self._build_peptide_tables()
+
         self.intermediate_results.set_columns_and_index(intensity_pivot)
         self.intermediate_results.add_df("raw_df", intensity_pivot)
         self.intermediate_results.add_df("qvalues", qvalue_pivot)
         self.intermediate_results.add_df("pep", pep_pivot)
+        self.intermediate_results.add_df("spectral_counts", rec_pivot)
+        self.intermediate_results.dfs["peptides_wide"]     = raw_pep_pivot
+        self.intermediate_results.dfs["peptides_centered"] = centered_pep_pivot
 
     @log_time("Normalization")
     def _normalize(self) -> None:
