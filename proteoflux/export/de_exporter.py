@@ -191,7 +191,7 @@ class DEExporter:
             "T-statistics (raw)": t_raw,
             "P-values (raw)": p_raw,
             "Q-values (raw)": q_raw,
-            "Peptides (wide)": pep_wide_df,
+            "Peptides (raw)": pep_wide_df,
             "Peptides (centered)": pep_centered_df,
         }
 

@@ -13,7 +13,6 @@ def run_clustering(
     umap_kwargs: Optional[Dict[str, Any]] = None,
     hierarchical_method: str = "ward",
     hierarchical_metric: str = "euclidean",
-    center: bool = True
 ) -> AnnData:
     """
     Compute PCA, UMAP, and hierarchical clustering on an AnnData object.
@@ -32,8 +31,6 @@ def run_clustering(
         Linkage method for hierarchical clustering.
     hierarchical_metric
         Distance metric for hierarchical clustering.
-    center
-        If True, subtract each protein's mean across samples before clustering.
 
     Returns
     -------
@@ -65,24 +62,21 @@ def run_clustering(
     sample_order = adata.obs_names[sample_leaves].tolist()
 
     # 3) Prepare data for hierarchical clustering
-    mat = np.array(data, copy=True)
-    if center:
-        # subtract per-feature mean
-        mat = mat - np.nanmean(mat, axis=0)[None, :]
-        adata.layers['centered'] = mat
+    mats = {"intensity": adata.X}
+    Xc = adata.X - np.nanmean(adata.X, axis=0, keepdims=True)
+    adata.layers["centered"] = Xc
+    mats["centered"] = Xc
 
+    for tag, M in mats.items():
+        s_link = sch.linkage(M,   method=hierarchical_method, metric=hierarchical_metric)
+        f_link = sch.linkage(M.T, method=hierarchical_method, metric=hierarchical_metric)
+        s_leaves = sch.leaves_list(s_link)
+        f_leaves = sch.leaves_list(f_link)
 
-    # 4) Hierarchical clustering on samples
-    sample_linkage = sch.linkage(mat, method=hierarchical_method, metric=hierarchical_metric)
-    leaves_s = sch.leaves_list(sample_linkage)
-    adata.uns['sample_linkage'] = sample_linkage
-    adata.uns['sample_order']   = samples[leaves_s].tolist()
-
-    # 5) Hierarchical clustering on features
-    feat_linkage = sch.linkage(mat.T, method=hierarchical_method, metric=hierarchical_metric)
-    leaves_f     = sch.leaves_list(feat_linkage)
-    adata.uns['feature_linkage'] = feat_linkage
-    adata.uns['feature_order']   = features[leaves_f].tolist()
+        adata.uns[f"{tag}_sample_linkage"]  = s_link
+        adata.uns[f"{tag}_feature_linkage"] = f_link
+        adata.uns[f"{tag}_sample_order"]    = samples[s_leaves].tolist()
+        adata.uns[f"{tag}_feature_order"]   = features[f_leaves].tolist()
 
     return adata
 
