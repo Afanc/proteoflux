@@ -65,7 +65,10 @@ class Dataset:
 
         if self.load_method == 'polars':
             # Use Polars to load the data, like a normal person
-            df = pl.read_csv(file_path, separator=delimiter, infer_schema_length=10000)
+            df = pl.read_csv(file_path,
+                             separator=delimiter,
+                             infer_schema_length=10000,
+                             null_values=["NA", "NaN", "N/A", ""])
             return df
         elif self.load_method == 'pyarrow':
             # Use pyarrow, eh it's good but slow
@@ -121,12 +124,22 @@ class Dataset:
         protein_meta_df = protein_meta_df.loc[protein_index]
 
         # Layers
-        qval, _ = polars_matrix_to_numpy(qval_mat, index_col="INDEX")
-        pep, _ = polars_matrix_to_numpy(pep_mat, index_col="INDEX")
-        sc, _ = polars_matrix_to_numpy(sc_mat, index_col="INDEX")
-        lognorm, _ = polars_matrix_to_numpy(lognorm_mat, index_col="INDEX")
-        normalized, _ = polars_matrix_to_numpy(normalized_mat, index_col="INDEX")
-        raw, _ = polars_matrix_to_numpy(filtered_mat, index_col="INDEX")
+        def _to_np(opt_df):
+            return polars_matrix_to_numpy(opt_df, index_col="INDEX")
+
+        qval, _    = _to_np(qval_mat)
+        pep, _    = _to_np(pep_mat)
+        sc, _    = _to_np(sc_mat)
+        lognorm, _ = _to_np(lognorm_mat)
+        normalized, _ = _to_np(normalized_mat)
+        raw, _  = _to_np(filtered_mat)
+
+        #qval, _ = polars_matrix_to_numpy(qval_mat, index_col="INDEX")
+        #pep, _ = polars_matrix_to_numpy(pep_mat, index_col="INDEX")
+        #sc, _ = polars_matrix_to_numpy(sc_mat, index_col="INDEX")
+        #lognorm, _ = polars_matrix_to_numpy(lognorm_mat, index_col="INDEX")
+        #normalized, _ = polars_matrix_to_numpy(normalized_mat, index_col="INDEX")
+        #raw, _ = polars_matrix_to_numpy(filtered_mat, index_col="INDEX")
 
         # Create var and obs metadata
         sample_names = [col for col in processed_mat.columns if col != "INDEX"]
@@ -146,9 +159,12 @@ class Dataset:
         self.adata.layers["raw"] = raw.T
         self.adata.layers["lognorm"] = lognorm.T
         self.adata.layers["normalized"] = normalized.T
-        self.adata.layers["qvalue"] = qval.T
-        self.adata.layers["pep"] = pep.T
-        self.adata.layers["spectral_counts"] = sc.T
+        if qval is not None:
+            self.adata.layers["qvalue"] = qval.T
+        if pep is not None:
+            self.adata.layers["pep"] = pep.T
+        if sc is not None:
+            self.adata.layers["spectral_counts"] = sc.T
 
         # Attach filtered data
 
@@ -162,7 +178,6 @@ class Dataset:
             "normalization": self.preprocessor.normalization,
             "imputation":    self.preprocessor.imputation,
         }
-
 
         # Peptide tables
         sample_names = [c for c in processed_mat.columns if c != "INDEX"]

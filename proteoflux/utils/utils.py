@@ -59,6 +59,9 @@ def polars_matrix_to_numpy(df: pl.DataFrame, index_col: str = "INDEX") -> Tuple[
     Returns:
         Tuple[np.ndarray, pd.Index]: Matrix as numpy array, and index labels.
     """
+    if df is None:
+        return None, None
+
     if index_col not in df.columns:
         raise ValueError(f"Expected index column '{index_col}' not found in DataFrame.")
 

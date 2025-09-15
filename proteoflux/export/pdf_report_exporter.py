@@ -401,7 +401,7 @@ class ReportPlotter:
         ax_bar.grid(axis='y', which='both', visible=True)
         ax_bar.bar(counts.index, counts.values, color=sample_colors)
         ax_bar.set_xticks(range(len(counts.index)))
-        ax_bar.set_xticklabels(counts.index,rotation=45)
+        ax_bar.set_xticklabels(counts.index,rotation=45, ha='right')
         ax_bar.set_ylabel('Number of IDs')
         ax_bar.set_ylim([0, np.max(counts.values)+700]) #add some padding for annotation
         ax_bar.set_title('Protein IDs per Sample')

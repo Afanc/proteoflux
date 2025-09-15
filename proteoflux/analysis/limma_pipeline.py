@@ -91,18 +91,28 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     out.uns["contrast_names"] = list(contrast_df.columns)
 
     # === Missingness exactly as before ===
+    if "qvalue" in adata.layers:
+        miss_mat = adata.layers["qvalue"].T
+        miss_source = "qvalue"
+    elif "raw" in adata.layers:
+        # Use pre-imputation raw intensities; NaN means missing
+        miss_mat = adata.layers["raw"].T
+        miss_source = "raw"
+    else:
+        # Last resort: use X (may be imputed). Still better than crashing.
+        miss_mat = adata.X.T
+        miss_source = "X"
+
     missing_df = StatisticalTester.compute_missingness(
-        intensity_matrix = adata.layers["qvalue"].T,
+        intensity_matrix = miss_mat,
         conditions       = adata.obs['CONDITION'].tolist(),
         feature_ids      = adata.var_names.tolist(),
     )
     out.uns["missingness"] = missing_df
+    out.uns["missingness_source"] = miss_source
+    out.uns["missingness_rule"] = "nan-is-missing"
 
     return out
-    # clustering
-    #out = run_clustering(out, n_pcs=out.X.shape[0]-1)
-    #out = run_clustering_missingness(out)
-
 
 @log_time("Clustering")
 def clustering_pipeline(adata: ad.AnnData) -> ad.AnnData:
