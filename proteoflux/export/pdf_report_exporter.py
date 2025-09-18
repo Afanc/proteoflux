@@ -280,7 +280,7 @@ class ReportPlotter:
             op = "≥" if flt_meta.get("pep").get("direction").startswith("greater") else "≤"
             n_p = f"{removed_pep}".replace(",", "'")
             fig.text(x0 + 0.06, y,
-                     f"- Probab. {op} {filtering['pep']}: {n_p} PSM removed",
+                     f"- PEP {op} {filtering['pep']}: {n_p} PSM removed",
                      ha="left", va="top", fontsize=11)
             y -= 0.8 * line_height
 
