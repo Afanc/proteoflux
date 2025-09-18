@@ -31,6 +31,7 @@ class Dataset:
         self.file_path = dataset_cfg.get("input_file", None)
         self.load_method = dataset_cfg.get("load_method", 'polars')
         self.input_layout = dataset_cfg.get("input_layout", "long")
+        self.analysis_type = dataset_cfg.get("analysis_type", "DIA")
 
         # Harmonizer setup
         self.harmonizer = DataHarmonizer(dataset_cfg)
@@ -163,6 +164,8 @@ class Dataset:
         # Attach filtered data
 
         self.adata.uns["preprocessing"] = {
+            "input_layout": self.input_layout,
+            "analysis_type" : self.analysis_type,
             "filtering": {
                 "cont":    self.preprocessed_data.meta_cont,
                 "qvalue":  self.preprocessed_data.meta_qvalue,
@@ -212,7 +215,6 @@ class Dataset:
         # Store the *analysis* parameters (you can later read these
         # when building your summary in the app)
         self.adata.uns["analysis"] = {
-            "input_layout": self.input_layout,
             "de_method":     "limma_ebayes",
         }
 

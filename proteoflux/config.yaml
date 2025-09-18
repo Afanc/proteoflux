@@ -1,6 +1,7 @@
 dataset:
   input_file: "data/searle_test2.tsv"
   input_layout: "long"
+  analysis_type: "DIA"
   annotation_file: "data/annotation_searle2.tsv"
   index_column: "PG.ProteinGroups"
   signal_column: "FG.MS2RawQuantity"

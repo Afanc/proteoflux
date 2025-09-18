@@ -1,6 +1,7 @@
 dataset:
   input_file: "data/fp_data.tsv"
   annotation_file: "data/annotation_fp.tsv"
+  analysis_type: "DDA"
   input_layout: "wide"
   index_column: "ProteinID"
   signal_column: "SIGNAL"
@@ -39,7 +40,6 @@ preprocessing:
     rf_random_state: 42
 
 analysis:
-  analysis_type: "DIA"
   sign_threshold: 0.05
   annotation_matrix: false
   exports:
