@@ -3,6 +3,7 @@ import anndata as ad
 import pandas as pd
 import numpy as np
 import patsy
+from itertools import combinations
 import inmoose.limma as imo
 from scipy.stats import t as t_dist
 from statsmodels.stats.multitest import multipletests
@@ -15,35 +16,41 @@ from proteoflux.analysis.clustering import run_clustering, run_clustering_missin
 def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
 
     # 2) Read design column & one-hot encode
-    #group_col = config["design"]["group_column"]
-    obs       = adata.obs.copy()
-    levels    = sorted(obs["CONDITION"].unique())
+    obs    = adata.obs.copy()
+    levels = sorted(obs["CONDITION"].unique())
+    if len(levels) < 2:
+        raise ValueError(f"Need ≥2 conditions for contrasts; found {levels}")
     for lvl in levels:
         obs[lvl] = (obs["CONDITION"] == lvl).astype(int)
 
-    # 3) Patsy design (one column per level, no intercept)
+    # 3) Patsy design (no intercept) — keep as Patsy DesignMatrix
     formula   = "0 + " + " + ".join(levels)
     design_dm = patsy.dmatrix(formula, obs)
 
-    # 4) Expression matrix: genes × samples
-    df_X = pd.DataFrame(
-        adata.X, index=adata.obs_names, columns=adata.var_names
-    ).T
+    # 4) Expression: genes × samples
+    df_X = pd.DataFrame(adata.X, index=adata.obs_names, columns=adata.var_names).T
 
-    # 5) Fit linear model & contrasts
+    # 5) Fit
     fit_imo = imo.lmFit(df_X, design=design_dm)
-
     resid_var = np.asarray(fit_imo.sigma, dtype=np.float32) ** 2
     adata.uns["residual_variance"] = resid_var
 
-    # auto-generate all pairwise contrasts
-    contrast_defs = [f"{a} - {b}" for a, b in combinations(levels, 2)]
-    contrast_df   = imo.makeContrasts(contrast_defs, levels=design_dm)
-    # normalize to “_vs_” names
-    contrast_df.columns = [
-        c.replace(" - ", "_vs_") for c in contrast_df.columns
-    ]
+    # 6) Contrasts (with optional only_against)
+    base = (config or {}).get("analysis", {}).get("only_against", None)
 
+    if base is not None:
+        if base not in levels:
+            raise ValueError(f"only_against='{base}' not found in CONDITION levels {levels}")
+        contrast_defs = [f"{c} - {base}" for c in levels if c != base]
+    else:
+        contrast_defs = [f"{a} - {b}" for a, b in combinations(levels, 2)]
+
+    # IMPORTANT: pass the Patsy DesignMatrix as 'levels' (exactly like before)
+    contrast_df = imo.makeContrasts(contrast_defs, levels=design_dm)
+    # (Optional) pretty names for downstream labeling
+    contrast_df.columns = [c.replace(" - ", "_vs_") for c in contrast_df.columns]
+
+    # Now coefficients @ contrasts lines up (both use the same unnamed basis)
     fit_imo = imo.contrasts_fit(fit_imo, contrasts=contrast_df)
 
     # === RAW (pre-eBayes) statistics ===

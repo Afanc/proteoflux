@@ -31,6 +31,19 @@ def log_indent():
     finally:
         _thread_local.indent -= 2
 
+# utils.py
+def _cur_indent() -> int:
+    return getattr(_thread_local, "indent", 0)
+
+def log_info(msg: str) -> None:
+    logger.info(" " * _cur_indent() + msg)
+
+def log_warning(msg: str) -> None:
+    logger.warning(" " * _cur_indent() + msg)
+
+def log_error(msg: str) -> None:
+    logger.error(" " * _cur_indent() + msg)
+
 def log_time(task_name):
     def decorator(func):
         @wraps(func)

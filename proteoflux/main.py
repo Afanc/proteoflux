@@ -22,9 +22,10 @@ def run_pipeline(config: dict):
     export_config = analysis_config.get("exports")
     if analysis_config.get("export_table", True):
         exporter = DEExporter(adata,
-                      output_path=export_config.get("path_table"),
+                              output_path=export_config.get("path_table"),
                               sig_threshold=analysis_config.get("sign_threshold"),
-                             )
+                              annotate_matrix=export_config.get("annotate_matrix"),
+                              )
         exporter.export()
 
     exporter.export_adata(export_config.get("path_h5ad"))

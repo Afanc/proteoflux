@@ -30,6 +30,7 @@ class Dataset:
         dataset_cfg = kwargs.get("dataset", {})
         self.file_path = dataset_cfg.get("input_file", None)
         self.load_method = dataset_cfg.get("load_method", 'polars')
+        self.input_layout = dataset_cfg.get("input_layout", "long")
 
         # Harmonizer setup
         self.harmonizer = DataHarmonizer(dataset_cfg)
@@ -134,13 +135,6 @@ class Dataset:
         normalized, _ = _to_np(normalized_mat)
         raw, _  = _to_np(filtered_mat)
 
-        #qval, _ = polars_matrix_to_numpy(qval_mat, index_col="INDEX")
-        #pep, _ = polars_matrix_to_numpy(pep_mat, index_col="INDEX")
-        #sc, _ = polars_matrix_to_numpy(sc_mat, index_col="INDEX")
-        #lognorm, _ = polars_matrix_to_numpy(lognorm_mat, index_col="INDEX")
-        #normalized, _ = polars_matrix_to_numpy(normalized_mat, index_col="INDEX")
-        #raw, _ = polars_matrix_to_numpy(filtered_mat, index_col="INDEX")
-
         # Create var and obs metadata
         sample_names = [col for col in processed_mat.columns if col != "INDEX"]
 
@@ -218,7 +212,7 @@ class Dataset:
         # Store the *analysis* parameters (you can later read these
         # when building your summary in the app)
         self.adata.uns["analysis"] = {
-            "analysis_type": "DIA",
+            "input_layout": self.input_layout,
             "de_method":     "limma_ebayes",
         }
 

@@ -16,7 +16,7 @@ from proteoflux.dataset.preprocessresults import PreprocessResults
 from proteoflux.dataset.intermediateresults import IntermediateResults
 from proteoflux.evaluation.normalization_evaluator import NormalizerPlotter
 from proteoflux.evaluation.imputation_evaluator import ImputeEvaluator
-from proteoflux.utils.utils import load_contaminant_accessions, log_time, logger
+from proteoflux.utils.utils import load_contaminant_accessions, log_time, logger, log_info
 
 class Preprocessor:
     """Handles filtering, normalization, and imputation for proteomics data."""
@@ -155,7 +155,7 @@ class Preprocessor:
                 "number_dropped": 0,
             }
             self.intermediate_results.add_metadata("filtering", f"meta_{stat.lower()}", skipped)
-            logger.info(f"{stat} filtering: skipped (column not present).")
+            log_info(f"{stat} filtering: skipped (column not present).")
             return df
 
         # Configure threshold + direction
@@ -186,7 +186,7 @@ class Preprocessor:
             "number_dropped": len(df_dropped),
         }
         self.intermediate_results.add_metadata("filtering", f"meta_{stat.lower()}", dropped_dict)
-        logger.info(f"{stat} filtering: kept={len(df_kept)} dropped={len(df_dropped)} (direction={direction_note}, thr={threshold}).")
+        log_info(f"{stat} filtering: kept={len(df_kept)} dropped={len(df_dropped)} (direction={direction_note}, thr={threshold}).")
 
         return df_kept
 
@@ -225,7 +225,7 @@ class Preprocessor:
                 "number_dropped": 0,
             }
             self.intermediate_results.add_metadata("filtering", "meta_rec", skipped)
-            logger.info("Run-evidence filtering: skipped (column not present).")
+            log_info("Run-evidence filtering: skipped (column not present).")
             return df
 
         values = df["RUN_EVIDENCE_COUNT"].to_numpy()
@@ -241,7 +241,7 @@ class Preprocessor:
         }
 
         self.intermediate_results.add_metadata("filtering", "meta_rec", dropped_dict)
-        logger.info(f"Run-evidence filtering: kept={len(df_kept)} dropped={len(df_dropped)} (thr={self.filter_run_evidence_count}).")
+        log_info(f"Run-evidence filtering: kept={len(df_kept)} dropped={len(df_dropped)} (thr={self.filter_run_evidence_count}).")
 
         return df_kept
 
@@ -533,7 +533,7 @@ class Preprocessor:
                 aggregate_fn='mean'
             )
         else:
-            logger.info("Pivot: QVALUE matrix not built (column not present).")
+            log_info("Pivot: QVALUE matrix not built (column not present).")
 
         # Pivot PEP if present
         pep_pivot = None
@@ -674,6 +674,8 @@ class Preprocessor:
         models = None
         regression_scale_used = None
         regression_type_used = None
+        tags = None
+        tag_matches = None
 
         if isinstance(normalization_method, str):
             normalization_method = [normalization_method]
@@ -717,15 +719,87 @@ class Preprocessor:
                     span=self.normalization.get("loess_span"),
                     condition_labels=condition_labels
                 )
+            elif method == "median_equalization_by_tag":
+                # --- config ---
+                tag_value  = self.normalization.get("reference_tag")
+                fasta_col  = self.normalization.get("fasta_column", "FASTA_HEADERS")
+
+                if tag_value is None or (isinstance(tag_value, str) and not tag_value.strip()):
+                    raise ValueError("median_equalization_by_tag requires normalization.reference_tag")
+
+                tags = [tag_value] if isinstance(tag_value, str) else list(tag_value)
+                tags = [t.strip() for t in tags if isinstance(t, str) and t.strip()]
+
+                # --- get FASTA headers aligned to the current protein order ---
+                meta_df = self.intermediate_results.dfs.get("protein_metadata")
+                if meta_df is None or fasta_col not in meta_df.columns:
+                    raise ValueError(f"median_equalization_by_tag requires protein_metadata with column '{fasta_col}'")
+
+                # join FASTA headers onto the current df to preserve row order
+                idx_col = "INDEX"
+                fasta_map = meta_df.select([idx_col, fasta_col])
+                df_with_fasta = df.join(fasta_map, on=idx_col, how="left")
+
+                # boolean mask of proteins used as reference (case-insensitive substring)
+                fasta_vals = df_with_fasta.get_column(fasta_col).to_list()
+                ref_mask = np.array([
+                    (s is not None) and any(t in str(s).lower() for t in [t.lower() for t in tags])
+                    for s in fasta_vals
+                ], dtype=bool)
+
+                n_ref = int(ref_mask.sum())
+                if n_ref == 0:
+                    log_info(f"median_equalization_by_tag: no proteins matched tag(s) {tags} in '{fasta_col}'. Step skipped.")
+                    # leave mat as-is and continue
+                else:
+                    # compute medians on the reference subset (current space: log or linear, consistent with your existing method)
+                    ref_sub = mat[ref_mask, :]
+
+                    ref_counts = np.sum(np.isfinite(ref_sub), axis=0)  # per-sample non-NaN counts in the reference set
+                    if np.any(ref_counts == 0):
+                        sample_names = self.intermediate_results.columns
+                        missing_samples = [sample_names[i] for i, c in enumerate(ref_counts) if c == 0]
+                        log_info(f"median_equalization_by_tag: no reference signal in samples: {missing_samples} → leaving those samples unscaled (factor=1).")
+
+                    ref_col_meds = np.nanmedian(ref_sub, axis=0, keepdims=True)      # shape (1, n_samples)
+                    ref_global   = np.nanmedian(ref_sub)                              # scalar
+
+                    # build safe scale factors (don’t touch columns with NaN medians)
+                    scale = np.where(np.isfinite(ref_col_meds), ref_global / ref_col_meds, 1.0)
+                    mat = mat * scale
+
+                    self.normalization["tag_matches"] = n_ref
+
+                    log_info(f"median_equalization_by_tag: matched={n_ref} proteins by {tags} in '{fasta_col}'.")
 
             elif method == "none":
-                print("Skipping normalization (raw data)")
+                log_info(f"Skipping normalization (raw data)")
 
             else:
                 raise ValueError(f"Invalid normalization method: {method}")
 
         df = df.with_columns(pl.DataFrame(mat, schema=numeric_cols))
         postlog_df = df.with_columns(pl.DataFrame(postlog_mat, schema=numeric_cols))
+
+        # Decide if any log step was applied in the normalization chain
+        has_log_step = any(
+            (m or "").lower() in {"log2", "log10", "log", "ln"}
+            for m in (self.normalization.get("method") or [])
+        )
+
+        if not has_log_step:
+            # original_mat is the pre-normalization matrix (log2 when input is FP)
+            raw_lin = np.where(np.isnan(original_mat), np.nan, np.exp2(original_mat))
+            # 1) overwrite raw_df's numeric columns with linear values
+            numeric_cols = self.intermediate_results.columns
+            self.intermediate_results.dfs["raw_df"] = (
+                self.intermediate_results.dfs["raw_df"]
+                .with_columns(pl.DataFrame(raw_lin, schema=numeric_cols))
+            )
+            # 2) store linear matrix as raw_mat
+            original_mat = raw_lin
+            log_info("No log step detected → saving RAW DATA in linear space (assumed input log2).")
+
 
         self.intermediate_results.add_matrix("raw_mat", original_mat)
         self.intermediate_results.add_matrix("postlog", postlog_mat)
@@ -745,7 +819,12 @@ class Preprocessor:
         self.intermediate_results.add_metadata("normalization",
                                                "span",
                                                self.normalization.get("loess_span"))
-
+        self.intermediate_results.add_metadata("normalization",
+                                               "tags",
+                                               tags)
+        self.intermediate_results.add_metadata("normalization",
+                                               "tag_matches",
+                                               tag_matches)
 
     @log_time("Imputation")
     def _impute(self) -> None:
