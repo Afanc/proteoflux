@@ -295,19 +295,21 @@ class ReportPlotter:
 
         # Normalization
         norm_methods = normalization.get("method", [])
+        line_height_mult = 1
         if isinstance(norm_methods, list):
-            norm_methods = "+".join(norm_methods)
+            norm_methods = ", ".join(norm_methods)
         if "loess" in norm_methods:
             loess_span = preproc.get("normalization").get("loess_span")
             norm_methods += f" (loess_span={loess_span})"
         if "median_equalization_by_tag" in norm_methods:
             tags = preproc.get("normalization").get("reference_tag")
             tag_matches = preproc.get("normalization").get("tag_matches")
-            norm_methods += f" (tags={tags}, matches={tag_matches})"
+            norm_methods += f"\n   tags={tags}, matches={tag_matches}"
+            line_height_mult = 1.5
 
         fig.text(x0 + 0.02, y, f"- Normalization: {norm_methods}",
                  ha="left", va="top", fontsize=12)
-        y -= line_height
+        y -= line_height_mult*line_height
 
         # Imputation
         imp = preproc.get("imputation", {})
