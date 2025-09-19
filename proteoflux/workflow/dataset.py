@@ -10,7 +10,7 @@ import warnings
 
 from proteoflux.workflow.preprocessing import Preprocessor
 from proteoflux.utils.harmonizer import DataHarmonizer
-from proteoflux.utils.utils import polars_matrix_to_numpy, log_time, logger
+from proteoflux.utils.utils import polars_matrix_to_numpy, log_time, logger, log_info
 
 pl.Config.set_tbl_rows(100)
 # Supnress the ImplicitModificationWarning from AnnData
@@ -33,6 +33,25 @@ class Dataset:
         self.input_layout = dataset_cfg.get("input_layout", "long")
         self.analysis_type = dataset_cfg.get("analysis_type", "DIA")
 
+        dataset_cfg = kwargs.get("dataset", {}) or {}
+
+        # Accept string OR list for exclude_runs
+        raw_excl = dataset_cfg.get("exclude_runs")
+
+        def _to_set(x):
+            if x is None:
+                return set()
+            if isinstance(x, str):
+                return {x.strip()} if x.strip() else set()
+            try:
+                return {str(v).strip() for v in x if str(v).strip()}
+            except TypeError:
+                # not iterable (e.g. int); fall back to single-item set
+                s = str(x).strip()
+                return {s} if s else set()
+
+        self.exclude_runs = _to_set(raw_excl)
+
         # Harmonizer setup
         self.harmonizer = DataHarmonizer(dataset_cfg)
 
@@ -51,11 +70,42 @@ class Dataset:
         # Harmonize data
         self.rawinput = self.harmonizer.harmonize(self.rawinput)
 
+        # Exclude files if any
+        self.rawinput = self._apply_exclude_runs(self.rawinput)
+
         # Apply preprocessing
         self.preprocessed_data = self._apply_preprocessing(self.rawinput)
 
         # Convert to AnnData format
         self._convert_to_anndata()
+
+    def _apply_exclude_runs(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Drop runs (by FILENAME) if requested. Safe if annotation is absent."""
+        if not self.exclude_runs:
+            return df
+        if "FILENAME" not in df.columns:
+            log_info("Exclude runs: 'FILENAME' not present after harmonization → skip.")
+            return df
+
+        present = set(df.select("FILENAME").to_series().to_list())
+        to_drop = sorted(self.exclude_runs & present)
+        missing = sorted(self.exclude_runs - present)
+
+        if missing:
+            head = ", ".join(missing[:10])
+            tail = " ..." if len(missing) > 10 else ""
+            log_info(f"Exclude runs: {len(missing)} not found in data → ignored: [{head}{tail}]")
+
+        if not to_drop:
+            log_info("Exclude runs: nothing to drop.")
+            return df
+
+        n_before = df.height
+        df2 = df.filter(~pl.col("FILENAME").is_in(to_drop))
+        n_after = df2.height
+        log_info(f"Exclude runs: dropped {len(to_drop)} run(s), removed {n_before - n_after} row(s).")
+
+        return df2
 
     @log_time("Data Loading")
     def _load_rawdata(self, file_path: str) -> Union[pl.DataFrame, pd.DataFrame]:

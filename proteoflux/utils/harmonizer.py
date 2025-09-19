@@ -49,7 +49,7 @@ class DataHarmonizer:
 
         # Pick a single join key (first match wins), then rename only that one → 'FILENAME'
         join_col = None
-        for cand in ("FILENAME", "Run Label", "File Name", "Channel"):
+        for cand in ("FILENAME", "File Name", "Channel"):
             if cand in ann.columns:
                 join_col = cand
                 break
@@ -57,7 +57,7 @@ class DataHarmonizer:
         if join_col is None:
             raise ValueError(
                 f"Annotation file {self.annotation_file!r} must contain a join column: "
-                "'FILENAME', 'Run Label', 'File Name', or 'Channel'."
+                "'FILENAME', 'File Name', or 'Channel'."
             )
 
         if join_col != "FILENAME":
