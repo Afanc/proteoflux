@@ -10,7 +10,7 @@ import warnings
 
 from proteoflux.workflow.preprocessing import Preprocessor
 from proteoflux.utils.harmonizer import DataHarmonizer
-from proteoflux.utils.utils import polars_matrix_to_numpy, log_time, logger
+from proteoflux.utils.utils import polars_matrix_to_numpy, log_time, logger, log_info
 
 pl.Config.set_tbl_rows(100)
 # Supnress the ImplicitModificationWarning from AnnData
@@ -30,6 +30,27 @@ class Dataset:
         dataset_cfg = kwargs.get("dataset", {})
         self.file_path = dataset_cfg.get("input_file", None)
         self.load_method = dataset_cfg.get("load_method", 'polars')
+        self.input_layout = dataset_cfg.get("input_layout", "long")
+        self.analysis_type = dataset_cfg.get("analysis_type", "DIA")
+
+        dataset_cfg = kwargs.get("dataset", {}) or {}
+
+        # Accept string OR list for exclude_runs
+        raw_excl = dataset_cfg.get("exclude_runs")
+
+        def _to_set(x):
+            if x is None:
+                return set()
+            if isinstance(x, str):
+                return {x.strip()} if x.strip() else set()
+            try:
+                return {str(v).strip() for v in x if str(v).strip()}
+            except TypeError:
+                # not iterable (e.g. int); fall back to single-item set
+                s = str(x).strip()
+                return {s} if s else set()
+
+        self.exclude_runs = _to_set(raw_excl)
 
         # Harmonizer setup
         self.harmonizer = DataHarmonizer(dataset_cfg)
@@ -49,11 +70,42 @@ class Dataset:
         # Harmonize data
         self.rawinput = self.harmonizer.harmonize(self.rawinput)
 
+        # Exclude files if any
+        self.rawinput = self._apply_exclude_runs(self.rawinput)
+
         # Apply preprocessing
         self.preprocessed_data = self._apply_preprocessing(self.rawinput)
 
         # Convert to AnnData format
         self._convert_to_anndata()
+
+    def _apply_exclude_runs(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Drop runs (by FILENAME) if requested. Safe if annotation is absent."""
+        if not self.exclude_runs:
+            return df
+        if "FILENAME" not in df.columns:
+            log_info("Exclude runs: 'FILENAME' not present after harmonization → skip.")
+            return df
+
+        present = set(df.select("FILENAME").to_series().to_list())
+        to_drop = sorted(self.exclude_runs & present)
+        missing = sorted(self.exclude_runs - present)
+
+        if missing:
+            head = ", ".join(missing[:10])
+            tail = " ..." if len(missing) > 10 else ""
+            log_info(f"Exclude runs: {len(missing)} not found in data → ignored: [{head}{tail}]")
+
+        if not to_drop:
+            log_info("Exclude runs: nothing to drop.")
+            return df
+
+        n_before = df.height
+        df2 = df.filter(~pl.col("FILENAME").is_in(to_drop))
+        n_after = df2.height
+        log_info(f"Exclude runs: dropped {len(to_drop)} run(s), removed {n_before - n_after} row(s).")
+
+        return df2
 
     @log_time("Data Loading")
     def _load_rawdata(self, file_path: str) -> Union[pl.DataFrame, pd.DataFrame]:
@@ -65,7 +117,10 @@ class Dataset:
 
         if self.load_method == 'polars':
             # Use Polars to load the data, like a normal person
-            df = pl.read_csv(file_path, separator=delimiter, infer_schema_length=10000)
+            df = pl.read_csv(file_path,
+                             separator=delimiter,
+                             infer_schema_length=10000,
+                             null_values=["NA", "NaN", "N/A", ""])
             return df
         elif self.load_method == 'pyarrow':
             # Use pyarrow, eh it's good but slow
@@ -121,12 +176,15 @@ class Dataset:
         protein_meta_df = protein_meta_df.loc[protein_index]
 
         # Layers
-        qval, _ = polars_matrix_to_numpy(qval_mat, index_col="INDEX")
-        pep, _ = polars_matrix_to_numpy(pep_mat, index_col="INDEX")
-        sc, _ = polars_matrix_to_numpy(sc_mat, index_col="INDEX")
-        lognorm, _ = polars_matrix_to_numpy(lognorm_mat, index_col="INDEX")
-        normalized, _ = polars_matrix_to_numpy(normalized_mat, index_col="INDEX")
-        raw, _ = polars_matrix_to_numpy(filtered_mat, index_col="INDEX")
+        def _to_np(opt_df):
+            return polars_matrix_to_numpy(opt_df, index_col="INDEX")
+
+        qval, _    = _to_np(qval_mat)
+        pep, _    = _to_np(pep_mat)
+        sc, _    = _to_np(sc_mat)
+        lognorm, _ = _to_np(lognorm_mat)
+        normalized, _ = _to_np(normalized_mat)
+        raw, _  = _to_np(filtered_mat)
 
         # Create var and obs metadata
         sample_names = [col for col in processed_mat.columns if col != "INDEX"]
@@ -146,13 +204,18 @@ class Dataset:
         self.adata.layers["raw"] = raw.T
         self.adata.layers["lognorm"] = lognorm.T
         self.adata.layers["normalized"] = normalized.T
-        self.adata.layers["qvalue"] = qval.T
-        self.adata.layers["pep"] = pep.T
-        self.adata.layers["spectral_counts"] = sc.T
+        if qval is not None:
+            self.adata.layers["qvalue"] = qval.T
+        if pep is not None:
+            self.adata.layers["pep"] = pep.T
+        if sc is not None:
+            self.adata.layers["spectral_counts"] = sc.T
 
         # Attach filtered data
 
         self.adata.uns["preprocessing"] = {
+            "input_layout": self.input_layout,
+            "analysis_type" : self.analysis_type,
             "filtering": {
                 "cont":    self.preprocessed_data.meta_cont,
                 "qvalue":  self.preprocessed_data.meta_qvalue,
@@ -162,7 +225,6 @@ class Dataset:
             "normalization": self.preprocessor.normalization,
             "imputation":    self.preprocessor.imputation,
         }
-
 
         # Peptide tables
         sample_names = [c for c in processed_mat.columns if c != "INDEX"]
@@ -203,7 +265,6 @@ class Dataset:
         # Store the *analysis* parameters (you can later read these
         # when building your summary in the app)
         self.adata.uns["analysis"] = {
-            "analysis_type": "DIA",
             "de_method":     "limma_ebayes",
         }
 

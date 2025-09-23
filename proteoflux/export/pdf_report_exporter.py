@@ -149,6 +149,7 @@ class ReportPlotter:
         protein_label_key: str = "FASTA_HEADERS",
     ):
         self.config = config
+        self.dataset_config = config.get("dataset", {})
         self.analysis_config = config.get("analysis", {})
 
         self.export_config = self.analysis_config.get("exports")
@@ -197,7 +198,7 @@ class ReportPlotter:
         normalization = preproc.get("normalization", {})
         imputation  = preproc.get("imputation", {})
         de_method   = self.analysis_config.get("ebayes_method", "limma")
-        analysis_type = self.analysis_config.get("analysis_type", "")
+        input_layout = self.dataset_config.get("input_layout", "")
         xlsx_export = os.path.basename(self.analysis_config.get('exports').get('path_table'))
         h5ad_export = os.path.basename(self.analysis_config.get('exports').get('path_h5ad'))
 
@@ -227,9 +228,9 @@ class ReportPlotter:
                 y -= 0.5 * line_height
 
         # Summary generated files
-        fig.text(x0, y, "Analysis Type: ",
+        fig.text(x0, y, "Input Layout: ",
                  ha="left", va="top", fontsize=12, weight="semibold")
-        fig.text(x0 + 0.14, y, f"{analysis_type}",
+        fig.text(x0 + 0.14, y, f"{input_layout}",
                  ha="left", va="top", fontsize=12)
         y -= line_height
 
@@ -276,9 +277,10 @@ class ReportPlotter:
         # 3) PEP threshold
         if "pep" in filtering:
             removed_pep = flt_meta.get("pep").get("number_dropped", 0)
+            op = "≥" if flt_meta.get("pep").get("direction").startswith("greater") else "≤"
             n_p = f"{removed_pep}".replace(",", "'")
             fig.text(x0 + 0.06, y,
-                     f"- PEP ≤ {filtering['pep']}: {n_p} PSM removed",
+                     f"- PEP {op} {filtering['pep']}: {n_p} PSM removed",
                      ha="left", va="top", fontsize=11)
             y -= 0.8 * line_height
 
@@ -293,15 +295,21 @@ class ReportPlotter:
 
         # Normalization
         norm_methods = normalization.get("method", [])
+        line_height_mult = 1
         if isinstance(norm_methods, list):
-            norm_methods = "+".join(norm_methods)
+            norm_methods = ", ".join(norm_methods)
         if "loess" in norm_methods:
             loess_span = preproc.get("normalization").get("loess_span")
             norm_methods += f" (loess_span={loess_span})"
+        if "median_equalization_by_tag" in norm_methods:
+            tags = preproc.get("normalization").get("reference_tag")
+            tag_matches = preproc.get("normalization").get("tag_matches")
+            norm_methods += f"\n   tags={tags}, matches={tag_matches}"
+            line_height_mult = 1.5
 
         fig.text(x0 + 0.02, y, f"- Normalization: {norm_methods}",
                  ha="left", va="top", fontsize=12)
-        y -= line_height
+        y -= line_height_mult*line_height
 
         # Imputation
         imp = preproc.get("imputation", {})
@@ -401,7 +409,7 @@ class ReportPlotter:
         ax_bar.grid(axis='y', which='both', visible=True)
         ax_bar.bar(counts.index, counts.values, color=sample_colors)
         ax_bar.set_xticks(range(len(counts.index)))
-        ax_bar.set_xticklabels(counts.index,rotation=45)
+        ax_bar.set_xticklabels(counts.index,rotation=45, ha='right')
         ax_bar.set_ylabel('Number of IDs')
         ax_bar.set_ylim([0, np.max(counts.values)+700]) #add some padding for annotation
         ax_bar.set_title('Protein IDs per Sample')

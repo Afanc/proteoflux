@@ -1,9 +1,7 @@
 dataset:
-  input_file: "data/searle_test2.tsv"
+  input_file: "data/data_dbp.tsv"
   input_layout: "long"
-  analysis_type: "DIA"
-  annotation_file: "data/annotation_searle2.tsv"
-  exclude_runs: "194_KaForAll_DIA_B22"
+  annotation_file: null
   index_column: "PG.ProteinGroups"
   signal_column: "FG.MS2RawQuantity"
   qvalue_column: "PG.Qvalue"
@@ -24,6 +22,7 @@ preprocessing:
   filtering:
     qvalue: 0.01
     pep: 0.003
+    pep_direction: "lower"
     run_evidence_count: 3
     contaminants_files:
       - "data/Contaminants_2022.fasta"
@@ -31,6 +30,8 @@ preprocessing:
     method:
       - "log2"
       - "median_equalization"
+      - "median_equalization_by_tag"
+    reference_tag: ["XXXX3", "XXXX4"]
     loess_span: 0.9
   imputation:
     method: "tnknn"
@@ -47,9 +48,9 @@ analysis:
     export_plot: true
     export_table: false
     table_use_xlsx: true
-    path_plot: "data/proteoflux_report.pdf"
-    path_table: "data/proteoflux_table.xslx"
-    path_h5ad: "data/proteoflux_results.h5ad"
+    path_plot: "data/proteoflux_report_dbp.pdf"
+    path_table: "data/proteoflux_table_dbp.xslx"
+    path_h5ad: "data/proteoflux_results_dbp.h5ad"
     umap_n_neighbors: 15
     volcano_top_annotated: 20
   title: "Proteoflux Analysis Report"

@@ -1,7 +1,7 @@
 import polars as pl
-from typing import Dict, Optional
-import polars as pl
-from proteoflux.utils.utils import log_time, logger
+from typing import Dict
+from proteoflux.utils.utils import log_time, logger, log_info, log_warning
+
 
 class DataHarmonizer:
     """Harmonizes input data by renaming columns to a common format."""
@@ -21,93 +21,209 @@ class DataHarmonizer:
         "gene_names": "GENE_NAMES",
         "precursors_exp_column": "PRECURSORS_EXP",
         "ibaq_column": "IBAQ",
-        "peptide_seq_column":   "PEPTIDE_LSEQ",
+        "peptide_seq_column": "PEPTIDE_LSEQ",
     }
 
     def __init__(self, column_config: dict):
         """Initialize column mappings with user-defined config."""
-        self.column_map = {}
+        self.column_map: Dict[str, str] = {}
         self.annotation_file = column_config.get("annotation_file", None)
+
+        # New: vendor-agnostic layout toggle (required if data are pre-pivoted)
+        # Accepted: "long" (default), "wide"
+        self.input_layout = (column_config.get("input_layout") or "long").strip().lower()
 
         for config_key, std_name in self.DEFAULT_COLUMN_MAP.items():
             original_col = column_config.get(config_key)
             if original_col:
                 self.column_map[original_col] = std_name
 
+    # ---------- helpers ----------
 
-    def _inject_annotation(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Injects annotation information into the dataset if missing, using pure Polars."""
+    def _load_annotation(self) -> pl.DataFrame:
+        if not self.annotation_file:
+            raise ValueError(
+                "annotation_file is required for this input layout but was not provided."
+            )
+        ann = pl.read_csv(self.annotation_file, separator="\t", ignore_errors=True)
 
-        # Prepare annotation for clean matching
-        annotation = pl.read_csv(self.annotation_file, separator="\t", ignore_errors=True)
-        annotation = annotation.rename({"File Name": "FILENAME"})
+        # Pick a single join key (first match wins), then rename only that one → 'FILENAME'
+        join_col = None
+        for cand in ("FILENAME", "File Name", "Channel"):
+            if cand in ann.columns:
+                join_col = cand
+                break
 
-        # Strip whitespace
-        annotation = annotation.with_columns(pl.col("FILENAME").str.strip_chars())
-        df = df.with_columns(pl.col("FILENAME").str.strip_chars())
+        if join_col is None:
+            raise ValueError(
+                f"Annotation file {self.annotation_file!r} must contain a join column: "
+                "'FILENAME', 'File Name', or 'Channel'."
+            )
 
-        # ERROR when any annotation/data filename mismatches. Doesn't make sense to continue
-        ann_files = set(annotation.select("FILENAME").unique().to_series().to_list())
+        if join_col != "FILENAME":
+            # Rename only the chosen column to avoid creating duplicates
+            ann = ann.rename({join_col: "FILENAME"})
+
+        # Be tolerant about whitespace on the join key
+        ann = ann.with_columns(pl.col("FILENAME").cast(pl.Utf8).str.strip_chars())
+        return ann
+
+    def _fmt_diff(self, missing: list[str], extra: list[str], what: str) -> None:
+        if not missing and not extra:
+            return
+        def _fmt(lst, cap=20):
+            return lst[:cap] + ([f"... (+{len(lst)-cap} more)"] if len(lst) > cap else [])
+        parts = []
+        if missing:
+            parts.append(f"Annotated {what} not found in data ({len(missing)}): {_fmt(missing)}")
+        if extra:
+            parts.append(f"Data has {what} not in annotation ({len(extra)}): {_fmt(extra)}")
+        msg = f"{what.capitalize()} / annotation mismatch:\n  " + "\n  ".join(parts)
+        logger.error(msg)
+        raise ValueError(msg)
+
+    def _validate_long_annotation(self, df: pl.DataFrame, ann: pl.DataFrame) -> None:
         df_files  = set(df.select("FILENAME").unique().to_series().to_list())
+        ann_files = set(ann.select("FILENAME").unique().to_series().to_list())
+        missing = sorted(ann_files - df_files)
+        extra   = sorted(df_files - ann_files)
+        self._fmt_diff(missing, extra, "filenames")
 
-        only_in_ann = sorted(ann_files - df_files)
-        only_in_df  = sorted(df_files - ann_files)
+    def _validate_wide_annotation(self, df: pl.DataFrame, ann: pl.DataFrame) -> None:
+        ann_channels = set(ann.select("FILENAME").unique().to_series().to_list())
 
-        if only_in_ann or only_in_df:
-            msg_parts = []
-            if only_in_ann:
-                msg_parts.append(
-                    f"Annotation file {self.annotation_file!r} contains {len(only_in_ann)} filenames not present in the data: {only_in_ann}"
-                )
-            if only_in_df:
-                msg_parts.append(
-                    f"Data contains {len(only_in_df)} filenames not found in annotation: {only_in_df}"
-                )
-            full_msg = "Filename mismatch detected:\n  " + "\n  ".join(msg_parts)
-            logger.error(full_msg)
-            raise ValueError(full_msg)
+        # Infer candidate intensity columns (unchanged logic)
+        float_types = {pl.Float64, pl.Float32}
+        schema = df.schema
+        float_cols = {c for c, t in schema.items() if t in float_types}
+        meta_float_exclude = {"ReferenceIntensity", "MaxPepProb"}
+        data_channels = float_cols - meta_float_exclude
 
-        # Now safe to join
-        df = df.join(annotation, on="FILENAME", how="left")
+        missing = sorted([c for c in ann_channels if c not in df.columns])
+        extra   = sorted([c for c in data_channels if c not in ann_channels])
+        self._fmt_diff(missing, extra, "channels")
 
-        # Now conditionally override if missing
-        if "CONDITION" in df.columns and "Condition" in df.columns:
-            # Print preview before
+    def _rename_columns_safely(self, df: pl.DataFrame) -> pl.DataFrame:
+        """
+        Rename to standardized names from config, but raise only if we'd clobber
+        a different existing column (e.g., FILENAME after melt).
+        """
+        rename_map: Dict[str, str] = {}
+
+        for original, target in self.column_map.items():
+            if original in df.columns:
+                if target in df.columns and original != target:
+                    raise ValueError(
+                        f"Cannot rename '{original}' to standardized '{target}' because "
+                        f"'{target}' already exists in the dataset."
+                    )
+                rename_map[original] = target
+            else:
+                log_warning(f"Column '{original}' not found in input data, skipping harmonization for it.")
+
+        return df.rename(rename_map) if rename_map else df
+
+    def _standardize_then_inject(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Common path: rename → strict filename check → annotation join → coalesce condition/replicate."""
+        df = self._rename_columns_safely(df)
+
+        if not self.annotation_file:
+            return df  # nothing to inject
+
+        log_info("Injecting annotation")
+        ann = self._load_annotation()
+
+        # Require FILENAME for long join; for wide we will already have created it via melt.
+        if "FILENAME" not in df.columns:
+            raise ValueError("Cannot inject annotation: 'FILENAME' column not found in data.")
+
+        # Strict filename parity (long)
+        self._validate_long_annotation(df, ann)
+
+        # Join
+        df = df.join(ann, on="FILENAME", how="left")
+
+        # Coalesce condition/replicate from common aliases
+        condition_sources = [c for c in ["R.Condition", "Condition"] if c in df.columns]
+        replicate_sources = [r for r in ["R.Replicate", "Replicate"] if r in df.columns]
+
+        if condition_sources:
+            src = condition_sources[0]
             df = df.with_columns(
-                pl.when(pl.col("Condition").is_not_null())
-                  .then(pl.col("Condition"))
-                  .otherwise(pl.col("CONDITION"))
+                pl.when(pl.col(src).is_not_null())
+                  .then(pl.col(src))
+                  .otherwise(pl.col("CONDITION") if "CONDITION" in df.columns else None)
                   .alias("CONDITION")
-            ).drop("Condition")
+            ).drop(src, strict=False)
 
-        if "REPLICATE" in df.columns and "Replicate" in df.columns:
+        if replicate_sources:
+            src = replicate_sources[0]
             df = df.with_columns(
-                pl.when(pl.col("Replicate").is_not_null())
-                  .then(pl.col("Replicate"))
-                  .otherwise(pl.col("REPLICATE"))
+                pl.when(pl.col(src).is_not_null())
+                  .then(pl.col(src))
+                  .otherwise(pl.col("REPLICATE") if "REPLICATE" in df.columns else None)
                   .alias("REPLICATE")
-            ).drop("Replicate")
+            ).drop(src, strict=False)
 
         return df
 
+    def _melt_wide_to_long(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Use annotation to melt a wide matrix into the canonical long schema."""
+        ann = self._load_annotation()
+        channels = ann.select("FILENAME").unique().to_series().to_list()
+
+        # Strict two-way validation before melt
+        self._validate_wide_annotation(df, ann)
+
+        id_vars = [c for c in df.columns if c not in channels]
+        if not id_vars:
+            raise ValueError("No identifier columns left after selecting channels; check your annotation and table.")
+
+        long_df = df.melt(
+            id_vars=id_vars,
+            value_vars=channels,
+            variable_name="FILENAME",
+            value_name="SIGNAL",
+        ).with_columns(
+            pl.col("FILENAME").cast(pl.Utf8),
+            pl.col("SIGNAL").cast(pl.Float64, strict=False),
+        )
+
+        # Generic post-melt aliases (no vendor strings):
+        # - Some exporters name per-peptide spectrum count as 'Spectrum Number'
+        alias_map = {}
+        if "Spectrum Number" in long_df.columns:
+            alias_map["Spectrum Number"] = "PRECURSORS_EXP"
+        if alias_map:
+            long_df = long_df.rename(alias_map)
+
+        # Tag layout for downstream heuristics (e.g., metadata aggregation)
+        long_df = long_df.with_columns(pl.lit("wide").alias("INPUT_LAYOUT"))
+
+        return long_df
+
+    # ---------- public API ----------
+
     @log_time("Data Harmonizing")
     def harmonize(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Rename columns to standardized names, skipping any missing ones and warning if needed."""
-        rename_map = {}
-        for original, target in self.column_map.items():
-            if target in df.columns:
-                raise ValueError(
-                    f"Column name '{target}' already exists in the dataset. "
-                    "Please rename your input columns before harmonization."
-                )
-            if original in df.columns:
-                rename_map[original] = target
-            else:
-                logger.warning(f"Column '{original}' not found in input data, skipping harmonization for it.")
+        """
+        Layout-aware harmonization:
+          - 'wide': annotation-driven melt → rename → strict join
+          - 'long': rename → strict join
+        """
+        if self.input_layout not in {"long", "wide"}:
+            raise ValueError("dataset.input_layout must be 'long' or 'wide'.")
 
-        df = df.rename(rename_map)
+        if self.input_layout == "wide":
+            log_info("Input layout=wide; melting via annotation to canonical long format.")
+            df = self._melt_wide_to_long(df)
+            df = self._standardize_then_inject(df)
+            log_info(
+                f"Wide → long harmonization completed: rows={df.height}, cols={df.width}. "
+            )
+            return df
 
-        if self.annotation_file:
-            df = self._inject_annotation(df)
-
+        # input_layout == "long"
+        log_info("Input layout=long")
+        df = self._standardize_then_inject(df)
         return df

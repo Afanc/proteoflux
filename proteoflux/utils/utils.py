@@ -31,6 +31,19 @@ def log_indent():
     finally:
         _thread_local.indent -= 2
 
+# utils.py
+def _cur_indent() -> int:
+    return getattr(_thread_local, "indent", 0)
+
+def log_info(msg: str) -> None:
+    logger.info(" " * _cur_indent() + msg)
+
+def log_warning(msg: str) -> None:
+    logger.warning(" " * _cur_indent() + msg)
+
+def log_error(msg: str) -> None:
+    logger.error(" " * _cur_indent() + msg)
+
 def log_time(task_name):
     def decorator(func):
         @wraps(func)
@@ -59,6 +72,9 @@ def polars_matrix_to_numpy(df: pl.DataFrame, index_col: str = "INDEX") -> Tuple[
     Returns:
         Tuple[np.ndarray, pd.Index]: Matrix as numpy array, and index labels.
     """
+    if df is None:
+        return None, None
+
     if index_col not in df.columns:
         raise ValueError(f"Expected index column '{index_col}' not found in DataFrame.")
 

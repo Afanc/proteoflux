@@ -14,13 +14,13 @@ class DEExporter:
         output_path,
         use_xlsx=True,
         sig_threshold=0.05,
-        uniprot_mapper=None,
+        annotate_matrix=True,
     ):
         self.adata = adata
         self.output_path = Path(output_path)
         self.use_xlsx = use_xlsx
         self.sig_threshold = sig_threshold
-        self.uniprot_mapper = uniprot_mapper
+        self.annotate_matrix = annotate_matrix
         self.contrasts = self.adata.uns.get("contrast_names", [])
 
     def _annotate_matrix(self, base_df, q_ebayes=None, miss_ratios=None):
@@ -138,8 +138,12 @@ class DEExporter:
         miss_ratios = self.adata.uns.get("missingness", None)
 
         # Annotate log2fc and q_ebayes
-        log2fc_annot = self._annotate_matrix(log2fc, q_ebayes, miss_ratios) if log2fc is not None else None
-        q_ebayes_annot = self._annotate_matrix(q_ebayes, q_ebayes, miss_ratios) if q_ebayes is not None else None
+        if self.annotate_matrix:
+            log2fc_annot = self._annotate_matrix(log2fc, q_ebayes, miss_ratios) if log2fc is not None else None
+            q_ebayes_annot = self._annotate_matrix(q_ebayes, q_ebayes, miss_ratios) if q_ebayes is not None else None
+        else:
+            log2fc_annot = log2fc if log2fc is not None else None
+            q_ebayes_annot = q_ebayes if q_ebayes is not None else None
 
         # Metadata sheet
         meta_cols = ["GENE_NAMES", "FASTA_HEADERS", "PROTEIN_DESCRIPTIONS", "PRECURSORS_EXP"]
