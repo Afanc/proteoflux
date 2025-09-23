@@ -222,6 +222,7 @@ class Dataset:
                 "pep":     self.preprocessed_data.meta_pep,
                 "rec":     self.preprocessed_data.meta_rec,
             },
+            "quantification_method": self.preprocessor.pivot_signal_method,
             "normalization": self.preprocessor.normalization,
             "imputation":    self.preprocessor.imputation,
         }

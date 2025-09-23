@@ -195,6 +195,7 @@ class ReportPlotter:
         footer_text = self.analysis_config.get("footer_text", "")
         preproc     = self.config.get("preprocessing", {})
         filtering   = preproc.get("filtering", {})
+        quantification_method = preproc.get("pivot_signal_method", "sum")
         normalization = preproc.get("normalization", {})
         imputation  = preproc.get("imputation", {})
         de_method   = self.analysis_config.get("ebayes_method", "limma")
@@ -292,6 +293,12 @@ class ReportPlotter:
                      f"- Min. run evidence count = {filtering['run_evidence_count']}: {n_r} PSM removed",
                      ha="left", va="top", fontsize=11)
             y -= line_height
+
+        # Quantification method
+        fig.text(x0 + 0.02, y, f"- Quantification: {quantification_method}",
+                 ha="left", va="top", fontsize=12)
+
+        y -= line_height
 
         # Normalization
         norm_methods = normalization.get("method", [])
