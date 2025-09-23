@@ -17,6 +17,8 @@ from proteoflux.dataset.intermediateresults import IntermediateResults
 from proteoflux.evaluation.normalization_evaluator import NormalizerPlotter
 from proteoflux.evaluation.imputation_evaluator import ImputeEvaluator
 from proteoflux.utils.utils import load_contaminant_accessions, log_time, logger, log_info
+from proteoflux.utils.directlfq import estimate_protein_intensities
+import proteoflux.utils.directlfq_config as dlcfg
 
 class Preprocessor:
     """Handles filtering, normalization, and imputation for proteomics data."""
@@ -45,6 +47,7 @@ class Preprocessor:
 
         # Pivoting
         self.pivot_signal_method = config.get("pivot_signal_method", "sum")
+        self.directlfq_cores = config.get("directlfq_cores", 4)
 
         # Normalization
         self.normalization = config.get("normalization")
@@ -354,7 +357,6 @@ class Preprocessor:
 
         self.intermediate_results.add_df("condition_pivot", condition_mapping)
 
-    # using a trick because polars>=1.31 does aggregate filling with 0s ! Instead of nan ! 
     def _pivot_df(
         self,
         df: pl.DataFrame,
@@ -405,44 +407,95 @@ class Preprocessor:
 
         return pivot_df
 
-    def _pivot_df_works(self,
-                  df: pl.DataFrame,
-                  sample_col: str,
-                  protein_col: str,
-                  values_col: str,
-                  aggregate_fn: str) -> pl.DataFrame:
+    # using a trick because polars>=1.31 does aggregate filling with 0s ! Instead of nan ! 
+    @log_time("DirectLFQ")
+    def _pivot_df_LFQ(
+        self,
+        df: pl.DataFrame,
+        sample_col: str,
+        protein_col: str,
+        values_col: str,
+        ion_col: str,
+    ) -> pl.DataFrame:
 
-         # 1) Map the requested agg name to a Polars expression
-         fn_map = {
-             "sum":    pl.col(values_col).sum(),
-             "mean":   pl.col(values_col).mean(),
-             "min":    pl.col(values_col).min(),
-             "max":    pl.col(values_col).max(),
-             "median": pl.col(values_col).median(),
-         }
-         if aggregate_fn not in fn_map:
-             raise ValueError(f"Unsupported aggregate_fn '{aggregate_fn}'")
+        #import directlfq.config as dlcfg
+        # 0) sanity
+        for c in (sample_col, protein_col, values_col, ion_col):
+            if c not in df.columns:
+                raise ValueError(f"LFQ requires column '{c}' in input DataFrame.")
 
-         # 2) Pre-aggregate so (protein, sample) is unique
-         df_agg = (
-             df
-             .group_by([protein_col, sample_col], maintain_order=True)
-             .agg(fn_map[aggregate_fn].alias(values_col))
-         )
+                # 1) Count valid (non-null AND non-zero) per (protein, ion, sample)
+        is_valid = (pl.col(values_col).is_not_null() & (pl.col(values_col) != 0))
+        n_valid  = is_valid.sum().alias("_NVALID")
 
-         # 3) Pivot WITHOUT a second aggregation step:
-         #    missing groups → Polars nulls
-         pivot_df = df_agg.pivot(
-             index=protein_col,
-             columns=sample_col,
-             values=values_col,
-         )
+        # 2) Pre-aggregate per (protein, ion, sample) with a null-preserving guard:
+        df_ion_agg = (
+            df
+            .group_by([protein_col, ion_col, sample_col], maintain_order=True)
+            .agg([
+                pl.col(values_col).first().alias(values_col),   # you said there are no dups
+                n_valid
+            ])
+            .with_columns(
+                pl.when(pl.col("_NVALID") == 0)
+                  .then(pl.lit(None))
+                  .otherwise(pl.col(values_col))
+                  .alias(values_col)
+            )
+            .drop("_NVALID")
+        )
 
-         # 4) Ensure those nulls become np.nan in your NumPy arrays
-         pivot_df = pivot_df.fill_null(np.nan)
+        # 3) Build a (protein × sample) boolean mask: any valid ion in this run?
+        has_valid = (
+            df
+            .group_by([protein_col, sample_col], maintain_order=True)
+            .agg(is_valid.any().alias("_HAS_VALID"))
+            .pivot(index=protein_col, columns=sample_col, values="_HAS_VALID")
+            .fill_null(False)
+        )
 
-         # 5) Rename back to the original sample names
-         return pivot_df.rename({c: c for c in df[sample_col].unique()})
+        # 4) Peptide/ion × sample wide matrix (missing groups -> NaNs)
+        runs_in_order = (
+            df.select(sample_col).unique(maintain_order=True).to_series().to_list()
+        )
+        pep_wide = (
+            df_ion_agg
+            .pivot(index=[protein_col, ion_col], columns=sample_col, values=values_col)
+            .fill_null(np.nan)
+        )
+
+        # 5) → pandas, log2 as expected by directLFQ
+        pw = pep_wide.to_pandas().set_index([protein_col, ion_col]).sort_index(level=0)
+        pw = np.log2(pw)  # NaNs stay NaNs
+
+        # 6) Run directLFQ
+        dlcfg.PROTEIN_ID = protein_col
+        dlcfg.QUANT_ID   = ion_col
+        prot_df, _ = estimate_protein_intensities(
+            normed_df=pw,
+            min_nonan=1,
+            num_samples_quadratic=2,
+            num_cores=self.directlfq_cores,
+        )
+        if protein_col not in prot_df.columns:
+            prot_df = prot_df.reset_index()
+        prot_df = prot_df.set_index(protein_col).astype(float)  # linear scale
+
+        # 7) Apply the mask: where no ion existed in a run, force NaN (not 0)
+        mask_pd = has_valid.to_pandas().set_index(protein_col)
+        # align mask rows/cols to prot_df
+        mask_pd = mask_pd.reindex(index=prot_df.index, columns=prot_df.columns, fill_value=False)
+        prot_df = prot_df.mask(~mask_pd)  # False → NaN
+
+        # 8) Back to Polars; preserve sample order; turn NaN -> null
+        out = pl.DataFrame(prot_df.reset_index())
+        keep_cols = [protein_col] + [c for c in runs_in_order if c in out.columns]
+        out = out.select(keep_cols)
+        out = out.with_columns([
+            pl.when(pl.col(c).is_nan()).then(None).otherwise(pl.col(c)).alias(c)
+            for c in out.columns if c != protein_col
+        ])
+        return out
 
     def _build_peptide_tables(self) -> None:
         df = self.intermediate_results.dfs["filtered_final/RE"]
@@ -514,13 +567,22 @@ class Preprocessor:
         if missing_cols:
             raise ValueError(f"Missing required columns for pivoting: {missing_cols}")
 
-        intensity_pivot = self._pivot_df(
-            df=df,
-            sample_col='FILENAME',
-            protein_col='INDEX',
-            values_col='SIGNAL',
-            aggregate_fn=self.pivot_signal_method,
-        )
+        if self.pivot_signal_method.lower() == "directlfq":
+            intensity_pivot = self._pivot_df_LFQ(
+                df=df,
+                sample_col="FILENAME",
+                protein_col="INDEX",
+                values_col="SIGNAL",
+                ion_col="PEPTIDE_LSEQ",
+            )
+        else:
+            intensity_pivot = self._pivot_df(
+                df=df,
+                sample_col='FILENAME',
+                protein_col='INDEX',
+                values_col='SIGNAL',
+                aggregate_fn=self.pivot_signal_method,
+            )
 
         # Pivot Q-values ONLY if present
         qvalue_pivot = None
@@ -565,65 +627,17 @@ class Preprocessor:
             raw_pep_pivot = None
             centered_pep_pivot = None
 
-        self.intermediate_results.set_columns_and_index(intensity_pivot)
-        self.intermediate_results.add_df("raw_df", intensity_pivot)
-        self.intermediate_results.add_df("qvalues", qvalue_pivot)
-        self.intermediate_results.add_df("pep", pep_pivot)
-        self.intermediate_results.add_df("spectral_counts", rec_pivot)
-        self.intermediate_results.dfs["peptides_wide"]     = raw_pep_pivot
-        self.intermediate_results.dfs["peptides_centered"] = centered_pep_pivot
+        # --- ALIGN secondary pivots (qvalue/pep/rec) to the intensity order ---
+        order_idx = intensity_pivot.select("INDEX")
+        def _align_to_intensity(pvt: Optional[pl.DataFrame]) -> Optional[pl.DataFrame]:
+            if pvt is None:
+                return None
+            # left join keeps intensity order and ensures identical index vector
+            return order_idx.join(pvt, on="INDEX", how="left")
 
-    def _pivot_data_old(self) -> None:
-        """
-        Converts the dataset from long format (one row per protein per sample)
-            to a wide format (one row per protein, with sample-specific intensity & q-value columns).
-        """
-        df = self.intermediate_results.dfs["filtered_final/RE"]
-
-        required_cols = {"INDEX", "FILENAME", "SIGNAL", "QVALUE"}
-        missing_cols = required_cols - set(df.columns)
-        if missing_cols:
-            raise ValueError(f"Missing required columns for pivoting: {missing_cols}")
-
-
-        intensity_pivot = self._pivot_df(
-                        df=df,
-                        sample_col='FILENAME',
-                        protein_col='INDEX',
-                        values_col='SIGNAL',
-                        aggregate_fn=self.pivot_signal_method,
-                        )
-
-        # Pivot Q values
-        qvalue_pivot = self._pivot_df(
-                                df=df,
-                                sample_col='FILENAME',
-                                protein_col='INDEX',
-                                values_col='QVALUE',
-                                aggregate_fn='mean'
-                                )
-
-        # Pivot PEP
-        pep_pivot = None
-        if "PEP" in df.columns :
-            pep_pivot = self._pivot_df(
-                                    df=df,
-                                    sample_col='FILENAME',
-                                    protein_col='INDEX',
-                                    values_col='PEP',
-                                    aggregate_fn='mean'
-                                    )
-        rec_pivot = None
-        if "RUN_EVIDENCE_COUNT" in df.columns :
-            rec_pivot = self._pivot_df(
-                                    df=df,
-                                    sample_col='FILENAME',
-                                    protein_col='INDEX',
-                                    values_col='RUN_EVIDENCE_COUNT',
-                                    aggregate_fn='mean'
-                                    )
-
-        raw_pep_pivot, centered_pep_pivot = self._build_peptide_tables()
+        qvalue_pivot = _align_to_intensity(qvalue_pivot)
+        pep_pivot    = _align_to_intensity(pep_pivot)
+        rec_pivot    = _align_to_intensity(rec_pivot)
 
         self.intermediate_results.set_columns_and_index(intensity_pivot)
         self.intermediate_results.add_df("raw_df", intensity_pivot)
