@@ -29,6 +29,7 @@ preprocessing:
   normalization:
     method:
       - "log2"
+      - "median_equalization"
       - "median_equalization_by_tag"
     reference_tag: ["XXXX3", "XXXX4"]
     loess_span: 0.9
