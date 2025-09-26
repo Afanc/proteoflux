@@ -162,9 +162,9 @@ class DEExporter:
         # Peptide tables (wide and centered)
         pep_wide_df, pep_centered_df = self._peptide_frames()
 
-        t_raw = self._get_dataframe("t")
-        p_raw = self._get_dataframe("p")
-        q_raw = self._get_dataframe("q")
+        t_raw = self._get_dataframe("t_raw")
+        p_raw = self._get_dataframe("p_raw")
+        q_raw = self._get_dataframe("q_raw")
 
         # Summary sheet
         summary_df = None
@@ -180,6 +180,23 @@ class DEExporter:
                                 pval_renamed,
                                 raw_renamed], axis=1)
 
+        # debug
+        # --- BEGIN sanity checks ---
+        prot = "P0AB71"
+        ix = self.adata.var_names.get_loc(prot)
+        print("[DEExporter] contrasts:", self.contrasts)
+        print("[DEExporter] log2fc row for {prot}:", self.adata.varm["log2fc"][ix, :])
+        print("[DEExporter] p_ebayes row for {prot}:", self.adata.varm["p_ebayes"][ix, :])
+        print("[DEExporter] q_ebayes row for {prot}:", self.adata.varm["q_ebayes"][ix, :])
+
+        # Verify shapes and column integrity
+        for name in ("log2fc", "p_ebayes", "q_ebayes"):
+            M = self._get_dataframe(name)
+            assert M is not None, f"{name} missing in varm"
+            assert list(M.columns) == self.contrasts, f"{name} columns != contrast_names"
+            assert M.index.equals(self.adata.var.index), f"{name} index != var.index"
+
+        #
         # Tables to export
         tables = {
             "Summary": summary_df,

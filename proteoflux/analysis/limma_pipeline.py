@@ -29,6 +29,10 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
 
     # 4) Expression: genes × samples
     df_X = pd.DataFrame(adata.X, index=adata.obs_names, columns=adata.var_names).T
+    # debug
+    #df_X.loc["P0AB71", "195_KaForAll_DIA_B22"] = 15.618
+    #print(df_X.shape)
+    #
 
     # 5) Fit
     fit_imo = imo.lmFit(df_X, design=design_dm)
@@ -79,6 +83,17 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         multipletests(p_ebayes[:, j], method="fdr_bh")[1]
         for j in range(p_ebayes.shape[1])
     ]).T
+
+    ###
+    #print(adata.var_names.get_loc("P0AB71"))
+    #ix = adata.var_names.get_loc("P0AB71")
+    #print(coefs[ix])
+    #print(se_raw[ix])
+    #print(t_raw[ix])
+    #print(p_raw[ix])
+    #print(q_ebayes[ix])
+    #print(adata.X[:,ix])
+    ##
 
     # === Assemble into AnnData ===
     out = adata.copy()

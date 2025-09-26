@@ -21,23 +21,25 @@ def get_imputer(**kwargs) -> Any:
 
     if method == "mean":
         from proteoflux.workflow.imputers.simpleimputers import RowMeanImputer
-        return RowMeanImputer(**kwargs)
+        return RowMeanImputer()
     elif method == "median":
         from proteoflux.workflow.imputers.simpleimputers import RowMedianImputer
-        return RowMedianImputer(**kwargs)
+        return RowMedianImputer()
     elif method == "knn":
         return sklearn.impute.KNNImputer(n_neighbors=kwargs.get("knn_k", 6))
-    elif method == "hybridknn":
+    elif method == "hybrid":
         from proteoflux.workflow.imputers.hybridimputer import HybridImputer
         return HybridImputer(
             condition_map=kwargs.get("condition_map"),
-            group_column=kwargs.get("group_column", "CONDITION"),
             sample_index=kwargs.get("sample_index"),
-            knn_k=kwargs.get("knn_k", 6),
-            knn_weights=kwargs.get("knn_weights", "distance"),
-            knn_metric=kwargs.get("knn_metric", "nan_euclidean"),
-            gaussian_clip=kwargs.get("gaussian_clip", 0.5),
-            gaussian_left_shift=kwargs.get("gaussian_left_shift", 1.8),
+            group_column=kwargs.get("group_column", "CONDITION"),
+            in_min_obs=kwargs.get("in_min_obs", 1),
+            jitter_frac=kwargs.get("jitter_frac", 0.20),
+            clip_upper=kwargs.get("clip_upper", True),
+            lod_q=kwargs.get("lc_quantile", 0.01),
+            lod_shift=kwargs.get("lc_shift", 0.20),
+            lod_sd_width=kwargs.get("lc_sd_width", 0.05),
+            clip_lod=kwargs.get("lc_clip", True),
             random_state=kwargs.get("random_state", 42),
         )
     elif method == "nsknn":
@@ -61,6 +63,22 @@ def get_imputer(**kwargs) -> Any:
             tol=kwargs.get("rf_tol", 5e-2),
             n_nearest_features=kwargs.get("rf_nearest_features", 50),
         )
+    elif method == "mindet":
+        from proteoflux.workflow.imputers.min_imputers import MinDetImputer
+        return MinDetImputer(
+            quantile=kwargs.get("lc_quantile", 0.01),
+            shift=kwargs.get("lc_shift", 0.2),
+        )
+    elif method == "minprob":
+        from proteoflux.workflow.imputers.min_imputers import MinProbImputer
+        return MinProbImputer(
+            quantile=kwargs.get("lc_quantile", 0.01),
+            mu_shift=kwargs.get("lc_mu_shift", 1.8),
+            sd_width=kwargs.get("lc_sd_width", 0.3),
+            random_state=kwargs.get("random_state", 42),
+            clip_to_quantile=kwargs.get("lc_clip", True),
+        )
     else:
-        raise ValueError(f"Invalid imputation method: {method}. And one is needed...")
+        pass
+        #raise ValueError(f"Invalid imputation method: {method}. And one is needed...")
 

@@ -320,7 +320,7 @@ class ReportPlotter:
 
         # Imputation
         imp = preproc.get("imputation", {})
-        imp_method = imp.get("method", "")
+        imp_method = imp.get("method", [])
         if "knn" in imp_method:
             extras = []
             if "knn_k" in imp:
