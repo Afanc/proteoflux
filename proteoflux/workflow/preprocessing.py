@@ -868,8 +868,13 @@ class Preprocessor:
             condition_map=condition_map,
             sample_index=numeric_cols
         )
+        if imputer is None:
+            imputed_mat = not_imputed_mat
+            #mask = np.isnan(imputed_mat)
+            #imputed_mat[mask] = 0.0
+        else:
+            imputed_mat = imputer.fit_transform(not_imputed_mat)
 
-        imputed_mat = imputer.fit_transform(not_imputed_mat)
         df = df.with_columns(pl.DataFrame(imputed_mat,
                                           schema=numeric_cols))
         imputed_only = np.where(np.isnan(not_imputed_mat),

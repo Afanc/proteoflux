@@ -39,6 +39,7 @@ def get_imputer(**kwargs) -> Any:
             lod_q=kwargs.get("lc_quantile", 0.01),
             lod_shift=kwargs.get("lc_shift", 0.20),
             lod_sd_width=kwargs.get("lc_sd_width", 0.05),
+            lod_scope="global",
             clip_lod=kwargs.get("lc_clip", True),
             random_state=kwargs.get("random_state", 42),
         )

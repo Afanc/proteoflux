@@ -65,6 +65,7 @@ class HybridImputer(BaseEstimator, TransformerMixin):
         lod_shift=0.20,
         lod_sd_width=0.05,
         clip_lod=True,
+        lod_scope="column",   # "column" (per-sample LoD) or "global" (single LoD for all)
         random_state=42,
     ):
         self.condition_map = condition_map
@@ -79,6 +80,7 @@ class HybridImputer(BaseEstimator, TransformerMixin):
         self.lod_shift = float(lod_shift)
         self.lod_sd_width = float(lod_sd_width)
         self.clip_lod = bool(clip_lod)
+        self.lod_scope = str(lod_scope)
 
         self.random_state = random_state
 
@@ -90,15 +92,22 @@ class HybridImputer(BaseEstimator, TransformerMixin):
         cmap = self.condition_map.set_index("Sample")[self.group_column]
         self._cond = np.array([cmap[s] for s in self.sample_index], dtype=object)
 
-        # per-column LoD (for fallback)
-        col_has_val = np.any(~np.isnan(X), axis=0)
-        col_lod = np.full(n_samp, np.nan, dtype=np.float64)
-        if np.any(col_has_val):
-            col_lod[col_has_val] = np.nanquantile(X[:, col_has_val], self.lod_q, axis=0)
-        if np.isnan(col_lod).any():
-            gmin = np.nanmin(X) if np.isfinite(np.nanmin(X)) else 0.0
-            col_lod[np.isnan(col_lod)] = gmin
-        self._col_lod = col_lod
+        # LoD(s) for fallback
+        if self.lod_scope == "global":
+            # single scalar LoD across all data
+            self._global_lod = float(np.nanquantile(X, self.lod_q))
+            self._col_lod = None
+        else:
+            # per-column LoD (default)
+            col_has_val = np.any(~np.isnan(X), axis=0)
+            col_lod = np.full(n_samp, np.nan, dtype=np.float64)
+            if np.any(col_has_val):
+                col_lod[col_has_val] = np.nanquantile(X[:, col_has_val], self.lod_q, axis=0)
+            if np.isnan(col_lod).any():
+                gmin = np.nanmin(X) if np.isfinite(np.nanmin(X)) else 0.0
+                col_lod[np.isnan(col_lod)] = gmin
+            self._col_lod = col_lod
+            self._global_lod = None
 
         self._rng = np.random.default_rng(self.random_state)
         return self
@@ -138,11 +147,12 @@ class HybridImputer(BaseEstimator, TransformerMixin):
                 X_imp[i, j] = draw
             else:
                 # MinDet fallback for this column
-                base = self._col_lod[j] - self.lod_shift
+                lod = self._global_lod if self._global_lod is not None else self._col_lod[j]
+                base = lod - self.lod_shift
                 jitter = self._rng.normal(0.0, max(self.lod_sd_width, _EPS))
                 val = base + jitter
                 if self.clip_lod:
-                    val = min(val, self._col_lod[j])
+                    val = min(val, lod)
                 X_imp[i, j] = val
 
         return X_imp
