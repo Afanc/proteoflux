@@ -306,49 +306,25 @@ class Preprocessor:
         # Numeric casts (same as before)
         casts = []
         if "IBAQ" in base_meta.columns:
+            # Normalize: keep first value before ';', trim, empty→null, then cast
+            base_meta = base_meta.with_columns(
+                pl.col("IBAQ")
+                  .cast(pl.Utf8, strict=False)
+                  .str.split(";").list.first()      # use .list.get(0) if your Polars is older
+                  .str.strip_chars()
+                  .replace("", None)
+                  .alias("IBAQ")
+            )
             casts.append(pl.col("IBAQ").cast(pl.Float64, strict=False))
         if "PROTEIN_WEIGHT" in base_meta.columns:
             casts.append(pl.col("PROTEIN_WEIGHT").cast(pl.Float64, strict=False))
         if "PRECURSORS_EXP" in base_meta.columns:
             casts.append(pl.col("PRECURSORS_EXP").cast(pl.Int64, strict=False))
+
         if casts:
             base_meta = base_meta.with_columns(casts)
 
         self.intermediate_results.add_df("protein_metadata", base_meta)
-
-    def _get_protein_metadata_old(self) -> None:
-        """
-        Extract protein-level metadata such as FASTA_HEADERS, GENE_NAMES, DESCRIPTION, etc.,
-        grouped by protein INDEX. Assumes all column names are capitalized.
-        """
-        df = self.intermediate_results.dfs["filtered_final/RE"]
-        keep_cols = {"INDEX",
-                     "FASTA_HEADERS",
-                     "GENE_NAMES",
-                     "PROTEIN_DESCRIPTIONS",
-                     "PROTEIN_WEIGHT",
-                     "IBAQ",
-                     "PRECURSORS_EXP"}
-        existing = [col for col in df.columns if col in keep_cols]
-
-        # --- make sure numeric columns are truly numeric ---
-        df = df.select(existing)
-        casts = []
-        if "IBAQ" in df.columns:
-            casts.append(pl.col("IBAQ").cast(pl.Float64, strict=False))
-        if "PROTEIN_WEIGHT" in df.columns:
-            casts.append(pl.col("PROTEIN_WEIGHT").cast(pl.Float64, strict=False))
-        if "RUN_EVIDENCE_COUNT" in df.columns:
-            casts.append(pl.col("RUN_EVIDENCE_COUNT").cast(pl.Int64, strict=False))
-        if "PRECURSORS_EXP" in df.columns:
-            casts.append(pl.col("PRECURSORS_EXP").cast(pl.Int64, strict=False))
-
-        if casts:
-            df = df.with_columns(casts)
-
-        df = df.select(existing).unique(subset=["INDEX"]).sort("INDEX")
-
-        self.intermediate_results.add_df("protein_metadata", df)
 
     def _get_condition_map(self):
         df = self.intermediate_results.dfs["filtered_final/RE"]
