@@ -27,20 +27,18 @@ def get_imputer(**kwargs) -> Any:
         return RowMedianImputer()
     elif method == "knn":
         return sklearn.impute.KNNImputer(n_neighbors=kwargs.get("knn_k", 6))
-    elif method == "hybrid":
-        from proteoflux.workflow.imputers.hybridimputer import HybridImputer
-        return HybridImputer(
+    elif method == "lc_conmed":
+        from proteoflux.workflow.imputers.lc_conmed_imputer import LC_ConMedImputer
+        return LC_ConMedImputer(
             condition_map=kwargs.get("condition_map"),
             sample_index=kwargs.get("sample_index"),
             group_column=kwargs.get("group_column", "CONDITION"),
-            in_min_obs=kwargs.get("in_min_obs", 1),
-            jitter_frac=kwargs.get("jitter_frac", 0.20),
-            clip_upper=kwargs.get("clip_upper", True),
-            lod_q=kwargs.get("lc_quantile", 0.01),
-            lod_shift=kwargs.get("lc_shift", 0.20),
-            lod_sd_width=kwargs.get("lc_sd_width", 0.05),
-            lod_scope="global",
-            clip_lod=kwargs.get("lc_clip", True),
+            lod_k=kwargs.get("lc_conmed_lod_k", 10),
+            jitter_frac=kwargs.get("lc_conmed_jitter_frac", 0.20),
+            lod_shift=kwargs.get("lc_conmed_lc_shift", 0.20),
+            lod_sd_width=kwargs.get("lc_conmed_lc_sd_width", 0.05),
+            q_lower=kwargs.get("lc_conmed_q_lower", 0.25),
+            q_upper=kwargs.get("lc_conmed_q_upper", 0.75),
             random_state=kwargs.get("random_state", 42),
         )
     elif method == "nsknn":
@@ -80,6 +78,6 @@ def get_imputer(**kwargs) -> Any:
             clip_to_quantile=kwargs.get("lc_clip", True),
         )
     else:
-        pass
-        #raise ValueError(f"Invalid imputation method: {method}. And one is needed...")
+        raise ValueError(f"Invalid imputation method: {method}. And one is needed...\n"
+                           "Options: lc_conmed, mean, median, knn, tnknn, mindet, minprob, randomforest")
 

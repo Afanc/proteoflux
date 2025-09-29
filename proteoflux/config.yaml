@@ -32,13 +32,13 @@ preprocessing:
   normalization:
     method:
       - "log2"
-      - "median_equalization"
+      - "median_equalization_by_tag"
+    reference_tag:
+      - "HUMAN"
     loess_span: 0.9
   imputation:
-    method: "tnknn"
-    knn_k: 6
-    knn_tn_perc: 0.75
-    rf_max_iter: 20
+    method: "lc_conmed"
+    lc_conmed_lod_k: 10
     rf_random_state: 42
 
 analysis:

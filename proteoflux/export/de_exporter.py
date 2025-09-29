@@ -182,12 +182,12 @@ class DEExporter:
 
         # debug
         # --- BEGIN sanity checks ---
-        prot = "P0AB71"
-        ix = self.adata.var_names.get_loc(prot)
-        print("[DEExporter] contrasts:", self.contrasts)
-        print("[DEExporter] log2fc row for {prot}:", self.adata.varm["log2fc"][ix, :])
-        print("[DEExporter] p_ebayes row for {prot}:", self.adata.varm["p_ebayes"][ix, :])
-        print("[DEExporter] q_ebayes row for {prot}:", self.adata.varm["q_ebayes"][ix, :])
+        #prot = "P0AB71"
+        #ix = self.adata.var_names.get_loc(prot)
+        #print("[DEExporter] contrasts:", self.contrasts)
+        #print("[DEExporter] log2fc row for {prot}:", self.adata.varm["log2fc"][ix, :])
+        #print("[DEExporter] p_ebayes row for {prot}:", self.adata.varm["p_ebayes"][ix, :])
+        #print("[DEExporter] q_ebayes row for {prot}:", self.adata.varm["q_ebayes"][ix, :])
 
         # Verify shapes and column integrity
         for name in ("log2fc", "p_ebayes", "q_ebayes"):

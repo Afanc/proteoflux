@@ -30,7 +30,7 @@ def _pooled_sd(groups):
     return max(float(np.sqrt(num / den)), _EPS)
 
 
-class HybridImputer(BaseEstimator, TransformerMixin):
+class LC_ConMedImputer(BaseEstimator, TransformerMixin):
     """
     Hybrid condition-aware imputer for proteomics (log scale).
     Shape: X is (n_features, n_samples). Rows = proteins/features, Cols = samples.
@@ -57,30 +57,26 @@ class HybridImputer(BaseEstimator, TransformerMixin):
         condition_map,           # pandas DataFrame with columns: ["Sample", group_column]
         sample_index,            # list/array of sample names in the SAME order as X's columns
         group_column="CONDITION",
-        in_min_obs=1,            # "ANY real measurement" ⇒ 1 (you can set 2 if you prefer)
         jitter_frac=0.20,        # jitter = jitter_frac × pooled_sd
-        clip_upper=True,         # cap draws at in-condition median
+        q_lower=0.25,
+        q_upper=0.75,
         # MinDet fallback params (used only when condition has no signal):
-        lod_q=0.01,
+        lod_k=None,
         lod_shift=0.20,
         lod_sd_width=0.05,
-        clip_lod=True,
-        lod_scope="column",   # "column" (per-sample LoD) or "global" (single LoD for all)
         random_state=42,
     ):
         self.condition_map = condition_map
         self.sample_index = sample_index
         self.group_column = group_column
 
-        self.in_min_obs = int(in_min_obs)
+        self.in_min_obs = 1
+        self.lod_k = lod_k
+        self.q_lower = q_lower
+        self.q_upper = q_upper
         self.jitter_frac = float(jitter_frac)
-        self.clip_upper = bool(clip_upper)
-
-        self.lod_q = float(lod_q)
         self.lod_shift = float(lod_shift)
         self.lod_sd_width = float(lod_sd_width)
-        self.clip_lod = bool(clip_lod)
-        self.lod_scope = str(lod_scope)
 
         self.random_state = random_state
 
@@ -93,21 +89,22 @@ class HybridImputer(BaseEstimator, TransformerMixin):
         self._cond = np.array([cmap[s] for s in self.sample_index], dtype=object)
 
         # LoD(s) for fallback
-        if self.lod_scope == "global":
-            # single scalar LoD across all data
-            self._global_lod = float(np.nanquantile(X, self.lod_q))
-            self._col_lod = None
+        obs = X[~np.isnan(X)]
+        if obs.size == 0:
+            # degenerate case: nothing observed; pick zero floor
+            self._lod_global = 0.0
         else:
-            # per-column LoD (default)
-            col_has_val = np.any(~np.isnan(X), axis=0)
-            col_lod = np.full(n_samp, np.nan, dtype=np.float64)
-            if np.any(col_has_val):
-                col_lod[col_has_val] = np.nanquantile(X[:, col_has_val], self.lod_q, axis=0)
-            if np.isnan(col_lod).any():
-                gmin = np.nanmin(X) if np.isfinite(np.nanmin(X)) else 0.0
-                col_lod[np.isnan(col_lod)] = gmin
-            self._col_lod = col_lod
-            self._global_lod = None
+            if self.lod_k is None:
+                # Adaptive K with bounds keeps LoD in the true low tail
+                K_adapt = int(np.ceil(0.01 * obs.size))
+                K = max(10, min(50, K_adapt))   # 10 ≤ K ≤ 50
+            else:
+                K = int(self.lod_k)
+
+            K = min(K, obs.size)  # safe bound
+            # take median of the K smallest values
+            smallest = np.partition(obs, K-1)[:K]
+            self._lod_global = float(np.median(smallest))
 
         self._rng = np.random.default_rng(self.random_state)
         return self
@@ -136,23 +133,25 @@ class HybridImputer(BaseEstimator, TransformerMixin):
             if in_group_vals.size >= self.in_min_obs:
                 # center at in-condition median
                 center = float(np.median(in_group_vals))
-                # pooled SD across conditions with data
+                # pooled SD across conditions with data (no winsorization; typical n=3-4)
                 groups = [v for v in obs_by_cond.values() if v.size >= self.in_min_obs]
                 sd_pool = _pooled_sd(groups)
                 sd_jitter = max(self.jitter_frac * sd_pool, _EPS)
                 draw = self._rng.normal(center, sd_jitter)
-                if self.clip_upper:
-                    # cap at in-condition median to avoid inflating that condition
-                    draw = min(draw, center)
+                # clip to in-condition [Q_lower, Q_upper]
+                q_lo = float(np.quantile(in_group_vals, self.q_lower, method="linear")) if in_group_vals.size > 1 else center
+                q_hi = float(np.quantile(in_group_vals, self.q_upper, method="linear")) if in_group_vals.size > 1 else center
+                if q_lo > q_hi:  # safety (shouldn't happen)
+                    q_lo, q_hi = min(q_lo, q_hi), max(q_lo, q_hi)
+                draw = min(max(draw, q_lo), q_hi)
                 X_imp[i, j] = draw
             else:
                 # MinDet fallback for this column
-                lod = self._global_lod if self._global_lod is not None else self._col_lod[j]
+                lod = self._lod_global
                 base = lod - self.lod_shift
                 jitter = self._rng.normal(0.0, max(self.lod_sd_width, _EPS))
                 val = base + jitter
-                if self.clip_lod:
-                    val = min(val, lod)
+                val = min(val, lod)
                 X_imp[i, j] = val
 
         return X_imp

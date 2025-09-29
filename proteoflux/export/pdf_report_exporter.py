@@ -334,6 +334,10 @@ class ReportPlotter:
             rf_max_iter = preproc.get("imputation").get("rf_max_iter")
             imp_method += f", rf_max_iter={rf_max_iter}"
 
+        if "lc_conmed" in imp_method:
+            lc_conmed_lod_k = preproc.get("imputation").get("lc_conmed_lod_k")
+            imp_method += f", lod_k={lc_conmed_lod_k}"
+
         fig.text(x0 + 0.02, y, f"- Imputation: {imp_method} ",
                  ha="left", va="top", fontsize=12)
         y -= line_height
