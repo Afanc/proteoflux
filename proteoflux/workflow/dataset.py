@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 import time
 import anndata as ad
+from copy import deepcopy
 from typing import List, Optional, Tuple, Union
 import warnings
 
@@ -35,6 +36,9 @@ class Dataset:
 
         dataset_cfg = kwargs.get("dataset", {}) or {}
 
+        self._dataset_cfg_original = deepcopy(dataset_cfg)
+        self.inject_runs_cfg = dataset_cfg.get("inject_runs", {}) or {}
+
         # Accept string OR list for exclude_runs
         raw_excl = dataset_cfg.get("exclude_runs")
 
@@ -56,11 +60,148 @@ class Dataset:
         self.harmonizer = DataHarmonizer(dataset_cfg)
 
         # Preprocessing config and setup
-        preprocessing_cfg = kwargs.get("preprocessing", {})
+
+        preprocessing_cfg = deepcopy(kwargs.get("preprocessing", {}) or {})
+
+        # Derive covariate assays from inject_runs.*.is_covariate (no extra config burden)
+        preprocessing_cfg["analysis_type"] = self.analysis_type
+        cov_assays = [
+            str(name)
+            for name, cfg in (self.inject_runs_cfg or {}).items()
+            if cfg and bool(cfg.get("is_covariate", False))
+        ]
+        if cov_assays:
+            cov_block = deepcopy(preprocessing_cfg.get("covariates", {}) or {})
+            # merge/extend existing list if user had one
+            prev = set(map(str.lower, cov_block.get("assays", []) or []))
+            prev |= set(map(str.lower, cov_assays))
+            cov_block["assays"] = sorted(prev)  # store lower-cased; Preprocessor matches case-insensitively
+            preprocessing_cfg["covariates"] = cov_block
+
         self.preprocessor = Preprocessor(preprocessing_cfg)
 
         # Process
         self._load_and_process()
+
+    @log_time("Runs Injection")
+    def _load_injected_runs(self) -> list[pl.DataFrame]:
+        """
+        For each injection:
+          - load with _load_rawdata
+          - harmonize with a fresh DataHarmonizer fed ONLY that injection’s config
+          - tag ASSAY=<inject_name> and a boolean column named exactly <inject_name>
+        """
+        frames = []
+        #if not self.inject_runs_cfg:
+        #    return frames
+
+        for inject_name, inject_cfg in self.inject_runs_cfg.items():
+            if not inject_cfg:
+                continue
+            fpath = inject_cfg.get("input_file")
+            if not fpath:
+                # null path → skip cleanly
+                continue
+
+            # 1) load raw (same as primary)
+            df_inj = self._load_rawdata(fpath)
+
+            # 2) build a per-injection harmonizer config
+            #    start from the original dataset section so column mappings are identical by default
+            eff_cfg = deepcopy(self._dataset_cfg_original)
+            eff_cfg["input_layout"]    = inject_cfg.get("input_layout",   eff_cfg.get("input_layout", self.input_layout))
+            eff_cfg["analysis_type"]   = inject_cfg.get("analysis_type",  "DIA")
+            eff_cfg["annotation_file"] = inject_cfg.get("annotation_file", None)
+
+            # 3) harmonize with its own annot (no cross-merge!)
+            inj_harmonizer = DataHarmonizer(eff_cfg)
+            df_inj = inj_harmonizer.harmonize(df_inj)
+
+            # 4) provenance tags (create THEN cast)
+            if inject_name not in df_inj.columns:
+                df_inj = df_inj.with_columns(pl.lit(True).alias(inject_name))
+
+            df_inj = df_inj.with_columns(pl.col(inject_name).cast(pl.Boolean))
+
+            if "ASSAY" not in df_inj.columns:
+                df_inj = df_inj.with_columns(pl.lit(str(inject_name)).alias("ASSAY"))
+
+            #df_inj = df_inj.with_columns(
+            #    pl.lit(True).alias(str(inject_name))  # traceability tag
+            #)
+            #if "ASSAY" not in df_inj.columns:
+            #    df_inj = df_inj.with_columns(pl.lit(str(inject_name)).alias("ASSAY"))
+
+            is_cov = bool((inject_cfg or {}).get("is_covariate", False))
+            df_inj = df_inj.with_columns(pl.lit(is_cov).alias("IS_COVARIATE"))
+
+            # logging: shape & covariate status
+            log_info(f"Injected run '{inject_name}': rows={len(df_inj)}, "
+                     f"assay='{df_inj.select(pl.col('ASSAY').first()).item()}', "
+                     f"is_covariate={is_cov}")
+
+            # normalize dtypes we care about (avoids mixed Utf8/Null later)
+            df_inj = df_inj.with_columns(pl.col("ASSAY").cast(pl.Utf8))
+
+            frames.append(df_inj)
+
+        return frames
+
+    def _concat_relaxed(self, frames: list[pl.DataFrame]) -> pl.DataFrame:
+        """
+        Vertically concat frames with different schemas, aligning both columns and dtypes:
+        - union of columns
+        - pick a target dtype per column (prefer first non-Null encountered)
+        - add missing cols as None cast to target dtype
+        - cast existing cols to target dtype
+        - regular vertical concat
+        """
+        if not frames:
+            return pl.DataFrame()
+
+        # 1) stable column order from the first df, then append new ones in discovery order
+        ordered_cols = list(frames[0].columns)
+        for df in frames[1:]:
+            for c in df.columns:
+                if c not in ordered_cols:
+                    ordered_cols.append(c)
+
+        # 2) choose a target dtype per column (ignore Null if a real dtype exists elsewhere)
+        target_dtype: dict[str, pl.datatypes.DataType] = {}
+        for c in ordered_cols:
+            chosen = None
+            for df in frames:
+                if c in df.columns:
+                    dt = df.schema[c]
+                    if dt != pl.Null:
+                        chosen = dt if chosen is None else chosen
+            # fallback stays Null only if *all* frames have Null or missing → cast to Utf8 for safety
+            target_dtype[c] = chosen if chosen is not None else pl.Utf8
+
+        # 3) align each frame to the target schema
+        fixed = []
+        for df in frames:
+            # add missing columns with proper dtype
+            missing = [c for c in ordered_cols if c not in df.columns]
+            if missing:
+                df = df.with_columns([
+                    pl.lit(None).cast(target_dtype[c]).alias(c) for c in missing
+                ])
+            # cast existing columns to target dtype
+            casts = []
+            for c in ordered_cols:
+                if c in df.columns:
+                    cur = df.schema[c]
+                    want = target_dtype[c]
+                    if cur != want:
+                        casts.append(pl.col(c).cast(want, strict=False).alias(c))
+            if casts:
+                df = df.with_columns(casts)
+            # select in final order
+            df = df.select(ordered_cols)
+            fixed.append(df)
+
+        return pl.concat(fixed, how="vertical", rechunk=True)
 
     def _load_and_process(self):
 
@@ -69,6 +210,26 @@ class Dataset:
 
         # Harmonize data
         self.rawinput = self.harmonizer.harmonize(self.rawinput)
+
+        # 2) inject runs (simple, no base cfg juggling)
+        if self.inject_runs_cfg:
+            injected_frames = self._load_injected_runs()
+            if injected_frames:
+                # make sure primary has the same boolean tag columns with False
+                for inject_name in self.inject_runs_cfg.keys():
+                    if inject_name not in self.rawinput.columns:
+                        self.rawinput = self.rawinput.with_columns(pl.lit(False).alias(inject_name))
+
+                # ensure IS_COVARIATE exists on the primary and is False
+                if "IS_COVARIATE" not in self.rawinput.columns:
+                    self.rawinput = self.rawinput.with_columns(pl.lit(False).alias("IS_COVARIATE"))
+                else:
+                    self.rawinput = self.rawinput.with_columns(pl.coalesce([pl.col("IS_COVARIATE"), pl.lit(False)]).alias("IS_COVARIATE"))
+
+                # ASSAY dtype guard on primary too (prevents Utf8/Null mismatches)
+                if "ASSAY" in self.rawinput.columns:
+                    self.rawinput = self.rawinput.with_columns(pl.col("ASSAY").cast(pl.Utf8))
+                self.rawinput = self._concat_relaxed([self.rawinput] + injected_frames)
 
         # Exclude files if any
         self.rawinput = self._apply_exclude_runs(self.rawinput)
@@ -154,13 +315,14 @@ class Dataset:
         """Convert the data to an AnnData object for downstream analysis."""
 
         # Extract matrices
-        # store unfiltered ?
         filtered_mat = self.preprocessed_data.filtered #filtered before log
         lognorm_mat = self.preprocessed_data.lognormalized #post log
         normalized_mat = self.preprocessed_data.normalized # post norm
         processed_mat = self.preprocessed_data.processed # post impu
+        centered_cov_mat = getattr(self.preprocessed_data, "centered_covariate", None)
         qval_mat = self.preprocessed_data.qvalues
         pep_mat = self.preprocessed_data.pep
+        locprob_mat = getattr(self.preprocessed_data, "locprob", None)
         sc_mat = self.preprocessed_data.spectral_counts
         condition_df = self.preprocessed_data.condition_pivot.to_pandas().set_index("Sample")
 
@@ -181,6 +343,7 @@ class Dataset:
 
         qval, _    = _to_np(qval_mat)
         pep, _    = _to_np(pep_mat)
+        locprob, _  = _to_np(locprob_mat)
         sc, _    = _to_np(sc_mat)
         lognorm, _ = _to_np(lognorm_mat)
         normalized, _ = _to_np(normalized_mat)
@@ -208,8 +371,38 @@ class Dataset:
             self.adata.layers["qvalue"] = qval.T
         if pep is not None:
             self.adata.layers["pep"] = pep.T
+        if locprob is not None:
+            self.adata.layers["locprob"] = locprob.T
         if sc is not None:
             self.adata.layers["spectral_counts"] = sc.T
+
+        # Covariate (centered, imputed) — only if present
+        if centered_cov_mat is not None:
+            filtered_cov_mat            = getattr(self.preprocessed_data, "raw_covariate", None)
+            lognorm_cov_mat            = getattr(self.preprocessed_data, "lognormalized_covariate", None)
+            normalized_cov_mat         = getattr(self.preprocessed_data, "normalized_covariate", None)
+            processed_cov_mat           = getattr(self.preprocessed_data, "processed_covariate", None)
+            qval_cov_mat               = getattr(self.preprocessed_data, "qvalues_covariate", None)
+            pep_cov_mat                = getattr(self.preprocessed_data, "pep_covariate", None)
+            sc_cov_mat                 = getattr(self.preprocessed_data, "spectral_counts_covariate", None)
+
+            filtered_cov_np, _ = _to_np(filtered_cov_mat)
+            lognorm_cov_np, _ = _to_np(lognorm_cov_mat)
+            normalized_cov_np, _ = _to_np(normalized_cov_mat)
+            processed_cov_np, _ = _to_np(processed_cov_mat)
+            centered_cov_np, _ = _to_np(centered_cov_mat)
+            qval_cov_np, _ = _to_np(qval_cov_mat)
+            pep_cov_np, _ = _to_np(pep_cov_mat)
+            sc_cov_np, _ = _to_np(sc_cov_mat)
+
+            self.adata.layers["raw_covariate"] = filtered_cov_np.T
+            self.adata.layers["lognorm_covariate"] = lognorm_cov_np.T
+            self.adata.layers["normalized_covariate"] = normalized_cov_np.T
+            self.adata.layers["processed_covariate"] = processed_cov_np.T
+            self.adata.layers["centered_covariate"] = centered_cov_np.T
+            self.adata.layers["qval_covariate"] = qval_cov_np.T
+            self.adata.layers["pep_covariate"] = pep_cov_np.T
+            self.adata.layers["sc_covariate"] = sc_cov_np.T
 
         # Attach filtered data
 
@@ -267,6 +460,7 @@ class Dataset:
         # when building your summary in the app)
         self.adata.uns["analysis"] = {
             "de_method":     "limma_ebayes",
+            "analysis_type": self.analysis_type,
         }
 
         # check index is fine between proteins and matrix index

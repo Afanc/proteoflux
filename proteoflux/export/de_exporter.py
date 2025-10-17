@@ -226,7 +226,7 @@ class DEExporter:
     @log_time("Exporting .h5ad")
     def export_adata(self, h5ad_path: str):
         for col in ["CONDITION", "GENE_NAMES", "PROTEIN_WEIGHT", "PROTEIN_DESCRIPTIONS",
-                    "FASTA_HEADERS"]:
+                    "FASTA_HEADERS", "ASSAY", "PARENT_PEPTIDE_ID", "PARENT_PROTEIN"]:
             if col in self.adata.obs.columns:
                 self.adata.obs[col] = self.adata.obs[col].astype("category")
             if col in self.adata.var.columns:
@@ -242,5 +242,23 @@ class DEExporter:
         meta.setdefault("pf_version", pf_version)
         meta.setdefault("created_at", datetime.now().isoformat(timespec="seconds") + "Z")
         self.adata.uns["proteoflux"] = meta
+
+        def _strip_values(d):
+            if isinstance(d, dict) and "values" in d:
+                # keep a tiny summary so info isn't lost
+                try:
+                    v = d["values"]
+                    d["values_count"] = int(np.sum([bool(x) for x in v if x is not None]))
+                except Exception:
+                    d["values_count"] = None
+                d.pop("values", None)
+
+        pre = self.adata.uns.get("preprocessing", {})
+        flt = (pre or {}).get("filtering", {})
+
+        # handle both old ('meta_*') and new keys if present
+        for key in ("cont", "qvalue", "pep", "rec", "meta_cont", "meta_qvalue", "meta_pep", "meta_rec"):
+            sub = flt.get(key)
+            _strip_values(sub)
 
         self.adata.write(h5ad_path, compression="gzip")
