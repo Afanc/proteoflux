@@ -177,6 +177,7 @@ class DEExporter:
         summary_df = pd.concat([meta_df,
                                 log2fc_renamed,
                                 qval_renamed,
+                                miss_ratios,
                                 pval_renamed,
                                 raw_renamed], axis=1)
 
