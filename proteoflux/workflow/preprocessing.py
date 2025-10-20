@@ -716,6 +716,7 @@ class Preprocessor:
                 df_cov  = None
 
         def _pivot_block(_df: pl.DataFrame) -> Dict[str, Optional[pl.DataFrame]]:
+            log_info(f"Quantification using {self.pivot_signal_method}")
             if self.pivot_signal_method.lower() == "directlfq":
                 intensity = self._pivot_df_LFQ(
                     df=_df,
@@ -889,6 +890,7 @@ class Preprocessor:
 
                 # 4) build covariate-by-key wide tables
                 #cov_int_by_key = _pivot_cov_by_key(df_cov, "SIGNAL", self.pivot_signal_method)
+                log_info(f"Covariate Quantification using {self.covariate_pivot_method}")
                 cov_int_by_key = _pivot_cov_by_key(df_cov, "SIGNAL", self.covariate_pivot_method)
                 cov_qv_by_key  = _pivot_cov_by_key(df_cov, "QVALUE", "mean") if "QVALUE" in df_cov.columns else None
                 cov_pep_by_key = _pivot_cov_by_key(df_cov, "PEP",    "mean") if "PEP"    in df_cov.columns else None
