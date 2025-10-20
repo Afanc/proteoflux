@@ -173,11 +173,12 @@ class DEExporter:
         qval_renamed = q_ebayes.copy().add_prefix("Q_")
         pval_renamed = p_ebayes.copy().add_prefix("P_")
         raw_renamed = raw.T.copy().add_prefix("Raw_")
+        miss_renamed = miss_ratios.copy().add_prefix("Missingness_")
 
         summary_df = pd.concat([meta_df,
                                 log2fc_renamed,
                                 qval_renamed,
-                                miss_ratios,
+                                miss_renamed,
                                 pval_renamed,
                                 raw_renamed], axis=1)
 
