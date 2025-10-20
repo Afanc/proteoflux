@@ -81,7 +81,7 @@ class Preprocessor:
         #self.covariates_enabled = True if len(phospho_cfg) else False
         self.covariates_enabled = bool(cov_cfg.get("enabled", False))
 
-        self.cov_align_on = "parent_protein"
+        self.cov_align_on = "parent_protein" if phospho_cfg.get("stochio_correction_level".lower() == "protein", "protein") else "peptide"
 
     def fit_transform(self, df: pl.DataFrame) -> PreprocessResults:
         """Applies preprocessing steps in sequence and returns structured results."""
