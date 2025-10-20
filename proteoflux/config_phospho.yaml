@@ -44,6 +44,7 @@ preprocessing:
     multisite_collapse_policy: "duplicate"
     localization_mode: "filter_soft"
     localization_threshold: 0.75
+    pivot_method: "directlfq"
   filtering:
     qvalue: 0.01
     pep: 0.003

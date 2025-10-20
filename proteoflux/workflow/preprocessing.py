@@ -1,5 +1,6 @@
 import time
 import sys
+import re
 from typing import Optional, List, Tuple, Dict
 
 import numpy as np
@@ -72,10 +73,14 @@ class Preprocessor:
             raise ValueError("preprocessing.phospho.localization_mode must be 'filter_soft' or 'filter_strict'")
         self.phospho_loc_mode = _mode                         # "filter_soft" | "filter_strict"
         self.phospho_loc_thr  = float(phospho_cfg.get("localization_threshold", 0.75))
+        self.covariate_pivot_method = (phospho_cfg.get("covariate_pivot_method") or "directlfq").lower()
 
         # --- Covariates: list of assay labels to extract & center after imputation ---
         cov_cfg = (config.get("covariates") or {})
         self.covariate_assays: List[str] = [str(a).lower() for a in (cov_cfg.get("assays") or [])]
+        #self.covariates_enabled = True if len(phospho_cfg) else False
+        self.covariates_enabled = bool(cov_cfg.get("enabled", False))
+
         self.cov_align_on = "parent_protein"
 
     def fit_transform(self, df: pl.DataFrame) -> PreprocessResults:
@@ -146,6 +151,10 @@ class Preprocessor:
             else:
                 df_main = df
                 df_cov  = None
+
+        # Config-driven gate: if enabled but no rows, fail fast; if disabled, drop cov rows.
+        if self.covariates_enabled and (df_cov is None or len(df_cov) == 0):
+            raise ValueError("Covariates are enabled in config, but no covariate rows were found (check ASSAY/IS_COVARIATE or config.covariates.assays).")
 
         log_info("  Filtering (main block)")
         if df_cov is not None and len(df_cov):
@@ -400,7 +409,72 @@ class Preprocessor:
                 #.rename({"CONDITION":"Condition","REPLICATE":"Replicate"})
             )
 
-        self.intermediate_results.add_df("condition_pivot", condition_mapping)
+        #self.intermediate_results.add_df("condition_pivot", condition_mapping)
+
+        # --- 1) Patsy-safe condition token ---
+        def _sanitize_condition(s: str) -> str:
+            s = (s or "").strip()
+            # map bad chars to underscore
+            s = re.sub(r"[^A-Za-z0-9_]+", "_", s)
+            # must not start with a digit
+            if re.match(r"^[0-9]", s or ""):
+                s = "C_" + s
+            # avoid empty
+            return s or "C_UNLABELED"
+
+        # keep original for display, use sanitized for modeling (rename in-place)
+        condition_mapping = condition_mapping.with_columns([
+            pl.col("CONDITION").alias("CONDITION_ORIG")
+        ])
+        condition_mapping = condition_mapping.with_columns([
+            pl.col("CONDITION")
+              .cast(pl.Utf8, strict=False)
+              .map_elements(_sanitize_condition, return_dtype=pl.Utf8)  # <- no warning
+              .alias("CONDITION")
+        ])
+
+        # --- 2) Replicates must be provided explicitly when covariates are used ---
+        mapping_tmp = condition_mapping
+        using_covariate = "IS_COVARIATE" in mapping_tmp.columns and mapping_tmp["IS_COVARIATE"].any()
+
+        if using_covariate:
+            if "REPLICATE" not in mapping_tmp.columns:
+                raise ValueError("Covariate alignment requires a REPLICATE column in both main and covariate runs.")
+            # no nulls and numeric only
+            if mapping_tmp.select(pl.col("REPLICATE").is_null().any()).item():
+                raise ValueError("Covariate alignment: REPLICATE contains null/missing values. Please label all replicates.")
+            # try cast to Int; fail with a clear message if not numeric
+            try:
+                mapping_tmp = mapping_tmp.with_columns(pl.col("REPLICATE").cast(pl.Int64))
+            except Exception:
+                raise ValueError("Covariate alignment: REPLICATE must be numeric (e.g., 1,2,3).")
+        else:
+            # If no covariates, keep whatever REPLICATE is (no hard requirement)
+            mapping_tmp = mapping_tmp
+
+        # --- 3) Cross-assay alignment key (CONDITION#R<rep>) ---
+        mapping_tmp = mapping_tmp.with_columns(
+            (pl.col("CONDITION") + pl.lit("#R") + pl.col("REPLICATE").cast(pl.Utf8)).alias("ALIGN_KEY")
+        )
+
+        # --- 4) If covariate present, enforce replicate structure (per CONDITION_SAFE) ---
+        if using_covariate:
+            main = mapping_tmp.filter(pl.col("IS_COVARIATE") == False)
+            cov  = mapping_tmp.filter(pl.col("IS_COVARIATE") == True)
+            if main.height and cov.height:
+                rep_main = (main.group_by("CONDITION")
+                                 .agg(pl.len().alias("N"))
+                                 .sort("CONDITION"))
+                rep_cov  = (cov.group_by("CONDITION")
+                                .agg(pl.len().alias("N"))
+                                .sort("CONDITION"))
+                cmp = rep_main.join(rep_cov, on="CONDITION", how="outer", suffix="_FT")
+                bad = cmp.filter(pl.col("N") != pl.col("N_FT"))
+                if bad.height:
+                    raise ValueError(f"Covariate alignment: replicate counts differ per CONDITION. Details:\n{bad}")
+
+        self.intermediate_results.add_df("condition_pivot", mapping_tmp)
+
         # infer covariate assays when not provided in config
         if not self.covariate_assays and "IS_COVARIATE" in condition_mapping.columns:
             cov = (condition_mapping
@@ -671,7 +745,8 @@ class Preprocessor:
             return {"intensity": intensity, "qv": qv, "pep": pp, "rec": rec, "lp": lp}
 
         main_piv = _pivot_block(df_main)
-        cov_piv  = _pivot_block(df_cov) if df_cov is not None and len(df_cov) else None
+        #cov_piv  = _pivot_block(df_cov) if df_cov is not None and len(df_cov) else None
+        #cov_piv  = None
 
         intensity_pivot = main_piv["intensity"]
         qvalue_pivot    = main_piv["qv"]
@@ -746,7 +821,11 @@ class Preprocessor:
         # --- store COVARIATE pivots: pivot by parent key, broadcast to main INDEX, align to main order ---
         log_info("Covariate broadcast/alignment")
         with log_indent():
-            if cov_piv is not None:
+            if self.covariates_enabled:
+                if df_cov is None or len(df_cov) == 0:
+                    # This should already have errored in _filter if enabled — guard just in case:
+                    raise ValueError("Covariates enabled but no covariate rows are present after filtering.")
+            #if cov_piv is not None:
                 # 1) choose the alignment key
                 key_col = {"parent_peptide": "PARENT_PEPTIDE_ID",
                            "parent_protein": "PARENT_PROTEIN"}[self.cov_align_on]
@@ -764,6 +843,39 @@ class Preprocessor:
                 def _pivot_cov_by_key(frame: Optional[pl.DataFrame], value_col: str, agg: str) -> Optional[pl.DataFrame]:
                     if frame is None or value_col not in frame.columns:
                         return None
+                    # Attach the parent key to covariate rows and drop ones without mapping
+                    long_with_key = frame.join(cov_key_map, on="INDEX", how="left").drop_nulls([key_col])
+
+                    # Branch: DirectLFQ vs. simple aggregation
+                    #if self.pivot_signal_method.lower() == "directlfq":
+                    if value_col == "SIGNAL" and self.covariate_pivot_method.lower() == "directlfq":
+                        # LFQ requires peptide/ion identifiers
+                        if "PEPTIDE_LSEQ" not in long_with_key.columns:
+                            raise ValueError(
+                                "Covariate LFQ requested but 'PEPTIDE_LSEQ' is missing in covariate runs. "
+                                "Either provide peptide sequences in the covariate data or set "
+                                "preprocessing.pivot_signal_method='sum'."
+                            )
+                        # Use the generalized LFQ pivot on the parent key
+                        return self._pivot_df_LFQ(
+                            df=long_with_key.select([key_col, "FILENAME", "PEPTIDE_LSEQ", value_col]),
+                            sample_col="FILENAME",
+                            protein_col=key_col,
+                            values_col=value_col,
+                            ion_col="PEPTIDE_LSEQ",
+                        )
+                    else:
+                        # Simple aggregate (sum/mean/…) on the parent key
+                        return self._pivot_df(
+                            df=long_with_key.select([key_col, "FILENAME", value_col]),
+                            sample_col="FILENAME",
+                            protein_col=key_col,
+                            values_col=value_col,
+                            aggregate_fn=agg,
+                        )
+                def _pivot_cov_by_key_works(frame: Optional[pl.DataFrame], value_col: str, agg: str) -> Optional[pl.DataFrame]:
+                    if frame is None or value_col not in frame.columns:
+                        return None
                     # attach key to the long rows, keep only rows with a key
                     long_with_key = frame.join(cov_key_map, on="INDEX", how="left").drop_nulls([key_col])
                     # reuse your pivot helper but with protein_col=key_col
@@ -776,7 +888,8 @@ class Preprocessor:
                     )
 
                 # 4) build covariate-by-key wide tables
-                cov_int_by_key = _pivot_cov_by_key(df_cov, "SIGNAL", self.pivot_signal_method)
+                #cov_int_by_key = _pivot_cov_by_key(df_cov, "SIGNAL", self.pivot_signal_method)
+                cov_int_by_key = _pivot_cov_by_key(df_cov, "SIGNAL", self.covariate_pivot_method)
                 cov_qv_by_key  = _pivot_cov_by_key(df_cov, "QVALUE", "mean") if "QVALUE" in df_cov.columns else None
                 cov_pep_by_key = _pivot_cov_by_key(df_cov, "PEP",    "mean") if "PEP"    in df_cov.columns else None
                 cov_rec_by_key = _pivot_cov_by_key(df_cov, "RUN_EVIDENCE_COUNT", "mean") if "RUN_EVIDENCE_COUNT" in df_cov.columns else None
@@ -819,7 +932,8 @@ class Preprocessor:
         with log_indent():
             self._normalize_matrix(Block.MAIN)
 
-        if self.intermediate_results.dfs.get("raw_df_covariate") is not None:
+        #if self.intermediate_results.dfs.get("raw_df_covariate") is not None:
+        if self.covariates_enabled:
             log_info("Normalization (covariate)")
             with log_indent():
                 self._normalize_matrix(Block.COV)
@@ -1050,8 +1164,11 @@ class Preprocessor:
         log_info("Imputed (main) ready.")
 
         # COVARIATE (if present) + median centering per sample
+        #df_cov = self.intermediate_results.dfs.get("normalized_covariate")
+        ##if df_cov is not None:
+        #if df_cov is not None and len(df_cov):
         df_cov = self.intermediate_results.dfs.get("normalized_covariate")
-        if df_cov is not None:
+        if self.covariates_enabled:
             cols_cov = [c for c in df_cov.columns if c != "INDEX"]
             out_cov = _impute_block(df_cov, cols_cov, suffix="_covariate")
             log_info("Imputed (covariate) ready.")

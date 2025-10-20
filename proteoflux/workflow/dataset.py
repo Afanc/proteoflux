@@ -70,13 +70,23 @@ class Dataset:
             for name, cfg in (self.inject_runs_cfg or {}).items()
             if cfg and bool(cfg.get("is_covariate", False))
         ]
+
+        cov_block = deepcopy(preprocessing_cfg.get("covariates", {}) or {})
+        # enabled strictly from inject_runs.*.is_covariate
+        cov_block["enabled"] = bool(cov_assays)
         if cov_assays:
-            cov_block = deepcopy(preprocessing_cfg.get("covariates", {}) or {})
             # merge/extend existing list if user had one
             prev = set(map(str.lower, cov_block.get("assays", []) or []))
             prev |= set(map(str.lower, cov_assays))
-            cov_block["assays"] = sorted(prev)  # store lower-cased; Preprocessor matches case-insensitively
-            preprocessing_cfg["covariates"] = cov_block
+            cov_block["assays"] = sorted(prev)
+        preprocessing_cfg["covariates"] = cov_block
+        #if cov_assays:
+        #    cov_block = deepcopy(preprocessing_cfg.get("covariates", {}) or {})
+        #    # merge/extend existing list if user had one
+        #    prev = set(map(str.lower, cov_block.get("assays", []) or []))
+        #    prev |= set(map(str.lower, cov_assays))
+        #    cov_block["assays"] = sorted(prev)  # store lower-cased; Preprocessor matches case-insensitively
+        #    preprocessing_cfg["covariates"] = cov_block
 
         self.preprocessor = Preprocessor(preprocessing_cfg)
 

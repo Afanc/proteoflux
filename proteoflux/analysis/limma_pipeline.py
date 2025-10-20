@@ -1,4 +1,3 @@
-import warnings
 import anndata as ad
 import pandas as pd
 import numpy as np
@@ -18,7 +17,7 @@ from proteoflux.analysis.clustering import run_clustering, run_clustering_missin
 def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     # If a covariate layer exists, run the covariate model path (simple OLS + BH)
 
-    injected_runs = (config or {}).get("dataset", {}).get("inject_runs") or []
+    injected_runs = (config or {}).get("dataset", {}).get("inject_runs") or {}
     has_covariate_cfg = any(bool(run.get("is_covariate")) for _, run in injected_runs.items())
 
     if has_covariate_cfg:
@@ -277,7 +276,8 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict) -> ad.AnnData:
         q_raw  = np.vstack([multipletests(p_raw[:, j], method="fdr_bh")[1] for j in range(p_raw.shape[1])]).T
 
         # eBayes
-        fit = imo.eBayes(fit)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            fit = imo.eBayes(fit)
         s2post     = fit.s2_post.to_numpy()
         se_ebayes  = stdu * np.sqrt(s2post[:, None])
         t_ebayes   = fit.t.values
@@ -456,7 +456,8 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict) -> ad.AnnData:
     # ----------------------------
     limma_raw = imo.lmFit(Y_df, design=design2)
     limma_raw = imo.contrasts_fit(limma_raw, contr)
-    limma_raw = imo.eBayes(limma_raw)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        limma_raw = imo.eBayes(limma_raw)
     raw_coefs = limma_raw.coefficients.values
     raw_p     = limma_raw.p_value.values
     raw_q     = np.vstack([multipletests(raw_p[:, j], method="fdr_bh")[1] for j in range(raw_p.shape[1])]).T
@@ -471,7 +472,8 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict) -> ad.AnnData:
     # --- NEW: limma on the covariate (FT) matrix itself (same design/contrasts) ---
     limma_cov = imo.lmFit(C_df, design=design2)
     limma_cov = imo.contrasts_fit(limma_cov, contr)
-    limma_cov = imo.eBayes(limma_cov)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        limma_cov = imo.eBayes(limma_cov)
     cov_coefs = limma_cov.coefficients.values
     cov_p     = limma_cov.p_value.values
     cov_q     = np.vstack([multipletests(cov_p[:, j], method="fdr_bh")[1] for j in range(cov_p.shape[1])]).T
@@ -546,7 +548,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict) -> ad.AnnData:
     out.uns["decomposition_rule"] = "raw_log2fc ≈ log2fc (adjusted) + cov_part"
 
     # Keep your quick diagnostics (you said you'll delete later)
-    _quick_print_two(out, ids=("RRPESAPAESSPSK|p5","RRPESAPAESSPSK|p11", "GILAADESTGSIAKR|p8", "AAVGQESPGGLEAGNAKAPK|p7", "SAGALEEGTSEGQLCGR|p1"))
+    #_quick_print_two(out, ids=("RRPESAPAESSPSK|p5","RRPESAPAESSPSK|p11", "GILAADESTGSIAKR|p8", "AAVGQESPGGLEAGNAKAPK|p7", "SAGALEEGTSEGQLCGR|p1"))
 
     return out
 

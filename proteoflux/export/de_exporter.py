@@ -226,7 +226,8 @@ class DEExporter:
     @log_time("Exporting .h5ad")
     def export_adata(self, h5ad_path: str):
         for col in ["CONDITION", "GENE_NAMES", "PROTEIN_WEIGHT", "PROTEIN_DESCRIPTIONS",
-                    "FASTA_HEADERS", "ASSAY", "PARENT_PEPTIDE_ID", "PARENT_PROTEIN"]:
+                    "FASTA_HEADERS", "ASSAY", "PARENT_PEPTIDE_ID", "PARENT_PROTEIN",
+                    "CONDITION_ORIG"]:
             if col in self.adata.obs.columns:
                 self.adata.obs[col] = self.adata.obs[col].astype("category")
             if col in self.adata.var.columns:
