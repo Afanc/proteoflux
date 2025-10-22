@@ -18,6 +18,7 @@ class IntermediateResults:
     metadata: Dict[str, Any] = field(default_factory=lambda: {
         "filtering": {},
         "normalization": {},
+        "covariate": {},
         "imputation": {}})
 
     # DataFrame columns post-pivot (samples)
@@ -68,7 +69,7 @@ class IntermediateResults:
 
     def add_metadata(self, step: str, key: str, value: Any):
         """Store metadata like regression type, scale, etc."""
-        if step not in ["filtering", "normalization", "imputation"]:
+        if step not in ["filtering", "normalization", "imputation", "covariate"]:
             raise ValueError("step must be 'normalization' or 'imputation'")
         self.metadata[step][key] = value
 

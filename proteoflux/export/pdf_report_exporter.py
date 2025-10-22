@@ -160,9 +160,18 @@ class ReportPlotter:
 
         # Cache stats for fast access
         self.log2fc = adata.varm["log2fc"]
-        self.q_ebayes = pd.DataFrame(adata.varm["q_ebayes"],
-                                     columns=self.contrast_names,
-                                     index=adata.var.index)
+        # eBayes may be absent in pilot mode
+        self.q_ebayes = (pd.DataFrame(adata.varm["q_ebayes"],
+                                      columns=self.contrast_names,
+                                      index=adata.var.index)
+                         if "q_ebayes" in adata.varm else None)
+        self.p_ebayes = (pd.DataFrame(adata.varm["p_ebayes"],
+                                      columns=self.contrast_names,
+                                      index=adata.var.index)
+                         if "p_ebayes" in adata.varm else None)
+        # pilot mode flag (set by limma_pipeline)
+        self.pilot_mode = bool(adata.uns.get("pilot_study_mode", False))
+
         self.missingness = adata.uns.get("missingness", {})
         self.fasta_headers = adata.var['FASTA_HEADERS'].to_numpy()
 
@@ -343,9 +352,14 @@ class ReportPlotter:
         y -= line_height
 
         # Differential Expression
-        fig.text(x0 + 0.02, y,
-                 f"- Differential expression: eBayes via {de_method}",
-                 ha="left", va="top", fontsize=12)
+        if self.pilot_mode:
+            fig.text(x0 + 0.02, y,
+                     f"- Pilot Study, LogFC only",
+                     ha="left", va="top", fontsize=12)
+        else:
+            fig.text(x0 + 0.02, y,
+                     f"- Differential expression: eBayes via {de_method}",
+                     ha="left", va="top", fontsize=12)
         y -= line_height
 
         # Package versions
@@ -470,12 +484,17 @@ class ReportPlotter:
             self._plot_volcano_plots()
 
     def _plot_volcano_plots(self):
+
+        if (self.q_ebayes is None):
+            return
+
         sign_threshold = self.analysis_config.get("sign_threshold", 0.05)
         volcano_top_annotated = self.analysis_config.get("exports").get("volcano_top_annotated", 10)
-
         for i, name in enumerate(self.contrast_names):
             logfc = self.log2fc[:, i]
-            qvals_bayes = self.q_ebayes.iloc[:, i]
+            # choose source: eBayes if available, else raw
+            qvals_src = self.q_ebayes.iloc[:, i]
+            pvals_src = self.p_ebayes.iloc[:, i]
 
             group1, group2 = name.split("_vs_")
 
@@ -487,13 +506,13 @@ class ReportPlotter:
 
             color = np.full(logfc.shape[0], "gray", dtype=object)
 
-            def plot_panel(ax, pvals, qvals, title):
+            def plot_panel(ax, qvals_for_y, qvals_for_pick, title):
                 mask = ~(missing_a | missing_b)
 
                 base_color = color[mask]
                 base_logfc = logfc[mask]
-                base_p = pvals.iloc[mask]
-                ax.scatter(base_logfc, -np.log10(base_p), c=base_color, alpha=0.7, s=10)
+                base_q = qvals_for_y.iloc[mask]
+                ax.scatter(base_logfc, -np.log10(base_q), c=base_color, alpha=0.7, s=10)
 
 
                 ax.axhline(-np.log10(sign_threshold), color="black", linestyle="--", linewidth=0.8)
@@ -502,16 +521,16 @@ class ReportPlotter:
                 # annotate top hits, excluding any protein missing in either group
                 for direction in ["up", "down"]:
                     dir_mask = (logfc > 0) if direction == "up" else (logfc < 0)
-                    sig_mask = mask & dir_mask & (qvals < sign_threshold)
+                    sig_mask = mask & dir_mask & (qvals_for_pick < sign_threshold)
 
                     # pick top by smallest q-value
-                    top_idx = np.argsort(qvals[sig_mask])[:volcano_top_annotated]
+                    top_idx = np.argsort(qvals_for_pick[sig_mask])[:volcano_top_annotated]
                     selected = np.where(sig_mask)[0][top_idx]
 
                     for j in selected:
                         ax.text(
                             logfc[j],
-                            -np.log10(pvals.iloc[j]),
+                            -np.log10(qvals_for_y.iloc[j]),
                             self.protein_names.iloc[j],
                             fontsize=6,
                             ha="right" if logfc[j] > 0 else "left",
@@ -523,7 +542,8 @@ class ReportPlotter:
                 ax.set_title(title)
 
             fig, ax = plt.subplots(1, 1, figsize=(10, 6))
-            plot_panel(ax, qvals_bayes, qvals_bayes, f"{name}")
+            # Use q on both axes/selection (consistent with current ylabel)
+            plot_panel(ax, qvals_src, qvals_src, f"{name}")
 
             fig.tight_layout()
             self.pdf.savefig(fig)

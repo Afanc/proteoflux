@@ -73,7 +73,7 @@ class Preprocessor:
             raise ValueError("preprocessing.phospho.localization_mode must be 'filter_soft' or 'filter_strict'")
         self.phospho_loc_mode = _mode                         # "filter_soft" | "filter_strict"
         self.phospho_loc_thr  = float(phospho_cfg.get("localization_threshold", 0.75))
-        self.covariate_pivot_method = (phospho_cfg.get("covariate_pivot_method") or "directlfq").lower()
+        self.covariate_pivot_method = phospho_cfg.get("covariate_pivot_method", "directlfq")
 
         # --- Covariates: list of assay labels to extract & center after imputation ---
         cov_cfg = (config.get("covariates") or {})
@@ -778,9 +778,9 @@ class Preprocessor:
 
         # --- Optional phospho localization filtering (row-wise, after alignment) ---
         filtered_intensity = intensity_pivot
-        log_info("Filtering (phospho localization)")
         with log_indent():
             if self.analysis_type == "phospho" and (locprob_pivot is not None):
+                log_info("Filtering (phospho localization)")
                 cols = [c for c in locprob_pivot.columns if c != "INDEX"]
                 lp_mat = locprob_pivot.select(cols).to_numpy()
                 if self.phospho_loc_mode == "filter_soft":
@@ -912,7 +912,15 @@ class Preprocessor:
                 cov_pep = _broadcast(cov_pep_by_key)
                 cov_rec = _broadcast(cov_rec_by_key)
 
-                # 6) store — all four are now identical in index & order to the main filtered intensity
+                # 6a) Store covariate key
+                self.intermediate_results.add_df(
+                    "cov_index_to_key",
+                    main_with_key.select(["INDEX", key_col])
+                )
+                self.intermediate_results.add_metadata("covariate", "key_col", key_col)
+
+                # 6b) store — all four are now identical in index & order to the main filtered intensity
+
                 self.intermediate_results.add_df("raw_df_covariate", cov_int)
                 self.intermediate_results.add_df("qvalues_covariate",  cov_qv)
                 self.intermediate_results.add_df("pep_covariate",      cov_pep)
@@ -1166,27 +1174,67 @@ class Preprocessor:
         log_info("Imputed (main) ready.")
 
         # COVARIATE (if present) + median centering per sample
-        #df_cov = self.intermediate_results.dfs.get("normalized_covariate")
-        ##if df_cov is not None:
-        #if df_cov is not None and len(df_cov):
-        df_cov = self.intermediate_results.dfs.get("normalized_covariate")
         if self.covariates_enabled:
-            cols_cov = [c for c in df_cov.columns if c != "INDEX"]
-            out_cov = _impute_block(df_cov, cols_cov, suffix="_covariate")
+            df_cov_norm = self.intermediate_results.dfs.get("normalized_covariate")
+            if df_cov_norm is None or df_cov_norm.height == 0:
+                return
+
+            sample_cols = [c for c in df_cov_norm.columns if c != "INDEX"]
+
+            # Recover the mapping and key name saved in _pivot_data()
+            idx2key = self.intermediate_results.dfs.get("cov_index_to_key")
+            key_col = self.intermediate_results.metadata.get("covariate", {}).get("key_col")
+
+            if idx2key is None or key_col is None:
+                raise ValueError("Covariate key mapping is missing. Ensure _pivot_data stored 'cov_index_to_key' and 'covariate.key_col'.")
+
+            # Collapse to one row per key (they are identical pre-impute; we just formalize it)
+            cov_with_key = df_cov_norm.join(idx2key, on="INDEX", how="left")
+            agg_exprs = [pl.first(c).alias(c) for c in sample_cols]
+            cov_norm_by_key = cov_with_key.group_by(key_col, maintain_order=True).agg(agg_exprs)
+
+            # Impute once per key
+            not_imp = cov_norm_by_key.select(sample_cols).to_numpy().copy()
+            cond_map = self.intermediate_results.dfs["condition_pivot"].to_pandas()
+            imputer = get_imputer(**self.imputation, condition_map=cond_map, sample_index=sample_cols)
+            imp_key = not_imp if imputer is None else imputer.fit_transform(not_imp)
+            cov_imp_by_key = cov_norm_by_key.with_columns(pl.DataFrame(imp_key, schema=sample_cols))
+
+            # Broadcast imputed key rows back to all INDEX rows (same order as main)
+            cov_imp_broadcast = idx2key.join(cov_imp_by_key, on=key_col, how="left").select(["INDEX"] + sample_cols)
+
+            # Save imputed covariate (now perfectly identical within a protein/peptide key)
+            self.intermediate_results.add_df("imputed_covariate", cov_imp_broadcast)
+            self.intermediate_results.add_metadata("imputation", "method_covariate", self.imputation.get("method"))
             log_info("Imputed (covariate) ready.")
 
-            # Per-row median across samples (LIMMA-style)
-            cov_mat = out_cov.select(cols_cov).to_numpy()
+            # Centering (unchanged, now applied to the broadcasted imputed table)
+            cov_mat = cov_imp_broadcast.select(sample_cols).to_numpy()
             row_meds = np.nanmedian(cov_mat, axis=1, keepdims=True)
             cov_mat_centered = cov_mat - row_meds
-
-            centered_cov_df = out_cov.with_columns(pl.DataFrame(cov_mat_centered, schema=cols_cov))
-
-            # Overwrite the stored imputed covariate with the centered version
+            centered_cov_df = cov_imp_broadcast.with_columns(pl.DataFrame(cov_mat_centered, schema=sample_cols))
             self.intermediate_results.dfs["centered_covariate"] = centered_cov_df
             self.intermediate_results.matrices["centered_covariate"] = cov_mat_centered
-
             log_info("Covariate centering: per-feature median across all samples applied.")
+
+        #df_cov = self.intermediate_results.dfs.get("normalized_covariate")
+        #if self.covariates_enabled:
+        #    cols_cov = [c for c in df_cov.columns if c != "INDEX"]
+        #    out_cov = _impute_block(df_cov, cols_cov, suffix="_covariate")
+        #    log_info("Imputed (covariate) ready.")
+
+        #    # Per-row median across samples (LIMMA-style)
+        #    cov_mat = out_cov.select(cols_cov).to_numpy()
+        #    row_meds = np.nanmedian(cov_mat, axis=1, keepdims=True)
+        #    cov_mat_centered = cov_mat - row_meds
+
+        #    centered_cov_df = out_cov.with_columns(pl.DataFrame(cov_mat_centered, schema=cols_cov))
+
+        #    # Overwrite the stored imputed covariate with the centered version
+        #    self.intermediate_results.dfs["centered_covariate"] = centered_cov_df
+        #    self.intermediate_results.matrices["centered_covariate"] = cov_mat_centered
+
+        #    log_info("Covariate centering: per-feature median across all samples applied.")
 
         imputed_main = self.intermediate_results.dfs.get("imputed")
         imputed_cov = self.intermediate_results.dfs.get("imputed_covariate")

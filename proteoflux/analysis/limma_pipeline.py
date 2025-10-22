@@ -9,7 +9,7 @@ from scipy.stats import t as t_dist
 from scipy.special import digamma, polygamma
 from statsmodels.stats.multitest import multipletests
 from itertools import combinations
-from proteoflux.utils.utils import log_time
+from proteoflux.utils.utils import log_time, log_warning
 from proteoflux.stats import StatisticalTester
 from proteoflux.analysis.clustering import run_clustering, run_clustering_missingness
 
@@ -30,6 +30,15 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         raise ValueError(f"Need ≥2 conditions for contrasts; found {levels}")
     for lvl in levels:
         obs[lvl] = (obs["CONDITION"] == lvl).astype(int)
+
+    # Pilot study mode: allow experiments where at least one condition has only 1 replicate.
+    # We still fit OLS, compute logFC + (unmoderated) p/q, but SKIP eBayes.
+    repl_counts = obs["CONDITION"].value_counts()
+    pilot_mode = (repl_counts.min() <= 1)
+    if pilot_mode:
+        log_warning(
+            "Pilot study mode: at least one condition has only 1 replicate, no statistical analysis done. "
+        )
 
     # 3) Patsy design (no intercept) — keep as Patsy DesignMatrix
     formula   = "0 + " + " + ".join(levels)
@@ -80,17 +89,22 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     ]).T
 
     # === MODERATED (post-eBayes) statistics ===
-    with np.errstate(divide='ignore', invalid='ignore'):
-        fit_imo    = imo.eBayes(fit_imo)
+    if not pilot_mode:
+        with np.errstate(divide='ignore', invalid='ignore'):
+            fit_imo    = imo.eBayes(fit_imo)
 
-    s2post     = fit_imo.s2_post.to_numpy()       # (n_genes,)
-    se_ebayes  = stdu * np.sqrt(s2post[:, np.newaxis])
-    t_ebayes   = fit_imo.t.values
-    p_ebayes   = fit_imo.p_value.values
-    q_ebayes   = np.vstack([
-        multipletests(p_ebayes[:, j], method="fdr_bh")[1]
-        for j in range(p_ebayes.shape[1])
-    ]).T
+        s2post     = fit_imo.s2_post.to_numpy()       # (n_genes,)
+        se_ebayes  = stdu * np.sqrt(s2post[:, np.newaxis])
+        t_ebayes   = fit_imo.t.values
+        p_ebayes   = fit_imo.p_value.values
+        q_ebayes   = np.vstack([
+            multipletests(p_ebayes[:, j], method="fdr_bh")[1]
+            for j in range(p_ebayes.shape[1])
+        ]).T
+
+    else:
+        # Placeholders (omit from .varm below)
+        se_ebayes = t_ebayes = p_ebayes = q_ebayes = None
 
     ###
     #print(adata.var_names.get_loc("P0AB71"))
@@ -107,18 +121,17 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     out = adata.copy()
 
     out.varm["log2fc"]  = coefs
-    out.varm["se_raw"]  = se_raw
-    out.varm["t_raw"]   = t_raw
-    out.varm["p_raw"]   = p_raw
-    out.varm["q_raw"]   = q_raw
+
     # moderated statistics
-    out.varm["se_ebayes"]  = se_ebayes
-    out.varm["t_ebayes"]   = t_ebayes
-    out.varm["p_ebayes"]   = p_ebayes
-    out.varm["q_ebayes"]   = q_ebayes
+    if not pilot_mode:
+        out.varm["se_ebayes"]  = se_ebayes
+        out.varm["t_ebayes"]   = t_ebayes
+        out.varm["p_ebayes"]   = p_ebayes
+        out.varm["q_ebayes"]   = q_ebayes
 
     # metadata
     out.uns["contrast_names"] = list(contrast_df.columns)
+    out.uns["pilot_study_mode"] = bool(pilot_mode)
 
     # === Missingness exactly as before ===
     if "qvalue" in adata.layers:
@@ -549,6 +562,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict) -> ad.AnnData:
 
     # Keep your quick diagnostics (you said you'll delete later)
     #_quick_print_two(out, ids=("RRPESAPAESSPSK|p5","RRPESAPAESSPSK|p11", "GILAADESTGSIAKR|p8", "AAVGQESPGGLEAGNAKAPK|p7", "SAGALEEGTSEGQLCGR|p1"))
+    #check_ft_consistency(out, protein_id="Q9NW97")
 
     return out
 
@@ -662,4 +676,55 @@ def _quick_print_two(adata, ids=("RRPESAPAESSPSK|p5","RRPESAPAESSPSK|p11")):
             l_raw = float(rawDF.loc[rid, cn]) if (rawDF is not None and cn in rawDF.columns) else np.nan
             l_cov = float(covDF.loc[rid, cn]) if (covDF is not None and cn in covDF.columns) else np.nan
             print(f"  {cn:<12}  Raw={l_raw:>8.4f}  Adj={l_adj:>8.4f}  CovPart={l_cov:>8.4f}")
+
+def check_ft_consistency(adata, protein_id="Q8NEN9"):
+    # Extract mapping
+    var = adata.var
+    if "PARENT_PROTEIN" not in var:
+        raise ValueError("No PARENT_PROTEIN column in adata.var")
+
+    sites = var.index[var["PARENT_PROTEIN"] == protein_id]
+    print(f"Protein {protein_id} — {len(sites)} sites")
+
+    # Extract the flowthrough (FT) data
+    ft = pd.DataFrame(
+        adata.layers["centered_covariate"],  # or "centered_covariate" if that’s your FT layer
+        index=adata.obs_names,
+        columns=adata.var_names
+    ).T
+
+    ft2 = pd.DataFrame(
+        adata.layers["processed_covariate"],  # or "centered_covariate" if that’s your FT layer
+        index=adata.obs_names,
+        columns=adata.var_names
+    ).T
+
+
+    # Extract the limma results (raw flowthrough fit)
+    ft_logfc = pd.DataFrame(
+        np.asarray(adata.varm["ft_log2fc"]),
+        index=adata.var_names,
+        columns=adata.uns["contrast_names"]
+    )
+    ft_q = pd.DataFrame(
+        np.asarray(adata.varm["ft_q_ebayes"]),
+        index=adata.var_names,
+        columns=adata.uns["contrast_names"]
+    )
+
+    # Print raw differences
+    for c in adata.uns["contrast_names"]:
+        vals = ft_logfc.loc[sites, c]
+        qs = ft_q.loc[sites, c]
+        print(f"\nContrast: {c}")
+        print(vals)
+        print(qs)
+        print(f"Δ logFC range: {vals.max()-vals.min():.4g}")
+        print(f"Δ q range: {qs.max()-qs.min():.4g}")
+
+    # Also check the actual FT intensities for equality
+    ft_equal = np.allclose(ft.loc[sites].to_numpy(), ft.loc[sites[0]].to_numpy())
+    print(ft.loc[sites])
+    print(ft2.loc[sites])
+    print("\nFT values identical across sites:", ft_equal)
 
