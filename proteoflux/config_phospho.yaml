@@ -18,10 +18,10 @@ dataset:
   pep_column: "EG.PEP"
 
   filename_column: "R.FileName"
+  spectral_counts_column: "PG.RunEvidenceCount"
   condition_column: "R.Condition"
   replicate_column: "R.Replicate"
 
-  run_evidence_column: "PEP.RunEvidenceCount"
   precursors_exp_column: "PG.NrOfPrecursorsIdentified (Experiment-wide)"
   ibaq_column: "PG.IBAQ"
   fasta_column: "PG.FastaHeaders"
@@ -48,7 +48,7 @@ preprocessing:
   filtering:
     qvalue: 0.01
     pep: 0.003
-    run_evidence_count: 1
+    min_precursors: 1
     contaminants_files:
       - "data/Contaminants_2022.fasta"
   normalization:

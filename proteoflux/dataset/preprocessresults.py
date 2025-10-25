@@ -19,7 +19,7 @@ class PreprocessResults:
     meta_cont: Dict
     meta_qvalue: Dict
     meta_pep: Dict
-    meta_rec: Dict
+    meta_prec: Dict
     raw_covariate: Optional[pl.DataFrame] = None
     lognormalized_covariate: Optional[pl.DataFrame] = None
     normalized_covariate:   Optional[pl.DataFrame] = None

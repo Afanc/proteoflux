@@ -423,7 +423,7 @@ class Dataset:
                 "cont":    self.preprocessed_data.meta_cont,
                 "qvalue":  self.preprocessed_data.meta_qvalue,
                 "pep":     self.preprocessed_data.meta_pep,
-                "rec":     self.preprocessed_data.meta_rec,
+                "prec":     self.preprocessed_data.meta_prec,
             },
             "quantification_method": self.preprocessor.pivot_signal_method,
             "normalization": self.preprocessor.normalization,

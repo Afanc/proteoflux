@@ -46,10 +46,6 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
             column LoD := np.nanquantile(column j, lod_q)
             value := (column LoD - lod_shift) + Normal(0, lod_sd_width)   # tiny jitter
             if clip_lod: value = min(value, column LoD)
-
-    Notes:
-      - Keeps matrix orientation consistent with the rest of ProteoFlux.
-      - Randomness is controlled via random_state for reproducibility.
     """
 
     def __init__(
@@ -97,7 +93,7 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
             if self.lod_k is None:
                 # Adaptive K with bounds keeps LoD in the true low tail
                 K_adapt = int(np.ceil(0.01 * obs.size))
-                K = max(10, min(50, K_adapt))   # 10 ≤ K ≤ 50
+                K = max(10, min(50, K_adapt))   # 10 ≤ K ≤ 50, if no k is given
             else:
                 K = int(self.lod_k)
 
@@ -133,7 +129,7 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
             if in_group_vals.size >= self.in_min_obs:
                 # center at in-condition median
                 center = float(np.median(in_group_vals))
-                # pooled SD across conditions with data (no winsorization; typical n=3-4)
+                # pooled SD across conditions with data
                 groups = [v for v in obs_by_cond.values() if v.size >= self.in_min_obs]
                 sd_pool = _pooled_sd(groups)
                 sd_jitter = max(self.jitter_frac * sd_pool, _EPS)

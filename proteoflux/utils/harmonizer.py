@@ -15,7 +15,7 @@ class DataHarmonizer:
         "condition_column": "CONDITION",
         "replicate_column": "REPLICATE",
         "filename_column": "FILENAME",
-        "run_evidence_column": "RUN_EVIDENCE_COUNT",
+        "spectral_counts_column": "SPECTRAL_COUNTS",
         "fasta_column": "FASTA_HEADERS",
         "protein_weight": "PROTEIN_WEIGHT",
         "protein_descriptions": "PROTEIN_DESCRIPTIONS",
@@ -299,24 +299,6 @@ class DataHarmonizer:
             pl.col("_seq_candidate").map_elements(self._strip_mods, return_dtype=str).alias("STRIPPED_SEQ")
         ).drop(["_seq_candidate"], strict=False)
 
-    #@log_time("Building Phospho Index")
-    #def _build_phospho_index(self, df: pl.DataFrame) -> pl.DataFrame:
-    #    df = self._assert_required_phospho_columns(df)
-
-    #    # 1) Build a *canonical* unmodified sequence no matter what was mapped
-    #    #    Prefer PEPTIDE_LSEQ; if it looks decorated, clean it. Else fall back to MODIFIED_SEQUENCE → strip.
-    #    # - modify, look for stripped_seq_column, if not present use peptide_lseq like here
-    #    df = df.with_columns(
-    #        pl.when(pl.col("PEPTIDE_LSEQ").is_not_null())
-    #          .then(pl.col("PEPTIDE_LSEQ").cast(pl.Utf8))
-    #          .otherwise(pl.col("PEPTIDE_LSEQ").cast(pl.Utf8))
-    #          .alias("_seq_candidate")
-    #    ).with_columns(
-    #        pl.col("_seq_candidate")
-    #          .map_elements(self._strip_mods, return_dtype=str)
-    #          .alias("STRIPPED_SEQ")
-    #    ).drop(["_seq_candidate"], strict=False)
-
         # 2) Split lists
         with_lists = df.with_columns(
             pl.when(pl.col("PTM_POSITIONS_STR").is_not_null())
@@ -372,35 +354,5 @@ class DataHarmonizer:
             df = self._build_phospho_index(df)
         elif self.analysis_type == "peptidomics":
             df = self._build_peptido_index(df)
-        # elif self.analysis_type == "proteomics":  # optional later
-        #     df = self._build_protein_index(df)
-
-        return df
-
-    @log_time("Data Harmonizing")
-    def harmonize_old(self, df: pl.DataFrame) -> pl.DataFrame:
-        """
-        Layout-aware harmonization:
-          - 'wide': annotation-driven melt → rename → strict join
-          - 'long': rename → strict join
-        """
-        if self.input_layout not in {"long", "wide"}:
-            raise ValueError("dataset.input_layout must be 'long' or 'wide'.")
-
-        if self.input_layout == "wide":
-            #log_info("Input layout=wide; melting via annotation to canonical long format.")
-            df = self._melt_wide_to_long(df)
-            df = self._standardize_then_inject(df)
-            log_info(
-                f"Wide → long harmonization completed: rows={df.height}, cols={df.width}. "
-            )
-            return df
-
-        # input_layout == "long"
-        #log_info("Input layout=long")
-        df = self._standardize_then_inject(df)
-
-        if self.analysis_type == "phospho":
-            df = self._build_phospho_index(df)
 
         return df

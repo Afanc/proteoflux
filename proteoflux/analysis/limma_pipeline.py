@@ -10,7 +10,7 @@ from scipy.special import digamma, polygamma
 from statsmodels.stats.multitest import multipletests
 from itertools import combinations
 from proteoflux.utils.utils import log_time, log_warning
-from proteoflux.stats import StatisticalTester
+from proteoflux.analysis.statisticaltester import StatisticalTester
 from proteoflux.analysis.clustering import run_clustering, run_clustering_missingness
 
 @log_time("Analysis pipeline")
@@ -20,25 +20,27 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     injected_runs = (config or {}).get("dataset", {}).get("inject_runs") or {}
     has_covariate_cfg = any(bool(run.get("is_covariate")) for _, run in injected_runs.items())
 
-    if has_covariate_cfg:
-        return run_limma_pipeline_covariate(adata, config)
+    # Pilot study mode: allow experiments where at least one condition has only 1 replicate.
+    # We still fit OLS, compute logFC + (unmoderated) p/q, but SKIP eBayes.
 
     # 2) Read design column & one-hot encode
     obs    = adata.obs.copy()
-    levels = sorted(obs["CONDITION"].unique())
-    if len(levels) < 2:
-        raise ValueError(f"Need ≥2 conditions for contrasts; found {levels}")
-    for lvl in levels:
-        obs[lvl] = (obs["CONDITION"] == lvl).astype(int)
 
-    # Pilot study mode: allow experiments where at least one condition has only 1 replicate.
-    # We still fit OLS, compute logFC + (unmoderated) p/q, but SKIP eBayes.
     repl_counts = obs["CONDITION"].value_counts()
     pilot_mode = (repl_counts.min() <= 1)
     if pilot_mode:
         log_warning(
             "Pilot study mode: at least one condition has only 1 replicate, no statistical analysis done. "
         )
+
+    if has_covariate_cfg:
+        return run_limma_pipeline_covariate(adata, config, pilot_mode)
+
+    levels = sorted(obs["CONDITION"].unique())
+    if len(levels) < 2:
+        raise ValueError(f"Need ≥2 conditions for contrasts; found {levels}")
+    for lvl in levels:
+        obs[lvl] = (obs["CONDITION"] == lvl).astype(int)
 
     # 3) Patsy design (no intercept) — keep as Patsy DesignMatrix
     formula   = "0 + " + " + ".join(levels)
@@ -122,8 +124,13 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
 
     out.varm["log2fc"]  = coefs
 
-    # moderated statistics
     if not pilot_mode:
+        out.varm["se_raw"]  = se_raw
+        out.varm["t_raw"]   = t_raw
+        out.varm["p_raw"]   = p_raw
+        out.varm["q_raw"]   = q_raw
+
+        # moderated statistics
         out.varm["se_ebayes"]  = se_ebayes
         out.varm["t_ebayes"]   = t_ebayes
         out.varm["p_ebayes"]   = p_ebayes
@@ -155,6 +162,8 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     out.uns["missingness_source"] = miss_source
     out.uns["missingness_rule"] = "nan-is-missing"
 
+    out.uns["has_covariate"] = False
+
     return out
 
 @log_time("Clustering")
@@ -165,7 +174,7 @@ def clustering_pipeline(adata: ad.AnnData) -> ad.AnnData:
     return adata
 
 @log_time("Running Covariate branch")
-def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict) -> ad.AnnData:
+def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bool) -> ad.AnnData:
     """
     Two-stage residualization (no interaction):
       Stage 1:  Y ~ 1 + C         (per-feature OLS with global row-centering of C)
@@ -289,13 +298,16 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict) -> ad.AnnData:
         q_raw  = np.vstack([multipletests(p_raw[:, j], method="fdr_bh")[1] for j in range(p_raw.shape[1])]).T
 
         # eBayes
-        with np.errstate(divide='ignore', invalid='ignore'):
-            fit = imo.eBayes(fit)
-        s2post     = fit.s2_post.to_numpy()
-        se_ebayes  = stdu * np.sqrt(s2post[:, None])
-        t_ebayes   = fit.t.values
-        p_ebayes   = fit.p_value.values
-        q_ebayes   = np.vstack([multipletests(p_ebayes[:, j], method="fdr_bh")[1] for j in range(p_ebayes.shape[1])]).T
+        if not pilot_mode:
+            with np.errstate(divide='ignore', invalid='ignore'):
+                fit = imo.eBayes(fit)
+            s2post     = fit.s2_post.to_numpy()
+            se_ebayes  = stdu * np.sqrt(s2post[:, None])
+            t_ebayes   = fit.t.values
+            p_ebayes   = fit.p_value.values
+            q_ebayes   = np.vstack([multipletests(p_ebayes[:, j], method="fdr_bh")[1] for j in range(p_ebayes.shape[1])]).T
+        else:
+            se_ebayes = t_ebayes = p_ebayes = q_ebayes = None
 
         return {
             "coefs": coefs,
@@ -469,27 +481,38 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict) -> ad.AnnData:
     # ----------------------------
     limma_raw = imo.lmFit(Y_df, design=design2)
     limma_raw = imo.contrasts_fit(limma_raw, contr)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        limma_raw = imo.eBayes(limma_raw)
+    if not pilot_mode :
+        with np.errstate(divide='ignore', invalid='ignore'):
+            limma_raw = imo.eBayes(limma_raw)
+            raw_p     = limma_raw.p_value.values
+            raw_q     = np.vstack([multipletests(raw_p[:, j], method="fdr_bh")[1] for j in range(raw_p.shape[1])]).T
+    else:
+        raw_p = raw_q = None
+
     raw_coefs = limma_raw.coefficients.values
-    raw_p     = limma_raw.p_value.values
-    raw_q     = np.vstack([multipletests(raw_p[:, j], method="fdr_bh")[1] for j in range(raw_p.shape[1])]).T
 
     # For "no-FT" contrasts, fall back to RAW phospho (coef + p/q) in the adjusted outputs
     if beta_mode == "fixed1":
-        limma_resid["coefs"][contrast_noft]    = raw_coefs[contrast_noft]
-        limma_resid["p_ebayes"][contrast_noft] = raw_p[contrast_noft]
-        limma_resid["q_ebayes"][contrast_noft] = raw_q[contrast_noft]
-        # (Optionally also copy t/se from limma_raw if your UI shows them heavily.)
+        if not pilot_mode:
+            limma_resid["coefs"][contrast_noft]    = raw_coefs[contrast_noft]
+            limma_resid["p_ebayes"][contrast_noft] = raw_p[contrast_noft]
+            limma_resid["q_ebayes"][contrast_noft] = raw_q[contrast_noft]
+            # (Optionally also copy t/se from limma_raw if your UI shows them heavily.)
+        else:
+            limma_resid["coefs"] = limma_resid["p_ebayes"] = limma_resid["q_ebayes"] = None
 
     # --- NEW: limma on the covariate (FT) matrix itself (same design/contrasts) ---
     limma_cov = imo.lmFit(C_df, design=design2)
     limma_cov = imo.contrasts_fit(limma_cov, contr)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        limma_cov = imo.eBayes(limma_cov)
+    if not pilot_mode:
+        with np.errstate(divide='ignore', invalid='ignore'):
+            limma_cov = imo.eBayes(limma_cov)
+        cov_p     = limma_cov.p_value.values
+        cov_q     = np.vstack([multipletests(cov_p[:, j], method="fdr_bh")[1] for j in range(cov_p.shape[1])]).T
+    else:
+        cov_p = cov_q = None
+
     cov_coefs = limma_cov.coefficients.values
-    cov_p     = limma_cov.p_value.values
-    cov_q     = np.vstack([multipletests(cov_p[:, j], method="fdr_bh")[1] for j in range(cov_p.shape[1])]).T
 
     # ----------------------------
     # 5) Covariate part per contrast
@@ -518,28 +541,31 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict) -> ad.AnnData:
 
     # Stage-2 (adjusted) statistics
     out.varm["log2fc"]     = limma_resid["coefs"]
-    out.varm["se_raw"]     = limma_resid["se_raw"]
-    out.varm["t_raw"]      = limma_resid["t_raw"]
-    out.varm["p_raw"]      = limma_resid["p_raw"]
-    out.varm["q_raw"]      = limma_resid["q_raw"]
-    out.varm["se_ebayes"]  = limma_resid["se_ebayes"]
-    out.varm["t_ebayes"]   = limma_resid["t_ebayes"]
-    out.varm["p_ebayes"]   = limma_resid["p_ebayes"]
-    out.varm["q_ebayes"]   = limma_resid["q_ebayes"]
+    if not pilot_mode:
+        out.varm["se_raw"]     = limma_resid["se_raw"]
+        out.varm["t_raw"]      = limma_resid["t_raw"]
+        out.varm["p_raw"]      = limma_resid["p_raw"]
+        out.varm["q_raw"]      = limma_resid["q_raw"]
+        out.varm["se_ebayes"]  = limma_resid["se_ebayes"]
+        out.varm["t_ebayes"]   = limma_resid["t_ebayes"]
+        out.varm["p_ebayes"]   = limma_resid["p_ebayes"]
+        out.varm["q_ebayes"]   = limma_resid["q_ebayes"]
 
     # Raw model (same contrasts) — for decomposition display
     out.varm["raw_log2fc"]   = raw_coefs
-    out.varm["raw_q_ebayes"] = raw_q
+    if not pilot_mode:
+        out.varm["raw_q_ebayes"] = raw_q
 
     # Covariate decomposition piece
     out.varm["cov_part"] = cov_part
 
     # Stage-1 covariate stats (per feature)
-    out.varm["covariate_beta"] = beta1[:, None]
-    out.varm["covariate_se"]   = cov_se[:, None]
-    out.varm["covariate_t"]    = cov_t[:, None]
-    out.varm["covariate_p"]    = cov_p[:, None]
-    out.varm["covariate_q"]    = cov_q[:, None]
+    if not pilot_mode:
+        out.varm["covariate_beta"] = beta1[:, None]
+        out.varm["covariate_se"]   = cov_se[:, None]
+        out.varm["covariate_t"]    = cov_t[:, None]
+        out.varm["covariate_p"]    = cov_p[:, None]
+        out.varm["covariate_q"]    = cov_q[:, None]
 
     # Residuals layer for diagnostics
     out.layers["residuals_covariate"] = R_df.T.values
@@ -550,6 +576,9 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict) -> ad.AnnData:
     out.uns["missingness"]      = missing_df
     out.uns["missingness_source"] = miss_source
     out.uns["missingness_rule"] = "nan-is-missing"
+
+    out.uns["has_covariate"] = True
+    out.uns["pilot_study_mode"] = bool(pilot_mode)
 
     # --- NEW: stash covariate (FT) limma results for the viewer ---
     out.varm["ft_log2fc"]     = cov_coefs

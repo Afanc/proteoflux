@@ -41,7 +41,7 @@ class DEExporter:
         meta = pd.DataFrame(
             {
                 "PEPTIDE_ID": pep["rows"],
-                "PROTEIN_INDEX": pep["protein_index"],
+                "PROTEIN_UNIPROT_AC": pep["protein_index"],
                 "PEPTIDE_SEQ": pep["peptide_seq"],
             },
             index=pep["rows"],
@@ -69,22 +69,33 @@ class DEExporter:
     def _export_excel(self, tables: dict, readme: str):
         out_file = self.output_path.with_suffix(".xlsx")
         with pd.ExcelWriter(out_file, engine="xlsxwriter") as writer:
-            # Optional: uncomment the next line to remove bold/borders from all headers written by pandas
-            # try: writer._header_style = None
-            # except Exception: pass
 
             # README like before: one line per row
             pd.DataFrame({"README": readme.split("\n")}).to_excel(
                 writer, index=False, sheet_name="README"
             )
 
+            header_fmt = writer.book.add_format({"bold": False, "align": "left", "border": 0})
+
             # Write tables; peptides sheet without index so A1 is the first header
             for name, df in tables.items():
-                if df is not None:
-                    if name == "Peptides (raw)":
-                        df.to_excel(writer, sheet_name=name, index=False)
-                    else:
-                        df.to_excel(writer, sheet_name=name)
+                if df is None:
+                    continue
+
+                ws = writer.book.add_worksheet(name)
+
+                if name == "Peptides (raw)":
+                    columns = list(df.columns)
+                    ws.write_row(0, 0, columns, header_fmt)
+
+                    df.to_excel(writer, sheet_name=name, startrow=1, index=False, header=False)
+                else:
+                    df_out = df.reset_index()
+                    columns = list(df_out.columns)
+                    ws.write_row(0, 0, columns, header_fmt)
+                    df_out.to_excel(writer, sheet_name=name, startrow=1, index=False, header=False)
+
+                ws.set_column(0, len(columns)-1, 14)
 
     def _export_csvs(self, tables: dict):
         prefix = self.output_path.with_suffix("")
@@ -112,7 +123,7 @@ class DEExporter:
         meta_df = ad.var[meta_cols].copy() if meta_cols else pd.DataFrame(index=ad.var.index)
 
         if "PRECURSORS_EXP" in meta_df.columns:
-            meta_df = meta_df.rename(columns={"PRECURSORS_EXP": "NUM_PRECURSORS"})
+            meta_df = meta_df.rename(columns={"PRECURSORS_EXP": "NUM_PRECURSORS", "INDEX": "PHOSPHOSITE", "PARENT_PROTEIN": "PARENT_PROTEIN_UNIPROT_AC"})
 
         if analysis_type != "phospho":
             # Placeholder column (per user request; leave blank if unknown)
@@ -124,9 +135,13 @@ class DEExporter:
         X = pd.DataFrame(ad.X, index=ad.obs_names, columns=ad.var_names).T
 
         # Identification-level optional
-        qval = pd.DataFrame(ad.layers.get("qvalue"), index=ad.obs_names, columns=ad.var_names).T if "qvalue" in ad.layers else None
-        pep = pd.DataFrame(ad.layers.get("pep"), index=ad.obs_names, columns=ad.var_names).T if "pep" in ad.layers else None
+        id_qval = pd.DataFrame(ad.layers.get("qvalue"), index=ad.obs_names, columns=ad.var_names).T if "qvalue" in ad.layers else None
+        id_pep  = pd.DataFrame(ad.layers.get("pep"),    index=ad.obs_names, columns=ad.var_names).T if "pep"    in ad.layers else None
         spectral_counts = pd.DataFrame(ad.layers.get("spectral_counts"), index=ad.obs_names, columns=ad.var_names).T if "spectral_counts" in ad.layers else None
+
+        #qval = pd.DataFrame(ad.layers.get("qvalue"), index=ad.obs_names, columns=ad.var_names).T if "qvalue" in ad.layers else None
+        #pep = pd.DataFrame(ad.layers.get("pep"), index=ad.obs_names, columns=ad.var_names).T if "pep" in ad.layers else None
+        #spectral_counts = pd.DataFrame(ad.layers.get("spectral_counts"), index=ad.obs_names, columns=ad.var_names).T if "spectral_counts" in ad.layers else None
 
         # Missingness per group (keep columns in Summary + add MAX_MISSINGNESS)
         miss_ratios = ad.uns.get("missingness", None)
@@ -143,10 +158,10 @@ class DEExporter:
 
         log2fc_pref = log2fc.add_prefix("log2FC_")
 
-        pval = qval = None
+        pval_pref = qval_pref = None
         if q_ebayes is not None and p_ebayes is not None:
-            qval = q_ebayes.add_prefix("QVALUE_")
-            pval = p_ebayes.add_prefix("PVALUE_")
+            qval_pref = q_ebayes.add_prefix("QVALUE_")
+            pval_pref = p_ebayes.add_prefix("PVALUE_")
 
         # Processed & Raw intensities integrated
         log2_int_cols = X.add_prefix("processed_log2_") if X is not None else None
@@ -154,8 +169,8 @@ class DEExporter:
 
         blocks = [meta_df, log2fc_pref]
 
-        if qval is not None: blocks.append(qval)
-        if pval is not None: blocks.append(pval)
+        if qval_pref is not None: blocks.append(qval_pref)
+        if pval_pref is not None: blocks.append(pval_pref)
 
         if miss_renamed is not None:
             blocks.append(miss_renamed)
@@ -209,6 +224,7 @@ class DEExporter:
                     ft_raw = pd.DataFrame(ad.layers["raw_covariate"], index=ad.obs_names, columns=ad.var_names).T.add_prefix("FT_Raw_")
                     blocks.append(ft_raw)
 
+        idx_name = "PHOSPHOSITE" if is_phospho else "UNIPROT_AC"
         summary_df = pd.concat([b for b in blocks if b is not None], axis=1)
 
         # Ensure phospho gets PARENT_PEPTIDE_ID column and preferred metadata order
@@ -220,7 +236,7 @@ class DEExporter:
             summary_df = summary_df[order + other]
 
         # Index header A1
-        summary_df.index.name = "PHOSPHOSITE" if is_phospho else "UNIPROT"
+        summary_df.index.name = "PHOSPHOSITE" if is_phospho else "UNIPROT_AC"
 
         # Compute NUM_UNIQUE_PEPTIDES for proteomics by var-position (no reliance on ad.var['PROTEIN_INDEX'])
         if analysis_type != "phospho":
@@ -242,6 +258,11 @@ class DEExporter:
         # Peptide tables (raw only, centered removed per request)
         pep_wide_df, pep_centered_df = self._peptide_frames()
 
+        # proper indexing
+        for df_ in (id_qval, id_pep, spectral_counts):
+            if df_ is not None:
+                df_.index.name = idx_name
+
         # Prepare README reflecting new layout
         readme = (
             "ProteoFlux Differential Expression Export\n\n"
@@ -256,8 +277,8 @@ class DEExporter:
         # Tables to export (drop many previous sheets per user request)
         tables = {
             "Summary": summary_df,
-            "Identification Qvalue": qval if qval is not None else None,
-            "Identification PEP": pep if pep is not None else None,
+            "Identification Qvalue": id_qval if id_qval is not None else None,
+            "Identification PEP": id_pep if id_pep is not None else None,
             "Spectral Counts": spectral_counts if spectral_counts is not None else None,
             "Peptides (raw)": (None if (str(preproc.get("analysis_type", "DIA")).lower()=="phospho") else pep_wide_df),
         }
@@ -303,7 +324,7 @@ class DEExporter:
         pre = self.adata.uns.get("preprocessing", {})
         flt = (pre or {}).get("filtering", {})
 
-        for key in ("cont", "qvalue", "pep", "rec", "meta_cont", "meta_qvalue", "meta_pep", "meta_rec"):
+        for key in ("cont", "qvalue", "pep", "prec", "meta_cont", "meta_qvalue", "meta_pep", "meta_prec"):
             sub = flt.get(key)
             _strip_values(sub)
 

@@ -11,7 +11,7 @@ dataset:
   condition_column: "R.Condition"
   replicate_column: "R.Replicate"
   filename_column: "R.FileName"
-  run_evidence_column: "PG.RunEvidenceCount"
+  spectral_counts_column: "PG.RunEvidenceCount"
   precursors_exp_column: "PG.NrOfPrecursorsIdentified (Experiment-wide)"
   ibaq_column: "PG.IBAQ"
   fasta_column: "PG.FastaHeaders"
@@ -26,7 +26,7 @@ preprocessing:
   filtering:
     qvalue: 0.01
     pep: 0.003
-    run_evidence_count: 3
+    min_precursors: 1
     contaminants_files:
       - "data/Contaminants_2022.fasta"
   normalization:

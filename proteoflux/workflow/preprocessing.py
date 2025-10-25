@@ -40,14 +40,14 @@ class Preprocessor:
         """
 
         self.intermediate_results = IntermediateResults()
-        self.analysis_type = (config or {}).get("analysis_type", "").strip().lower()
+        self.analysis_type = config.get("analysis_type", "").strip().lower()
 
         # Filtering
         self.filtering = config.get("filtering")
         self.remove_contaminants = self.filtering.get("contaminants_files", [])
         self.filter_qvalue = self.filtering.get("qvalue", 0.01)
         self.filter_pep = self.filtering.get("pep", 0.2)
-        self.filter_run_evidence_count = self.filtering.get("run_evidence_count", 1)
+        self.filter_num_precursors = self.filtering.get("min_precursors", 1)
         self.pep_direction = (self.filtering.get("pep_direction", "lower") or "lower").lower()
         if self.pep_direction not in {"lower", "higher"}:
             raise ValueError(f"Invalid pep_direction='{self.pep_direction}'. Use 'lower' or 'higher'.")
@@ -120,7 +120,7 @@ class Preprocessor:
             meta_cont = self.intermediate_results.metadata.get("filtering").get("meta_cont"),
             meta_qvalue = self.intermediate_results.metadata.get("filtering").get("meta_qvalue"),
             meta_pep =  self.intermediate_results.metadata.get("filtering").get("meta_pep"),
-            meta_rec =  self.intermediate_results.metadata.get("filtering").get("meta_rec"),
+            meta_prec =  self.intermediate_results.metadata.get("filtering").get("meta_prec"),
             raw_covariate=self.intermediate_results.dfs.get("raw_df_covariate"),
             lognormalized_covariate=self.intermediate_results.dfs.get("postlog_covariate"),
             normalized_covariate=self.intermediate_results.dfs.get("normalized_covariate"),
@@ -170,8 +170,8 @@ class Preprocessor:
             x = self._filter_by_stat(x, "PEP")
             self.intermediate_results.add_df(f"filtered_PEP/{tag}", x)
 
-            x = self._filter_by_run_evidence(x)
-            self.intermediate_results.add_df(f"filtered_final/RE/{tag}", x)
+            x = self._filter_by_num_precursors(x)
+            self.intermediate_results.add_df(f"filtered_final/PREC/{tag}", x)
             return x
 
         log_info("Filtering (main)")
@@ -187,7 +187,7 @@ class Preprocessor:
         # concatenate back (same schema by construction)
         out = main_f if cov_f is None else pl.concat([main_f, cov_f], how="vertical_relaxed", rechunk=True)
 
-        self.intermediate_results.add_df("filtered_final/RE", out)
+        self.intermediate_results.add_df("filtered_final/PREC", out)
 
     def _filter_contaminants(self, df: pl.DataFrame) -> pl.DataFrame:
         if not self.remove_contaminants or "INDEX" not in df.columns:
@@ -272,12 +272,26 @@ class Preprocessor:
 
         return df_kept
 
-    def _filter_by_run_evidence(self, df: pl.DataFrame) -> pl.DataFrame:
+    def _filter_by_num_precursors(self, df: pl.DataFrame) -> pl.DataFrame:
         """Filters out proteins with insufficient run evidence."""
-        if "RUN_EVIDENCE_COUNT" not in df.columns:
+
+        # 0) disabled or column missing → skip
+        if self.filter_num_precursors is None or self.filter_num_precursors <= 0:
             skipped = {
                 "skipped": True,
-                "reason": "'RUN_EVIDENCE_COUNT' column not present",
+                "reason": "min_precursors <= 0 or None",
+                "threshold": self.filter_num_precursors,
+                "raw_values": np.array([]),
+                "number_kept": len(df),
+                "number_dropped": 0,
+            }
+            self.intermediate_results.add_metadata("filtering", "meta_prec", skipped)
+            log_info("Run-evidence filtering: skipped (threshold disabled).")
+            return df
+        if "PRECURSORS_EXP" not in df.columns:
+            skipped = {
+                "skipped": True,
+                "reason": "'PRECURSORS_EXP' column not present",
                 "threshold": None,
                 "raw_values": np.array([]),
                 "number_kept": len(df),
@@ -287,25 +301,42 @@ class Preprocessor:
             log_info("Run-evidence filtering: skipped (column not present).")
             return df
 
-        values = df["RUN_EVIDENCE_COUNT"].to_numpy()
-        self.intermediate_results.add_array("run_evidence_count_array", values)
+        values = df["PRECURSORS_EXP"].to_numpy()
 
-        df_kept    = df.filter(pl.col("RUN_EVIDENCE_COUNT") >= self.filter_run_evidence_count)
-        df_dropped = df.filter(pl.col("RUN_EVIDENCE_COUNT") <  self.filter_run_evidence_count)
+        # 1) all-null column → skip to avoid dropping the entire cov block
+        if df.select(pl.col("PRECURSORS_EXP").is_null().all()).item():
+            skipped = {
+                "skipped": True,
+                "reason": "'PRECURSORS_EXP' all null",
+                "threshold": self.filter_num_precursors,
+                "raw_values": np.array([]),
+                "number_kept": len(df),
+                "number_dropped": 0,
+            }
+            self.intermediate_results.add_metadata("filtering", "meta_prec", skipped)
+            log_info("Run-evidence filtering: skipped (all-null PRECURSORS_EXP).")
+            return df
+
+        values = df["PRECURSORS_EXP"].to_numpy()
+
+        self.intermediate_results.add_array("num_precursors_array", values)
+
+        df_kept    = df.filter(pl.col("PRECURSORS_EXP") >= self.filter_num_precursors)
+        df_dropped = df.filter(pl.col("PRECURSORS_EXP") <  self.filter_num_precursors)
         dropped_dict = {
-            "threshold": self.filter_run_evidence_count,
+            "threshold": self.filter_num_precursors,
             "raw_values": values,
             "number_kept": len(df_kept),
             "number_dropped": len(df_dropped),
         }
 
-        self.intermediate_results.add_metadata("filtering", "meta_rec", dropped_dict)
-        log_info(f"Run-evidence filtering: kept={len(df_kept)} dropped={len(df_dropped)} (thr={self.filter_run_evidence_count}).")
+        self.intermediate_results.add_metadata("filtering", "meta_prec", dropped_dict)
+        log_info(f"Precursors filtering: kept={len(df_kept)} dropped={len(df_dropped)} (thr={self.filter_num_precursors}).")
 
         return df_kept
 
     def _get_protein_metadata(self) -> None:
-        df_full = self.intermediate_results.dfs["filtered_final/RE"]  # long format
+        df_full = self.intermediate_results.dfs["filtered_final/PREC"]  # long format
 
         # Base meta: "first" per protein (works for Spectronaut)
         keep_cols = {
@@ -344,7 +375,7 @@ class Preprocessor:
         # For FragPipe: PRECURSORS_EXP is per-peptide (Spectrum Number).
         # Compute protein-level sum over unique peptides to avoid multiplying by #samples.
         if is_fp and {"PEPTIDE_LSEQ","PRECURSORS_EXP"}.issubset(df_full.columns):
-            rec_df = (
+            prec_df = (
                 df_full
                 .select(["INDEX","PEPTIDE_LSEQ","PRECURSORS_EXP"])
                 .drop_nulls("PRECURSORS_EXP")
@@ -352,7 +383,7 @@ class Preprocessor:
                 .group_by("INDEX")
                 .agg(pl.col("PRECURSORS_EXP").sum().cast(pl.Int64).alias("PRECURSORS_EXP"))
             )
-            base_meta = base_meta.drop("PRECURSORS_EXP", strict=False).join(rec_df, on="INDEX", how="left")
+            base_meta = base_meta.drop("PRECURSORS_EXP", strict=False).join(prec_df, on="INDEX", how="left")
 
         # Numeric casts (same as before)
         casts = []
@@ -378,7 +409,7 @@ class Preprocessor:
         self.intermediate_results.add_df("protein_metadata", base_meta)
 
     def _get_condition_map(self):
-        df = self.intermediate_results.dfs["filtered_final/RE"]
+        df = self.intermediate_results.dfs["filtered_final/PREC"]
         base_cols = ["FILENAME", "CONDITION", "REPLICATE"]
         if "ASSAY" in df.columns:
             base_cols.append("ASSAY")
@@ -503,6 +534,7 @@ class Preprocessor:
             "min":    pl.col(values_col).min(),
             "max":    pl.col(values_col).max(),
             "median": pl.col(values_col).median(),
+            "count":  pl.count(),
         }
         if aggregate_fn not in fn_map:
             raise ValueError(f"Unsupported aggregate_fn '{aggregate_fn}'")
@@ -629,7 +661,7 @@ class Preprocessor:
         return out
 
     def _build_peptide_tables(self) -> None:
-        df = self.intermediate_results.dfs["filtered_final/RE"]
+        df = self.intermediate_results.dfs["filtered_final/PREC"]
 
         needed = {"INDEX", "FILENAME", "SIGNAL", "PEPTIDE_LSEQ"}
         if not needed.issubset(df.columns):
@@ -691,7 +723,7 @@ class Preprocessor:
         Converts the dataset from long format (one row per protein per sample)
         to a wide format (one row per protein, with sample-specific intensity & q-value columns).
         """
-        df = self.intermediate_results.dfs["filtered_final/RE"]
+        df = self.intermediate_results.dfs["filtered_final/PREC"]
 
         # QVALUE is optional (e.g., FragPipe TMT). Require only these:
         required_cols = {"INDEX", "FILENAME", "SIGNAL"}
@@ -734,25 +766,32 @@ class Preprocessor:
                     aggregate_fn=self.pivot_signal_method,
                 )
 
-            qv = pp = rec = lp = None
+            qv = pp = sc = prec = lp = None
             if "QVALUE" in _df.columns:
                 qv = self._pivot_df(_df, "FILENAME", "INDEX", "QVALUE", "mean")
             if "PEP" in _df.columns:
                 pp = self._pivot_df(_df, "FILENAME", "INDEX", "PEP", "mean")
-            if "RUN_EVIDENCE_COUNT" in _df.columns:
-                rec = self._pivot_df(_df, "FILENAME", "INDEX", "RUN_EVIDENCE_COUNT", "mean")
+            if self.analysis_type == "phospho":
+                sc = self._pivot_df(_df, "FILENAME", "INDEX", "SIGNAL", "count")
+            elif "SPECTRAL_COUNTS" in _df.columns:
+                sc = self._pivot_df(_df, "FILENAME", "INDEX", "SPECTRAL_COUNTS", "max")
+            #1) be careful in the future
+            #when merging analysis_type with preprocessing, this should always represent index specific, covariate is of different level. see point 2)
+            if self.analysis_type == "phospho":
+                prec = self._pivot_df(_df, "FILENAME", "INDEX", "PRECURSORS_EXP", "max")
+            elif "PRECURSORS_EXP" in _df.columns:
+                prec = self._pivot_df(_df, "FILENAME", "INDEX", "PRECURSORS_EXP", "mean")
             if "LOC_PROB" in _df.columns:
                 lp = self._pivot_df(_df, "FILENAME", "INDEX", "LOC_PROB", "max")
-            return {"intensity": intensity, "qv": qv, "pep": pp, "rec": rec, "lp": lp}
+            return {"intensity": intensity, "qv": qv, "pep": pp, "sc": sc, "prec": prec, "lp": lp}
 
         main_piv = _pivot_block(df_main)
-        #cov_piv  = _pivot_block(df_cov) if df_cov is not None and len(df_cov) else None
-        #cov_piv  = None
 
         intensity_pivot = main_piv["intensity"]
         qvalue_pivot    = main_piv["qv"]
         pep_pivot       = main_piv["pep"]
-        rec_pivot       = main_piv["rec"]
+        prec_pivot      = main_piv["prec"]
+        sc_pivot        = main_piv["sc"]
         locprob_pivot   = main_piv["lp"]
 
         # Peptide drill-down (optional)
@@ -763,7 +802,7 @@ class Preprocessor:
             raw_pep_pivot = None
             centered_pep_pivot = None
 
-        # --- ALIGN secondary pivots (qvalue/pep/rec) to the intensity order ---
+        # --- ALIGN secondary pivots (qvalue/pep/prec) to the intensity order ---
         order_idx = intensity_pivot.select("INDEX")
         def _align_to_intensity(pvt: Optional[pl.DataFrame]) -> Optional[pl.DataFrame]:
             if pvt is None:
@@ -771,10 +810,11 @@ class Preprocessor:
             # left join keeps intensity order and ensures identical index vector
             return order_idx.join(pvt, on="INDEX", how="left")
 
-        qvalue_pivot = _align_to_intensity(qvalue_pivot)
-        pep_pivot    = _align_to_intensity(pep_pivot)
-        rec_pivot    = _align_to_intensity(rec_pivot)
-        locprob_pivot  = _align_to_intensity(locprob_pivot)
+        qvalue_pivot  = _align_to_intensity(qvalue_pivot)
+        pep_pivot     = _align_to_intensity(pep_pivot)
+        sc_pivot      = _align_to_intensity(sc_pivot)
+        prec_pivot    = _align_to_intensity(prec_pivot)
+        locprob_pivot = _align_to_intensity(locprob_pivot)
 
         # --- Optional phospho localization filtering (row-wise, after alignment) ---
         filtered_intensity = intensity_pivot
@@ -806,7 +846,8 @@ class Preprocessor:
                 filtered_intensity = _row_filter(intensity_pivot)
                 qvalue_pivot       = _row_filter(qvalue_pivot)
                 pep_pivot          = _row_filter(pep_pivot)
-                rec_pivot          = _row_filter(rec_pivot)
+                prec_pivot         = _row_filter(prec_pivot)
+                sc_pivot           = _row_filter(sc_pivot)
                 locprob_pivot      = _row_filter(locprob_pivot)
 
         self.intermediate_results.set_columns_and_index(filtered_intensity)
@@ -815,7 +856,7 @@ class Preprocessor:
         self.intermediate_results.add_df("qvalues", qvalue_pivot)
         self.intermediate_results.add_df("pep", pep_pivot)
         self.intermediate_results.add_df("locprob", locprob_pivot)
-        self.intermediate_results.add_df("spectral_counts", rec_pivot)
+        self.intermediate_results.add_df("spectral_counts", sc_pivot)
         self.intermediate_results.dfs["peptides_wide"]     = raw_pep_pivot
         self.intermediate_results.dfs["peptides_centered"] = centered_pep_pivot
 
@@ -826,7 +867,6 @@ class Preprocessor:
                 if df_cov is None or len(df_cov) == 0:
                     # This should already have errored in _filter if enabled — guard just in case:
                     raise ValueError("Covariates enabled but no covariate rows are present after filtering.")
-            #if cov_piv is not None:
                 # 1) choose the alignment key
                 key_col = {"parent_peptide": "PARENT_PEPTIDE_ID",
                            "parent_protein": "PARENT_PROTEIN"}[self.cov_align_on]
@@ -894,7 +934,9 @@ class Preprocessor:
                 cov_int_by_key = _pivot_cov_by_key(df_cov, "SIGNAL", self.covariate_pivot_method)
                 cov_qv_by_key  = _pivot_cov_by_key(df_cov, "QVALUE", "mean") if "QVALUE" in df_cov.columns else None
                 cov_pep_by_key = _pivot_cov_by_key(df_cov, "PEP",    "mean") if "PEP"    in df_cov.columns else None
-                cov_rec_by_key = _pivot_cov_by_key(df_cov, "RUN_EVIDENCE_COUNT", "mean") if "RUN_EVIDENCE_COUNT" in df_cov.columns else None
+                # 2) yeah this is confusing. like we want protein level info but peptide level indexed, we have to clarify this at some point, make it with the config update. see point 1)
+                cov_prec_by_key = _pivot_cov_by_key(df_cov, "PRECURSORS_EXP", "max")
+                cov_sc_by_key = _pivot_cov_by_key(df_cov, "SPECTRAL_COUNTS", "max") if "SPECTRAL_COUNTS" in df_cov.columns else None
 
                 # 5) broadcast to main rows: INDEX -> key, then join the covariate-by-key row
                 order_idx = filtered_intensity.select("INDEX")
@@ -910,7 +952,8 @@ class Preprocessor:
                 cov_int = _broadcast(cov_int_by_key)
                 cov_qv  = _broadcast(cov_qv_by_key)
                 cov_pep = _broadcast(cov_pep_by_key)
-                cov_rec = _broadcast(cov_rec_by_key)
+                cov_prec = _broadcast(cov_prec_by_key)
+                cov_sc = _broadcast(cov_sc_by_key)
 
                 # 6a) Store covariate key
                 self.intermediate_results.add_df(
@@ -924,7 +967,7 @@ class Preprocessor:
                 self.intermediate_results.add_df("raw_df_covariate", cov_int)
                 self.intermediate_results.add_df("qvalues_covariate",  cov_qv)
                 self.intermediate_results.add_df("pep_covariate",      cov_pep)
-                self.intermediate_results.add_df("spectral_counts_covariate", cov_rec)
+                self.intermediate_results.add_df("spectral_counts_covariate", cov_prec)
                 log_info(f"Built covariate pivot block - broadcast on {key_col}; shape matches main.")
 
     @log_time("Normalization")

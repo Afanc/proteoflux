@@ -295,11 +295,11 @@ class ReportPlotter:
             y -= 0.8 * line_height
 
         # 4) Run evidence count
-        if "run_evidence_count" in filtering:
-            removed_rec = flt_meta.get("rec").get("number_dropped", 0)
-            n_r = f"{removed_rec}".replace(",", "'")
+        if "min_precursors" in filtering:
+            removed_prec = flt_meta.get("prec").get("number_dropped", 0)
+            n_r = f"{removed_prec}".replace(",", "'")
             fig.text(x0 + 0.06, y,
-                     f"- Min. run evidence count = {filtering['run_evidence_count']}: {n_r} PSM removed",
+                     f"- Min. Num. Precursors = {filtering['min_precursors']}: {n_r} PSM removed",
                      ha="left", va="top", fontsize=11)
             y -= line_height
 
