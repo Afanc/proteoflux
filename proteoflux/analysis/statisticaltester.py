@@ -1,3 +1,6 @@
+# TODO adapt limma pipeline to (re)use this file instead of doing things there, cleaner.
+# And check whether we should put missingness back here or keep in it clustering (no sense? idk)
+
 import logging
 from typing import Any, Dict, List, Optional, Union
 

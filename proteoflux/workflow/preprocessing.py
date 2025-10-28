@@ -1,3 +1,17 @@
+"""Preprocessing pipeline for Proteoflux.
+
+This module performs:
+1) Filtering (contaminants, q-value, PEP, min. precursors)
+2) Metadata extraction (protein meta, condition map)
+3) Pivoting to wide matrices (intensity, qvalue, PEP, precursors, etc.)
+4) Normalization (log, median, quantile, regression-based, tag-based)
+5) Imputation (main and optional covariate block)
+6) Optional phospho localization filtering
+
+All steps record intermediate artifacts to `IntermediateResults`, which are then
+assembled into a `PreprocessResults` container consumed by downstream code.
+"""
+
 import time
 import sys
 import re
@@ -16,8 +30,6 @@ from proteoflux.workflow.normalizers.regression_normalization import regression_
 from proteoflux.workflow.imputer_factory import get_imputer
 from proteoflux.dataset.preprocessresults import PreprocessResults
 from proteoflux.dataset.intermediateresults import IntermediateResults
-from proteoflux.evaluation.normalization_evaluator import NormalizerPlotter
-from proteoflux.evaluation.imputation_evaluator import ImputeEvaluator
 from proteoflux.utils.utils import load_contaminant_accessions, log_time, logger, log_info, log_indent
 from proteoflux.utils.directlfq import estimate_protein_intensities
 import proteoflux.utils.directlfq_config as dlcfg
@@ -28,16 +40,13 @@ class Block(str, Enum):
     COV  = "covariate"
 
 class Preprocessor:
-    """Handles filtering, normalization, and imputation for proteomics data."""
+    """Handles filtering, pivoting, normalization, and imputation for proteomics data."""
 
     available_normalization = ["zscore", "vst", "linear"]
     available_imputation = ["mean", "median", "knn", "randomforest"]
 
     def __init__(self, config: Optional[dict] = None):
-        """
-        Args:
-            config (dict) with all the params
-        """
+        """Initialize from a config dict mirroring `config.yaml` sections."""
 
         self.intermediate_results = IntermediateResults()
         self.analysis_type = config.get("analysis_type", "").strip().lower()
@@ -65,8 +74,9 @@ class Preprocessor:
 
         self.exports = config.get("exports")
 
-        # --- Phospho block (always enabled; mode/threshold decide strictness) ---
+        # --- Phospho block (mode/threshold gate behavior; enabled when analysis_type == phospho) ---
         phospho_cfg = (config.get("phospho") or {})
+
         # map user strings to internal mode
         _mode = (phospho_cfg.get("localization_mode", "filter_soft") or "filter_soft").lower()
         if _mode not in {"filter_soft", "filter_strict"}:
@@ -78,13 +88,15 @@ class Preprocessor:
         # --- Covariates: list of assay labels to extract & center after imputation ---
         cov_cfg = (config.get("covariates") or {})
         self.covariate_assays: List[str] = [str(a).lower() for a in (cov_cfg.get("assays") or [])]
-        #self.covariates_enabled = True if len(phospho_cfg) else False
         self.covariates_enabled = bool(cov_cfg.get("enabled", False))
 
-        self.cov_align_on = "parent_protein" if phospho_cfg.get("stochio_correction_level".lower() == "protein", "protein") else "peptide"
+        #self.cov_align_on = "parent_protein" if phospho_cfg.get("stochio_correction_level".lower() == "protein", "protein") else "peptide"
+        level = str(phospho_cfg.get("stochio_correction_level", "protein")).strip().lower()
+        self.cov_align_on = "parent_protein" if level == "protein" else "parent_peptide"
+
 
     def fit_transform(self, df: pl.DataFrame) -> PreprocessResults:
-        """Applies preprocessing steps in sequence and returns structured results."""
+        """Run the full preprocessing pipeline and return a `PreprocessResults` bundle."""
         # Step 1: Filtering
         self._filter(df)
 
@@ -133,9 +145,9 @@ class Preprocessor:
 
     @log_time("Filtering")
     def _filter(self, df: pl.DataFrame) -> None:
-        """
-        Run the same first-pass filtering separately on main vs covariate blocks
-        (when covariate assays exist) so logs are clearer and behavior is explicit.
+        """Apply first-pass filtering to main and (optionally) covariate blocks.
+
+        Splitting here makes logs unambiguous and keeps covariate behavior explicit.
         """
         if "IS_COVARIATE" in df.columns:
             # treat nulls as False
@@ -143,6 +155,7 @@ class Preprocessor:
             df_cov  = df.filter(is_cov)
             df_main = df.filter(~is_cov)
         else:
+            # If IS_COVARIATE is absent, infer covariate rows from ASSAY matching configured assays.
             has_assay = "ASSAY" in df.columns
             assay_lc = set(a.lower() for a in (self.covariate_assays or []))
             if has_assay and assay_lc:
@@ -152,7 +165,7 @@ class Preprocessor:
                 df_main = df
                 df_cov  = None
 
-        # Config-driven gate: if enabled but no rows, fail fast; if disabled, drop cov rows.
+        # If covariates are enabled but missing, fail early.
         if self.covariates_enabled and (df_cov is None or len(df_cov) == 0):
             raise ValueError("Covariates are enabled in config, but no covariate rows were found (check ASSAY/IS_COVARIATE or config.covariates.assays).")
 
@@ -221,7 +234,7 @@ class Preprocessor:
         return df_kept
 
     def _filter_by_stat(self, df: pl.DataFrame, stat: str) -> pl.DataFrame:
-        """Filters out rows based on Q-value and PEP thresholds."""
+        """Filter by QVALUE or PEP; records both pass/fail counts and raw values."""
         if stat not in ["PEP", "QVALUE"]:
             raise ValueError(f"Invalid filtering stat '{stat}'")
 
@@ -336,7 +349,7 @@ class Preprocessor:
         return df_kept
 
     def _get_protein_metadata(self) -> None:
-        df_full = self.intermediate_results.dfs["filtered_final/PREC"]  # long format
+        df_full = self.intermediate_results.dfs["filtered_final/PREC"]  # long format, post filter
 
         # Base meta: "first" per protein (works for Spectronaut)
         keep_cols = {
@@ -409,6 +422,10 @@ class Preprocessor:
         self.intermediate_results.add_df("protein_metadata", base_meta)
 
     def _get_condition_map(self):
+        """Build a sample→condition/replicate map, with a sanitized condition token and alignment key.
+
+        If covariates are present, enforce compatible replicate structures across main/covariate blocks.
+        """
         df = self.intermediate_results.dfs["filtered_final/PREC"]
         base_cols = ["FILENAME", "CONDITION", "REPLICATE"]
         if "ASSAY" in df.columns:
@@ -434,13 +451,6 @@ class Preprocessor:
                     pl.col("IS_COVARIATE").max().alias("IS_COVARIATE"),
                 ])
             )
-        else:
-            condition_mapping = (
-                condition_mapping
-                #.rename({"CONDITION":"Condition","REPLICATE":"Replicate"})
-            )
-
-        #self.intermediate_results.add_df("condition_pivot", condition_mapping)
 
         # --- 1) Patsy-safe condition token ---
         def _sanitize_condition(s: str) -> str:
@@ -506,7 +516,7 @@ class Preprocessor:
 
         self.intermediate_results.add_df("condition_pivot", mapping_tmp)
 
-        # infer covariate assays when not provided in config
+        # infer covariate assays when not explicitly configured
         if not self.covariate_assays and "IS_COVARIATE" in condition_mapping.columns:
             cov = (condition_mapping
                    .filter(pl.col("IS_COVARIATE") == True)
@@ -527,7 +537,12 @@ class Preprocessor:
         values_col: str,
         aggregate_fn: str
     ) -> pl.DataFrame:
-        # 1) Map the requested agg name to a Polars expression
+        """Pivot helper: long → wide (index=protein_col, columns=sample_col).
+
+        Aggregates by (protein, sample) using the requested function, preserving nulls
+        when a group has no valid values.
+        """
+        # 1) Map requested agg to a Polars expression
         fn_map = {
             "sum":    pl.col(values_col).sum(),
             "mean":   pl.col(values_col).mean(),
@@ -543,8 +558,8 @@ class Preprocessor:
         # Count non-null entries per group
         n_valid = pl.col(values_col).is_not_null().sum().alias("_NVALID")
 
-        # 2) Pre-aggregate (protein, sample) with a null-preserving guard:
-        #    if a group has 0 valid values, force the aggregate to null
+        # 2) Pre-aggregate with a null-preserving guard:
+        #    groups with 0 valid values are forced to null
         df_agg = (
             df
             .group_by([protein_col, sample_col], maintain_order=True)
@@ -558,14 +573,14 @@ class Preprocessor:
             .drop("_NVALID")
         )
 
-        # 3) Pivot WITHOUT a second aggregation step: missing groups → nulls
+        # 3) Pivot WITHOUT a second aggregation step: missing groups -> nulls
         pivot_df = df_agg.pivot(
             index=protein_col,
             columns=sample_col,
             values=values_col,
         )
 
-        # 4) Ensure those nulls become np.nan in NumPy
+        # 4) Convert Polars nulls to np.nan for NumPy
         pivot_df = pivot_df.fill_null(np.nan)
 
         return pivot_df
@@ -581,7 +596,6 @@ class Preprocessor:
         ion_col: str,
     ) -> pl.DataFrame:
 
-        #import directlfq.config as dlcfg
         # 0) sanity
         for c in (sample_col, protein_col, values_col, ion_col):
             if c not in df.columns:
@@ -684,7 +698,7 @@ class Preprocessor:
             (pl.col("INDEX").cast(pl.Utf8) + pl.lit("|") + pl.col("PEPTIDE_SEQ")).alias("PEPTIDE_ID")
         )
 
-        # pivot with your helper (sum duplicates)
+        # Pivot peptide table (sum duplicates)
         pep_pivot = self._pivot_df(
             df=base.select(["PEPTIDE_ID", "FILENAME", "SIGNAL"]),
             sample_col="FILENAME",
@@ -699,9 +713,7 @@ class Preprocessor:
 
         # centered (row / row-mean ignoring NaNs)
         sample_cols = [c for c in pep_wide.columns if c not in ("PEPTIDE_ID","INDEX","PEPTIDE_SEQ")]
-        row_sum = pl.sum_horizontal(
-            *[pl.when(pl.col(c).is_nan()).then(0.0).otherwise(pl.col(c)) for c in sample_cols]
-        )
+
         # Row-wise count of non-NaN cells
         pep_centered = (
             pep_wide
@@ -719,9 +731,11 @@ class Preprocessor:
 
     @log_time("Pivoting data")
     def _pivot_data(self) -> None:
-        """
-        Converts the dataset from long format (one row per protein per sample)
-        to a wide format (one row per protein, with sample-specific intensity & q-value columns).
+        """Convert long format (protein × sample rows) to wide matrices.
+
+        Produces intensity (required) and optional statistics (qvalue, PEP, precursors,
+        spectral counts, localization probabilities), plus peptide drill-down tables.
+        Maintains a strict row order across derived pivots for reliable downstream alignment.
         """
         df = self.intermediate_results.dfs["filtered_final/PREC"]
 
@@ -731,7 +745,7 @@ class Preprocessor:
         if missing_cols:
             raise ValueError(f"Missing required columns for pivoting: {missing_cols}")
 
-        # --- split into main vs covariate assays (if present) BEFORE pivoting ---
+        # Split into main vs covariate assays (if present) BEFORE pivoting
 
         if "IS_COVARIATE" in df.columns:
             is_cov = pl.coalesce([pl.col("IS_COVARIATE"), pl.lit(False)])
@@ -772,7 +786,20 @@ class Preprocessor:
             if "PEP" in _df.columns:
                 pp = self._pivot_df(_df, "FILENAME", "INDEX", "PEP", "mean")
             if self.analysis_type == "phospho":
-                sc = self._pivot_df(_df, "FILENAME", "INDEX", "SIGNAL", "count")
+                df_prec = (
+                    _df.select(["INDEX", "FILENAME", "PEPTIDE_LSEQ", "CHARGE"])
+                       .drop_nulls(["PEPTIDE_LSEQ", "CHARGE"])
+                       .with_columns(
+                           pl.concat_str([pl.col("PEPTIDE_LSEQ"), pl.lit("/"), pl.col("CHARGE").cast(pl.Utf8)])
+                             .alias("PREC_KEY")
+                       )
+                       .unique(subset=["INDEX", "FILENAME", "PREC_KEY"], maintain_order=True)
+                       .group_by(["INDEX", "FILENAME"], maintain_order=True)
+                       .agg(pl.len().alias("N_UNIQ_PREC"))
+                )
+
+                # pivot to site×sample matrix; 'max' is a no-op (single value per cell after groupby)
+                sc = self._pivot_df(df_prec, "FILENAME", "INDEX", "N_UNIQ_PREC", "max").fill_nan(0)
             elif "SPECTRAL_COUNTS" in _df.columns:
                 sc = self._pivot_df(_df, "FILENAME", "INDEX", "SPECTRAL_COUNTS", "max")
             #1) be careful in the future
@@ -860,7 +887,7 @@ class Preprocessor:
         self.intermediate_results.dfs["peptides_wide"]     = raw_pep_pivot
         self.intermediate_results.dfs["peptides_centered"] = centered_pep_pivot
 
-        # --- store COVARIATE pivots: pivot by parent key, broadcast to main INDEX, align to main order ---
+        # Covariate pivots: pivot by parent key, broadcast to main INDEX, align to main order
         log_info("Covariate broadcast/alignment")
         with log_indent():
             if self.covariates_enabled:
@@ -871,8 +898,7 @@ class Preprocessor:
                 key_col = {"parent_peptide": "PARENT_PEPTIDE_ID",
                            "parent_protein": "PARENT_PROTEIN"}[self.cov_align_on]
 
-                # 2) build maps from the *filtered long* frames used for the pivots
-                #    (so removed peptides/sites are already gone)
+                # 2) build maps from the filtered long frames used for the pivots
                 main_key_map = df_main.select(["INDEX", key_col]).unique()
                 cov_key_map  = df_cov.select(["INDEX", key_col]).unique()
 
@@ -914,22 +940,8 @@ class Preprocessor:
                             values_col=value_col,
                             aggregate_fn=agg,
                         )
-                def _pivot_cov_by_key_works(frame: Optional[pl.DataFrame], value_col: str, agg: str) -> Optional[pl.DataFrame]:
-                    if frame is None or value_col not in frame.columns:
-                        return None
-                    # attach key to the long rows, keep only rows with a key
-                    long_with_key = frame.join(cov_key_map, on="INDEX", how="left").drop_nulls([key_col])
-                    # reuse your pivot helper but with protein_col=key_col
-                    return self._pivot_df(
-                        df=long_with_key.select([key_col, "FILENAME", value_col]),
-                        sample_col="FILENAME",
-                        protein_col=key_col,
-                        values_col=value_col,
-                        aggregate_fn=agg,
-                    )
 
                 # 4) build covariate-by-key wide tables
-                #cov_int_by_key = _pivot_cov_by_key(df_cov, "SIGNAL", self.pivot_signal_method)
                 log_info(f"Covariate Quantification using {self.covariate_pivot_method}")
                 cov_int_by_key = _pivot_cov_by_key(df_cov, "SIGNAL", self.covariate_pivot_method)
                 cov_qv_by_key  = _pivot_cov_by_key(df_cov, "QVALUE", "mean") if "QVALUE" in df_cov.columns else None
@@ -972,20 +984,10 @@ class Preprocessor:
 
     @log_time("Normalization")
     def _normalize(self) -> None:
-        """
-        Normalize intensity values and generate normalization diagnostic plots.
-
-        Args:
-            df (pl.DataFrame): Input dataframe.
-            condition_pivot (pl.DataFrame): Mapping from sample to condition.
-
-        Returns:
-            pl.DataFrame: Normalized dataframe (Polars).
-        """
+        """Apply configured normalization(s) to main and (optionally) covariate blocks."""
         with log_indent():
             self._normalize_matrix(Block.MAIN)
 
-        #if self.intermediate_results.dfs.get("raw_df_covariate") is not None:
         if self.covariates_enabled:
             log_info("Normalization (covariate)")
             with log_indent():
@@ -993,17 +995,10 @@ class Preprocessor:
 
     def _normalize_matrix(self, block: Block) -> None:
 
-        """
-        Apply selected normalization(s) to intensity matrix extracted from a DataFrame.
-        Supports chained normalization steps (e.g., log + loess).
+        """Normalize a matrix (main or covariate block).
 
-        Args:
-            df (pl.DataFrame): Input dataframe with intensity columns.
-            condition_pivot (pl.DataFrame): Mapping of sample to condition.
-            span (float): Smoothing span for loess.
-
-        Returns:
-            pl.DataFrame: DataFrame with normalized intensity values.
+        Supports chains (e.g., log + regression). Writes `raw_df/postlog/normalized` matrices
+        and metadata into `IntermediateResults` with block-specific keys.
         """
 
         normalization_method = self.normalization.get("method")
@@ -1062,7 +1057,7 @@ class Preprocessor:
                 cond_df.columns = [c.capitalize() for c in cond_df.columns]
                 cond_map = cond_df.set_index("Sample")["Condition"]
 
-                #condition_labels = [cond_map[s] for s in sample_names]
+                # condition label mapping is tolerant to unknown names
                 condition_labels = [cond_map.get(s, s) for s in sample_names]
 
                 mat, models = regression_normalization(
@@ -1182,20 +1177,13 @@ class Preprocessor:
 
     @log_time("Imputation")
     def _impute(self) -> None:
-        """
-        Impute missivg values and generate diagnostic plots.
+        """Impute missing values in main (and optional covariate) blocks.
+           It used to wrap some other functions, now just calls the impute_matrix one."""
 
-        Args:
-            df (pl.DataFrame): Input dataframe.
-            condition_pivot (pl.DataFrame): Mapping from sample to condition.
-
-        Returns:
-            pl.DataFrame: Normalized dataframe (Polars).
-        """
         results = self._impute_matrix()
 
     def _impute_matrix(self) -> None:
-        """Applies imputation to missing values."""
+        """Apply imputation; broadcast & center covariate block when enabled."""
 
         def _impute_block(df_norm: pl.DataFrame, sample_cols: List[str], suffix: str):
             not_imp = df_norm.select(sample_cols).to_numpy().copy()
@@ -1260,31 +1248,13 @@ class Preprocessor:
             self.intermediate_results.matrices["centered_covariate"] = cov_mat_centered
             log_info("Covariate centering: per-feature median across all samples applied.")
 
-        #df_cov = self.intermediate_results.dfs.get("normalized_covariate")
-        #if self.covariates_enabled:
-        #    cols_cov = [c for c in df_cov.columns if c != "INDEX"]
-        #    out_cov = _impute_block(df_cov, cols_cov, suffix="_covariate")
-        #    log_info("Imputed (covariate) ready.")
-
-        #    # Per-row median across samples (LIMMA-style)
-        #    cov_mat = out_cov.select(cols_cov).to_numpy()
-        #    row_meds = np.nanmedian(cov_mat, axis=1, keepdims=True)
-        #    cov_mat_centered = cov_mat - row_meds
-
-        #    centered_cov_df = out_cov.with_columns(pl.DataFrame(cov_mat_centered, schema=cols_cov))
-
-        #    # Overwrite the stored imputed covariate with the centered version
-        #    self.intermediate_results.dfs["centered_covariate"] = centered_cov_df
-        #    self.intermediate_results.matrices["centered_covariate"] = cov_mat_centered
-
-        #    log_info("Covariate centering: per-feature median across all samples applied.")
-
-        imputed_main = self.intermediate_results.dfs.get("imputed")
-        imputed_cov = self.intermediate_results.dfs.get("imputed_covariate")
+        # debugging
+        #imputed_main = self.intermediate_results.dfs.get("imputed")
+        #imputed_cov = self.intermediate_results.dfs.get("imputed_covariate")
 
     def _log_pivot_health(self, label: str, df: pl.DataFrame, head_rows: int = 3, preview_cols: int = 50) -> None:
         """
-        Log shape, total NA count, and a tiny head() preview for a wide pivot DF (INDEX + samples).
+        For debugging. Log shape, total NA count, and a tiny head() preview for a wide pivot DF (INDEX + samples).
         """
         if df is None:
             return

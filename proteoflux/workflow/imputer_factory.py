@@ -1,7 +1,7 @@
 from typing import Any
 import sklearn.impute
-from sklearn.experimental import enable_iterative_imputer  # noqa ? don't remember what I meant but check
 import sklearn.ensemble
+#from sklearn.experimental import enable_iterative_imputer  # noqa ? don't remember what I meant but check
 
 def get_imputer(**kwargs) -> Any:
     """

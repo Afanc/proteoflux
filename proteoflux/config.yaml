@@ -37,13 +37,13 @@ preprocessing:
       - "HUMAN"
     loess_span: 0.9
   imputation:
-    method: "tnknn"
+    method: "lc_conmed"
     lc_conmed_lod_k: 10
     random_state: 42
 
 analysis:
   sign_threshold: 0.05
-  annotation_matrix: false
+  clustering_max: 8000
   only_against: null
   exports:
     export_plot: true

@@ -1,3 +1,11 @@
+"""Limma-based differential analysis (with optional covariate residualization).
+
+This module provides:
+  - `run_limma_pipeline`: standard limma path (with eBayes if feasible)
+  - `run_limma_pipeline_covariate`: two-stage residualization (no interaction)
+  - `clustering_pipeline`: helper to run clustering + missingness clustering
+"""
+
 import anndata as ad
 import pandas as pd
 import numpy as np
@@ -15,16 +23,16 @@ from proteoflux.analysis.clustering import run_clustering, run_clustering_missin
 
 @log_time("Analysis pipeline")
 def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
-    # If a covariate layer exists, run the covariate model path (simple OLS + BH)
+    """Standard limma workflow on `adata.X` with optional eBayes.
+
+    If dataset config contains injected covariate runs, the covariate branch is used.
+    """
 
     injected_runs = (config or {}).get("dataset", {}).get("inject_runs") or {}
     has_covariate_cfg = any(bool(run.get("is_covariate")) for _, run in injected_runs.items())
 
-    # Pilot study mode: allow experiments where at least one condition has only 1 replicate.
-    # We still fit OLS, compute logFC + (unmoderated) p/q, but SKIP eBayes.
-
-    # 2) Read design column & one-hot encode
-    obs    = adata.obs.copy()
+    # Read design & detect pilot mode (≤1 replicate for a condition)
+    obs = adata.obs.copy()
 
     repl_counts = obs["CONDITION"].value_counts()
     pilot_mode = (repl_counts.min() <= 1)
@@ -42,23 +50,23 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     for lvl in levels:
         obs[lvl] = (obs["CONDITION"] == lvl).astype(int)
 
-    # 3) Patsy design (no intercept) — keep as Patsy DesignMatrix
+    # Patsy design (no intercept) - keep as Patsy DesignMatrix
     formula   = "0 + " + " + ".join(levels)
     design_dm = patsy.dmatrix(formula, obs)
 
-    # 4) Expression: genes × samples
+    # Expression: genes × samples
     df_X = pd.DataFrame(adata.X, index=adata.obs_names, columns=adata.var_names).T
+
     # debug
     #df_X.loc["P0AB71", "195_KaForAll_DIA_B22"] = 15.618
     #print(df_X.shape)
-    #
 
-    # 5) Fit
+    # Fit
     fit_imo = imo.lmFit(df_X, design=design_dm)
     resid_var = np.asarray(fit_imo.sigma, dtype=np.float32) ** 2
     adata.uns["residual_variance"] = resid_var
 
-    # 6) Contrasts (with optional only_against)
+    # Contrasts (with optional only_against)
     base = (config or {}).get("analysis", {}).get("only_against", None)
 
     if base is not None:
@@ -68,15 +76,14 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     else:
         contrast_defs = [f"{a} - {b}" for a, b in combinations(levels, 2)]
 
-    # IMPORTANT: pass the Patsy DesignMatrix as 'levels' (exactly like before)
     contrast_df = imo.makeContrasts(contrast_defs, levels=design_dm)
+
     # (Optional) pretty names for downstream labeling
     contrast_df.columns = [c.replace(" - ", "_vs_") for c in contrast_df.columns]
 
-    # Now coefficients @ contrasts lines up (both use the same unnamed basis)
     fit_imo = imo.contrasts_fit(fit_imo, contrasts=contrast_df)
 
-    # === RAW (pre-eBayes) statistics ===
+    # Raw (pre-eBayes) statistics
     coefs  = fit_imo.coefficients.values          # (n_genes × n_contrasts)
     stdu   = fit_imo.stdev_unscaled.values        # same shape
     sigma  = fit_imo.sigma.to_numpy()             # (n_genes,)
@@ -90,7 +97,7 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         for j in range(p_raw.shape[1])
     ]).T
 
-    # === MODERATED (post-eBayes) statistics ===
+    # Moderated (post-eBayes) statistics
     if not pilot_mode:
         with np.errstate(divide='ignore', invalid='ignore'):
             fit_imo    = imo.eBayes(fit_imo)
@@ -108,18 +115,8 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         # Placeholders (omit from .varm below)
         se_ebayes = t_ebayes = p_ebayes = q_ebayes = None
 
-    ###
-    #print(adata.var_names.get_loc("P0AB71"))
-    #ix = adata.var_names.get_loc("P0AB71")
-    #print(coefs[ix])
-    #print(se_raw[ix])
-    #print(t_raw[ix])
-    #print(p_raw[ix])
-    #print(q_ebayes[ix])
-    #print(adata.X[:,ix])
-    ##
 
-    # === Assemble into AnnData ===
+    # Assemble into AnnData
     out = adata.copy()
 
     out.varm["log2fc"]  = coefs
@@ -140,7 +137,7 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     out.uns["contrast_names"] = list(contrast_df.columns)
     out.uns["pilot_study_mode"] = bool(pilot_mode)
 
-    # === Missingness exactly as before ===
+    # Missingness
     if "qvalue" in adata.layers:
         miss_mat = adata.layers["qvalue"].T
         miss_source = "qvalue"
@@ -149,7 +146,7 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         miss_mat = adata.layers["raw"].T
         miss_source = "raw"
     else:
-        # Last resort: use X (may be imputed). Still better than crashing.
+        # Last resort: use X (may be imputed). Still better than crashing?
         miss_mat = adata.X.T
         miss_source = "X"
 
@@ -167,19 +164,23 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     return out
 
 @log_time("Clustering")
-def clustering_pipeline(adata: ad.AnnData) -> ad.AnnData:
-    adata = run_clustering(adata, n_pcs=adata.X.shape[0]-1)
-    adata = run_clustering_missingness(adata)
+def clustering_pipeline(adata: ad.AnnData, max_features: int) -> ad.AnnData:
+    """Run feature clustering and missingness clustering (unchanged behavior)."""
+    adata = run_clustering(adata, n_pcs=adata.X.shape[0]-1, max_features=max_features)
+    adata = run_clustering_missingness(adata, max_features=max_features)
 
     return adata
 
 @log_time("Running Covariate branch")
 def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bool) -> ad.AnnData:
-    """
-    Two-stage residualization (no interaction):
-      Stage 1:  Y ~ 1 + C         (per-feature OLS with global row-centering of C)
-      Stage 2:  R ~ 0 + Group     (limma on residuals, with eBayes; same contrasts as raw)
-    The decomposition 'raw ≈ adjusted + covariate_part' is preserved.
+    """Two-stage residualization (no interaction).
+
+    Stage 1:  Y ~ 1 + C         (per-feature OLS with global row-centering of C)
+    Stage 2:  R ~ 0 + Group     (limma on residuals; same contrasts as raw)
+
+    Outputs/keys match the existing implementation; the decomposition
+    rule 'raw ≈ adjusted + covariate_part' is preserved.
+
 
     All outputs/keys match the current implementation.
     """
@@ -235,9 +236,9 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         G, N = Y.shape
         df1 = max(N - 2, 1)
 
-        sY  = Y.sum(axis=1)                     # (G,)
-        sYC = (Y * C).sum(axis=1)               # (G,)
-        sCC = (C * C).sum(axis=1)               # (G,)
+        sY  = Y.sum(axis=1)        # (G,)
+        sYC = (Y * C).sum(axis=1)  # (G,)
+        sCC = (C * C).sum(axis=1)  # (G,)
 
         # tiny ridge based on global scale of sCC to avoid exploding slopes when C is ~flat
         # baseline = median(sCC[sCC>0]) (fallback 1.0)
@@ -251,7 +252,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
             beta1 = np.where(sCC_tilde > 0, sYC / sCC_tilde, 1.0)  # slope wrt covariate
         beta0 = sY / N                                  # intercept
 
-        # --- NEW: smart floor for near-flat covariates (treat as no covariate effect) ---
+        # Smart floor for near-flat covariates (treat as no covariate effect)
         # threshold scales with typical covariate energy, but never below 1e-3
         tau = max(1e-2, ridge_baseline * 1e-6)
         # also require a minimum per-row SD to consider the covariate "non-flat"
@@ -270,12 +271,11 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         with np.errstate(divide="ignore", invalid="ignore"):
             se1 = np.sqrt(s2 / np.maximum(sCC_tilde, 1e-15))
 
-        #t1 = np.where(se1 > 0, beta1 / se1, 0.0)
-        #p1 = 2 * t_dist.sf(np.abs(t1), df=df1)
+        # t-statistics and FDR for covariate slope
         t1 = np.where(se1 > 0, beta1 / se1, 0.0)
         p1 = 2 * t_dist.sf(np.abs(t1), df=df1)
         if np.any(flat):
-            # for “flat” rows, explicitly null the test: t=0, p=1 (avoids spurious huge betas)
+            # for “flat” rows, explicitly null the test: t=0, p=1 (avoids huge betas)
             t1[flat] = 0.0
             p1[flat] = 1.0
         q1 = multipletests(p1, method="fdr_bh")[1]
@@ -283,7 +283,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         return beta1, beta0, R, se1, t1, p1, q1
 
     def _fit_limma_with_contrasts(df_GxN: pd.DataFrame, design_dm, contrasts_df: pd.DataFrame):
-        """lmFit + contrasts + eBayes; also returns raw (pre-moderation) stats."""
+        """lmFit + contrasts (+ eBayes if not pilot_mode); returns raw and moderated stats."""
         fit = imo.lmFit(df_GxN, design=design_dm)
         fit = imo.contrasts_fit(fit, contrasts=contrasts_df)
 
@@ -324,8 +324,9 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
 
     def _covariate_part_per_contrast(beta1: np.ndarray, C_centered_df: pd.DataFrame,
                                      obs: pd.DataFrame, levels: list, contrast_names: list) -> np.ndarray:
-        """
-        Compute covariate contribution per contrast: beta_c * (mean_c[A] - mean_c[B]).
+        """Compute covariate contribution per contrast.
+
+        cov_part = beta_c * (mean_c[A] - mean_c[B])  for each contrast A_vs_B.
         """
         cond = obs["CONDITION"].astype(str).values
         grp_masks = {g: (cond == g) for g in levels}
@@ -366,17 +367,16 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
 
     # === ANCOVA options (new) ===
     ancova_cfg        = (config or {}).get("ancova", {})
+    # Different beta modes for testing. Now hard fix to fixed1, because occam.
     beta_mode         = ancova_cfg.get("beta_mode", "fixed1")      # "free" | "nonneg" | "fixed1"
-    min_non_imputed   = int(ancova_cfg.get("min_non_imputed", 4))
+    min_non_imputed   = int(ancova_cfg.get("min_non_imputed", 4)) #TODO maybe don't do this, only if fully imputed? 
     ridge_lambda_cfg  = float(ancova_cfg.get("ridge_lambda", 1e-6))  # forwarded into Stage-1 OLS
 
-    # ----------------------------
-    # 1) Inputs & preparation
-    # ----------------------------
+    # Inputs & preparation
     obs = adata.obs.copy()
     levels, base = _get_levels_and_base(obs, config)
 
-    #cov_layer = _find_covariate_layer(adata)
+    # Option for testing, now hard fixed
     cov_layer = "centered_covariate"
 
     # G×N matrices (DataFrames)
@@ -398,16 +398,13 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     raw_cov_arr = np.asarray(raw_cov)  # shape: (n_obs, n_vars)
     imputed_all_cov = np.all(np.isnan(raw_cov_arr), axis=0)  # (n_vars,)
 
-    # ----------------------------
-    # 2) Stage 1: OLS y ~ 1 + c
-    # ----------------------------
+    # Stage 1: OLS y ~ 1 + c
     beta1, beta0, R, cov_se, cov_t, cov_p, cov_q = _stage1_ols_y_on_1_plus_c(
         Y_df.to_numpy(dtype=float),
         C_centered_df.to_numpy(dtype=float),
         ridge_lambda=ridge_lambda_cfg,
     )
 
-    # ==== NEW: beta modes & low-info handling (LOD-aware) ====
     # Non-imputed sample counts per feature from your 'raw_covariate' (NaN == imputed)
     nonimp_counts = np.sum(~np.isnan(raw_cov_arr), axis=0)  # shape: (n_vars,)
     low_info = nonimp_counts < max(min_non_imputed, 2)
@@ -422,7 +419,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
 
     # Fully imputed FT rows were already flagged; combine with low-info unless fixed1
     if beta_mode != "fixed1":
-        # Treat 'no/too-little FT information' as 'no adjustment' to avoid β explosions
+        # Treat 'no/too-little FT information' as 'no adjustment' to avoid beta explosions
         low_or_all = low_info | imputed_all_cov
         if np.any(low_or_all):
             beta1[low_or_all] = 0.0
@@ -436,28 +433,15 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     Cc_np = C_centered_df.to_numpy(dtype=float)
     R     = Y_np - (beta0[:, None] + beta1[:, None] * Cc_np)
 
-    ## If a feature's FT row was fully imputed, treat covariate as “uninformative”
-    ## → force β_c=0 and t=0, p=q=1 for that feature; also refresh residuals with β_c=0.
-    #if imputed_all_cov is not None and np.any(imputed_all_cov):
-    #    beta1[imputed_all_cov] = 0.0
-    #    cov_t[imputed_all_cov] = 0.0
-    #    cov_p[imputed_all_cov] = 1.0
-    #    cov_q[imputed_all_cov] = 1.0
-    #    Y_np = Y_df.to_numpy(dtype=float)
-    #    Cc_np = C_centered_df.to_numpy(dtype=float)
-    #    R[imputed_all_cov, :] = Y_np[imputed_all_cov, :] - (beta0[imputed_all_cov, None] + 0.0 * Cc_np[imputed_all_cov, :])
-
     R_df = pd.DataFrame(R, index=Y_df.index, columns=Y_df.columns)  # (G×N)
 
-    # ----------------------------
-    # 3) Stage 2: limma on residuals
-    # ----------------------------
+    # Stage 2: limma on residuals
     design2 = _build_group_design_no_intercept(obs, levels)
     contr   = _make_contrasts(levels, design2, config)
 
     limma_resid = _fit_limma_with_contrasts(R_df, design2, contr)
     contrast_names = list(contr.columns)
-    # --- Per-contrast mask: True where a contrast lacks FT info on at least one side ---
+    # Per-contrast mask: True where a contrast lacks FT info on at least one side
 
     # Align raw_covariate to the same sample order, then make a (G x N) non-imputed mask
     raw_cov_df = pd.DataFrame(adata.layers["raw_covariate"], index=adata.obs_names, columns=adata.var_names)
@@ -476,9 +460,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         contrast_noft[:, j] = (cntA == 0) | (cntB == 0)
 
 
-    # ----------------------------
-    # 4) Also fit raw (Y) with same design/contrasts (for decomposition)
-    # ----------------------------
+    # Also fit raw (Y) with same design/contrasts (for decomposition)
     limma_raw = imo.lmFit(Y_df, design=design2)
     limma_raw = imo.contrasts_fit(limma_raw, contr)
     if not pilot_mode :
@@ -497,11 +479,10 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
             limma_resid["coefs"][contrast_noft]    = raw_coefs[contrast_noft]
             limma_resid["p_ebayes"][contrast_noft] = raw_p[contrast_noft]
             limma_resid["q_ebayes"][contrast_noft] = raw_q[contrast_noft]
-            # (Optionally also copy t/se from limma_raw if your UI shows them heavily.)
         else:
             limma_resid["coefs"] = limma_resid["p_ebayes"] = limma_resid["q_ebayes"] = None
 
-    # --- NEW: limma on the covariate (FT) matrix itself (same design/contrasts) ---
+    # limma on the covariate (FT) matrix itself (same design/contrasts)
     limma_cov = imo.lmFit(C_df, design=design2)
     limma_cov = imo.contrasts_fit(limma_cov, contr)
     if not pilot_mode:
@@ -514,9 +495,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
 
     cov_coefs = limma_cov.coefficients.values
 
-    # ----------------------------
-    # 5) Covariate part per contrast
-    # ----------------------------
+    # Covariate part per contrast
     cov_part = _covariate_part_per_contrast(
         beta1=beta1,
         C_centered_df=C_centered_df,
@@ -529,14 +508,10 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         cov_part[contrast_noft] = 0.0
 
 
-    # ----------------------------
-    # 6) Missingness (unchanged)
-    # ----------------------------
+    # Missingness
     missing_df, miss_source = _compute_missingness_like_before(adata)
 
-    # ----------------------------
-    # 7) Assemble outputs centrally
-    # ----------------------------
+    # Assemble outputs centrally
     out = adata.copy()
 
     # Stage-2 (adjusted) statistics
@@ -551,7 +526,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         out.varm["p_ebayes"]   = limma_resid["p_ebayes"]
         out.varm["q_ebayes"]   = limma_resid["q_ebayes"]
 
-    # Raw model (same contrasts) — for decomposition display
+    # Raw model (same contrasts) - for decomposition display
     out.varm["raw_log2fc"]   = raw_coefs
     if not pilot_mode:
         out.varm["raw_q_ebayes"] = raw_q
@@ -580,7 +555,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     out.uns["has_covariate"] = True
     out.uns["pilot_study_mode"] = bool(pilot_mode)
 
-    # --- NEW: stash covariate (FT) limma results for the viewer ---
+    # stash covariate (FT) limma results for the viewer
     out.varm["ft_log2fc"]     = cov_coefs
     out.varm["ft_q_ebayes"]   = cov_q
     # (optional) p-values too:
@@ -589,13 +564,10 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     # Describe decomposition rule once for the viewer
     out.uns["decomposition_rule"] = "raw_log2fc ≈ log2fc (adjusted) + cov_part"
 
-    # Keep your quick diagnostics (you said you'll delete later)
-    #_quick_print_two(out, ids=("RRPESAPAESSPSK|p5","RRPESAPAESSPSK|p11", "GILAADESTGSIAKR|p8", "AAVGQESPGGLEAGNAKAPK|p7", "SAGALEEGTSEGQLCGR|p1"))
-    #check_ft_consistency(out, protein_id="Q9NW97")
-
     return out
 
 def _quick_print_two(adata, ids=("RRPESAPAESSPSK|p5","RRPESAPAESSPSK|p11")):
+    """Debug printer: compact per-feature diagnostics (kept unchanged; optional)."""
 
     obs_names = list(adata.obs_names)
     var_names = list(adata.var.index)

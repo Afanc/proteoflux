@@ -37,7 +37,7 @@ class DataHarmonizer:
         self.column_map: Dict[str, str] = {}
         self.annotation_file = column_config.get("annotation_file", None)
 
-        # New: vendor-agnostic layout toggle (required if data are pre-pivoted)
+        # vendor-agnostic layout toggle (required if data are pre-pivoted)
         # Accepted: "long" (default), "wide"
         self.input_layout = (column_config.get("input_layout") or "long").strip().lower()
         self.analysis_type = (column_config.get("analysis_type") or "DIA").strip().lower()
@@ -47,8 +47,6 @@ class DataHarmonizer:
             if original_col:
                 self.column_map[original_col] = std_name
 
-    # ---------- helpers ----------
-
     def _load_annotation(self) -> pl.DataFrame:
         if not self.annotation_file:
             raise ValueError(
@@ -56,7 +54,7 @@ class DataHarmonizer:
             )
         ann = pl.read_csv(self.annotation_file, separator="\t", ignore_errors=True)
 
-        # Pick a single join key (first match wins), then rename only that one → 'FILENAME'
+        # Pick a single join key (first match wins), then rename only that one -> 'FILENAME'
         join_col = None
         for cand in ("FILENAME", "File Name", "Channel"):
             if cand in ann.columns:
@@ -239,7 +237,7 @@ class DataHarmonizer:
         elif not has_vendor_probs and not has_generic_probs:
             log_warning("[PHOSPHO] No per-site probability column found; LOC_PROB will be null.")
 
-        # Strongly suggested but not fatal
+        # Strongly suggested but not fatal... yet
         if "UNIPROT" not in df.columns:
             log_warning("[PHOSPHO] UNIPROT not present; parent protein mapping will be limited.")
         return df
@@ -277,8 +275,6 @@ class DataHarmonizer:
         if "ASSAY" not in df.columns:
             df = df.with_columns(pl.lit("PEPTIDOMICS").alias("ASSAY"))
 
-        #print(df.select("INDEX","PEPTIDE_LSEQ","PARENT_PEPTIDE_ID","PARENT_PROTEIN","SIGNAL").head(8))
-
         return df
 
     @log_time("Building Phospho Index")
@@ -299,7 +295,7 @@ class DataHarmonizer:
             pl.col("_seq_candidate").map_elements(self._strip_mods, return_dtype=str).alias("STRIPPED_SEQ")
         ).drop(["_seq_candidate"], strict=False)
 
-        # 2) Split lists
+        # Split lists
         with_lists = df.with_columns(
             pl.when(pl.col("PTM_POSITIONS_STR").is_not_null())
               .then(pl.col("PTM_POSITIONS_STR").cast(pl.Utf8).str.split(";"))
@@ -309,13 +305,13 @@ class DataHarmonizer:
               .otherwise(pl.lit([])).alias("_prob_list"),
         )
 
-        # 3) Explode in lockstep
+        # Explode in lockstep
         exploded = with_lists.explode(["_pos_list", "_prob_list"]).with_columns(
             pl.col("_pos_list").cast(pl.Utf8).str.strip_chars().replace("", None).cast(pl.Int64, strict=False).alias("SITE_POS"),
             pl.col("_prob_list").cast(pl.Utf8).str.strip_chars().replace("", None).cast(pl.Float64, strict=False).alias("LOC_PROB"),
         ).filter(pl.col("SITE_POS").is_not_null())
 
-        # 4) Normalize probs and drop zero-prob candidates (keeps only truly localized sites)
+        # Normalize probs and drop zero-prob candidates (keeps only truly localized sites)
         exploded = exploded.with_columns(
             pl.when((pl.col("LOC_PROB") > 1.0) & (pl.col("LOC_PROB").is_not_null()))
               .then(pl.col("LOC_PROB") / 100.0)
@@ -323,7 +319,7 @@ class DataHarmonizer:
               .alias("LOC_PROB")
         ).filter((pl.col("LOC_PROB").is_null()) | (pl.col("LOC_PROB") > 0.0))
 
-        # 5) Build final keys and parents from STRIPPED_SEQ
+        # Build final keys and parents from STRIPPED_SEQ
         out = exploded.with_columns(
             (pl.col("STRIPPED_SEQ").cast(pl.Utf8) + pl.lit("|p") + pl.col("SITE_POS").cast(pl.Utf8)).alias("INDEX"),
             pl.col("STRIPPED_SEQ").alias("PARENT_PEPTIDE_ID"),
@@ -331,12 +327,9 @@ class DataHarmonizer:
             pl.lit("PHOSPHO").alias("ASSAY"),
         ).drop(["_pos_list", "_prob_list"], strict=False)
 
-        # Dev print
-        #print(out.select("INDEX","PEPTIDE_LSEQ","SITE_POS","PARENT_PEPTIDE_ID","PARENT_PROTEIN","LOC_PROB","SIGNAL").head(8))
         return out
 
 
-    # ---------- public API ----------
     @log_time("Data Harmonizing")
     def harmonize(self, df: pl.DataFrame) -> pl.DataFrame:
         if self.input_layout not in {"long", "wide"}:
