@@ -78,7 +78,7 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
 
     contrast_df = imo.makeContrasts(contrast_defs, levels=design_dm)
 
-    # (Optional) pretty names for downstream labeling
+    # Pretty names for downstream labeling
     contrast_df.columns = [c.replace(" - ", "_vs_") for c in contrast_df.columns]
 
     fit_imo = imo.contrasts_fit(fit_imo, contrasts=contrast_df)
@@ -171,6 +171,8 @@ def clustering_pipeline(adata: ad.AnnData, max_features: int) -> ad.AnnData:
 
     return adata
 
+#TODO think about, switch to a class ? or separate utils script ?
+#TODO should we simplify some of the code now that we decided we keep the beta=1 model ? hmmm
 @log_time("Running Covariate branch")
 def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bool) -> ad.AnnData:
     """Two-stage residualization (no interaction).
@@ -365,7 +367,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         )
         return missing_df, miss_source
 
-    # === ANCOVA options (new) ===
+    # === ANCOVA options ===
     ancova_cfg        = (config or {}).get("ancova", {})
     # Different beta modes for testing. Now hard fix to fixed1, because occam.
     beta_mode         = ancova_cfg.get("beta_mode", "fixed1")      # "free" | "nonneg" | "fixed1"
@@ -428,7 +430,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
             cov_p[low_or_all] = 1.0
             cov_q[low_or_all] = 1.0
 
-    # Recompute residuals with possibly modified β
+    # Recompute residuals with possibly modified betas
     Y_np  = Y_df.to_numpy(dtype=float)
     Cc_np = C_centered_df.to_numpy(dtype=float)
     R     = Y_np - (beta0[:, None] + beta1[:, None] * Cc_np)

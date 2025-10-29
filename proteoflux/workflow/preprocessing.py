@@ -288,7 +288,7 @@ class Preprocessor:
     def _filter_by_num_precursors(self, df: pl.DataFrame) -> pl.DataFrame:
         """Filters out proteins with insufficient run evidence."""
 
-        # 0) disabled or column missing → skip
+        # 0) disabled or column missing -> skip
         if self.filter_num_precursors is None or self.filter_num_precursors <= 0:
             skipped = {
                 "skipped": True,
@@ -316,7 +316,7 @@ class Preprocessor:
 
         values = df["PRECURSORS_EXP"].to_numpy()
 
-        # 1) all-null column → skip to avoid dropping the entire cov block
+        # 1) all-null column -> skip to avoid dropping the entire cov block
         if df.select(pl.col("PRECURSORS_EXP").is_null().all()).item():
             skipped = {
                 "skipped": True,
@@ -401,7 +401,7 @@ class Preprocessor:
         # Numeric casts (same as before)
         casts = []
         if "IBAQ" in base_meta.columns:
-            # Normalize: keep first value before ';', trim, empty→null, then cast
+            # Normalize: keep first value before ';', trim, empty -> null, then cast
             base_meta = base_meta.with_columns(
                 pl.col("IBAQ")
                   .cast(pl.Utf8, strict=False)
@@ -498,7 +498,7 @@ class Preprocessor:
             (pl.col("CONDITION") + pl.lit("#R") + pl.col("REPLICATE").cast(pl.Utf8)).alias("ALIGN_KEY")
         )
 
-        # --- 4) If covariate present, enforce replicate structure (per CONDITION_SAFE) ---
+        # --- 4) If covariate present, enforce replicate structure (per CONDITION) ---
         if using_covariate:
             main = mapping_tmp.filter(pl.col("IS_COVARIATE") == False)
             cov  = mapping_tmp.filter(pl.col("IS_COVARIATE") == True)
@@ -529,6 +529,7 @@ class Preprocessor:
             if self.covariate_assays:
                 log_info(f"Covariates inferred from injected runs: assays={self.covariate_assays}")
 
+    # using a trick because polars>=1.31 does aggregate filling with 0s ! Instead of nan ! 
     def _pivot_df(
         self,
         df: pl.DataFrame,
@@ -585,7 +586,6 @@ class Preprocessor:
 
         return pivot_df
 
-    # using a trick because polars>=1.31 does aggregate filling with 0s ! Instead of nan ! 
     @log_time("DirectLFQ")
     def _pivot_df_LFQ(
         self,
@@ -610,7 +610,7 @@ class Preprocessor:
             df
             .group_by([protein_col, ion_col, sample_col], maintain_order=True)
             .agg([
-                pl.col(values_col).first().alias(values_col),   # you said there are no dups
+                pl.col(values_col).first().alias(values_col),
                 n_valid
             ])
             .with_columns(
@@ -641,7 +641,7 @@ class Preprocessor:
             .fill_null(np.nan)
         )
 
-        # 5) → pandas, log2 as expected by directLFQ
+        # 5) -> pandas, log2 as expected by directLFQ
         pw = pep_wide.to_pandas().set_index([protein_col, ion_col]).sort_index(level=0)
         pw = np.log2(pw)  # NaNs stay NaNs
 
