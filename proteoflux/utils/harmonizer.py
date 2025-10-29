@@ -231,7 +231,7 @@ class DataHarmonizer:
 
         # Prefer vendor-specific per-site probs; fall back to the generic localization probs if present
         has_vendor_probs = "PTM_PROBS_STR" in df.columns
-        has_generic_probs = "EG.PTMLocalizationProbabilities" in df.columns  # present in your phospho head
+        has_generic_probs = "EG.PTMLocalizationProbabilities" in df.columns
         if not has_vendor_probs and has_generic_probs:
             df = df.rename({"EG.PTMLocalizationProbabilities": "PTM_PROBS_STR"})
         elif not has_vendor_probs and not has_generic_probs:
