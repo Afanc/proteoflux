@@ -58,8 +58,7 @@ This runs the following sequence:
 | `proteoflux_results.h5ad`                | Main AnnData object containing all processed data              |
 | `proteoflux_table.xlsx`                  | Summary table of log2FC, q/p values, metadata, and missingness |
 | `proteoflux_report.pdf`                  | Multi-page QC and results report                               |
-| `Peptides (raw)` / `Peptides (centered)` | Optional peptide-level matrices                                |
-| `.csv` equivalents                       | If `use_xlsx: false` in the configuration                      |
+| [`.csv` equivalents to .xlsx]            | If `use_xlsx: false` in the configuration                      |
 
 ## Viewing results
 
