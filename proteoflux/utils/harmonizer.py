@@ -1,3 +1,4 @@
+import re
 import polars as pl
 from typing import Dict
 from proteoflux.utils.utils import log_time, logger, log_info, log_warning
@@ -14,7 +15,7 @@ class DataHarmonizer:
         "condition_column": "CONDITION",
         "replicate_column": "REPLICATE",
         "filename_column": "FILENAME",
-        "run_evidence_column": "RUN_EVIDENCE_COUNT",
+        "spectral_counts_column": "SPECTRAL_COUNTS",
         "fasta_column": "FASTA_HEADERS",
         "protein_weight": "PROTEIN_WEIGHT",
         "protein_descriptions": "PROTEIN_DESCRIPTIONS",
@@ -22,6 +23,13 @@ class DataHarmonizer:
         "precursors_exp_column": "PRECURSORS_EXP",
         "ibaq_column": "IBAQ",
         "peptide_seq_column": "PEPTIDE_LSEQ",
+        "uniprot_column": "UNIPROT", #this should be default, and then index_column is redefined as additional to that
+        "modified_seq_column": "MODIFIED_SEQUENCE",
+        "charge_column": "CHARGE",
+        "ptm_positions_column": "PTM_POSITIONS_STR",
+        "ptm_probabilities_column": "PTM_PROBS_STR",
+        "ptm_sites_column": "PTM_SITES_STR",
+        "stripped_seq_column": "PEP_SEQUENCE",
     }
 
     def __init__(self, column_config: dict):
@@ -29,16 +37,15 @@ class DataHarmonizer:
         self.column_map: Dict[str, str] = {}
         self.annotation_file = column_config.get("annotation_file", None)
 
-        # New: vendor-agnostic layout toggle (required if data are pre-pivoted)
+        # vendor-agnostic layout toggle (required if data are pre-pivoted)
         # Accepted: "long" (default), "wide"
         self.input_layout = (column_config.get("input_layout") or "long").strip().lower()
+        self.analysis_type = (column_config.get("analysis_type") or "DIA").strip().lower()
 
         for config_key, std_name in self.DEFAULT_COLUMN_MAP.items():
             original_col = column_config.get(config_key)
             if original_col:
                 self.column_map[original_col] = std_name
-
-    # ---------- helpers ----------
 
     def _load_annotation(self) -> pl.DataFrame:
         if not self.annotation_file:
@@ -47,7 +54,7 @@ class DataHarmonizer:
             )
         ann = pl.read_csv(self.annotation_file, separator="\t", ignore_errors=True)
 
-        # Pick a single join key (first match wins), then rename only that one → 'FILENAME'
+        # Pick a single join key (first match wins), then rename only that one -> 'FILENAME'
         join_col = None
         for cand in ("FILENAME", "File Name", "Channel"):
             if cand in ann.columns:
@@ -202,28 +209,143 @@ class DataHarmonizer:
 
         return long_df
 
-    # ---------- public API ----------
+    def _strip_mods(self, s: str) -> str:
+        if s is None:
+            return None
+        # Spectronaut often wraps with underscores and brackets: _ACD[Carbamidomethyl (C)]EF_
+        out = s.strip("_")
+        out = re.sub(r"\[.*?\]", "", out)   # drop bracketed annotations
+        out = out.replace("(", "").replace(")", "")  # safety for exotic exporters
+        return out
+
+    def _assert_required_phospho_columns(self, df: pl.DataFrame) -> None:
+        required = {"PEPTIDE_LSEQ", "PTM_POSITIONS_STR"}
+        missing = sorted(required - set(df.columns))
+        if missing:
+            raise ValueError(
+                "[PHOSPHO] Missing required columns after harmonization: "
+                f"{missing}. Ensure your config maps:\n"
+                "  peptide_seq_column -> PEPTIDE_LSEQ (e.g. 'PEP.StrippedSequence')\n"
+                "  ptm_positions_column -> PTM_POSITIONS_STR (e.g. 'EG.PTMPositions [Phospho (STY)]')"
+            )
+
+        # Prefer vendor-specific per-site probs; fall back to the generic localization probs if present
+        has_vendor_probs = "PTM_PROBS_STR" in df.columns
+        has_generic_probs = "EG.PTMLocalizationProbabilities" in df.columns  # present in your phospho head
+        if not has_vendor_probs and has_generic_probs:
+            df = df.rename({"EG.PTMLocalizationProbabilities": "PTM_PROBS_STR"})
+        elif not has_vendor_probs and not has_generic_probs:
+            log_warning("[PHOSPHO] No per-site probability column found; LOC_PROB will be null.")
+
+        # Strongly suggested but not fatal... yet
+        if "UNIPROT" not in df.columns:
+            log_warning("[PHOSPHO] UNIPROT not present; parent protein mapping will be limited.")
+        return df
+
+    def _first_existing(self, df: pl.DataFrame, cols: list[str]) -> str | None:
+        for c in cols:
+            if c in df.columns:
+                return c
+        return None
+
+    @log_time("Building Peptide Index")
+    def _build_peptido_index(self, df: pl.DataFrame) -> pl.DataFrame:
+        # choose a real sequence source (std or vendor)
+        cand_cols = [
+            "PEPTIDE_LSEQ", "PEP_SEQUENCE", "MODIFIED_SEQUENCE",  # standardized names (if mapped)
+            "PEP.StrippedSequence", "EG.ModifiedSequence", "FG.LabeledSequence"  # vendor fallbacks
+        ]
+        seq_col = self._first_existing(df, cand_cols)
+        if seq_col is None:
+            raise ValueError("[PEPTIDOMICS] No sequence column found (tried: "
+                             + ", ".join(cand_cols) + "). Map one in the config.")
+
+        df = df.with_columns(
+            pl.col(seq_col).cast(pl.Utf8).alias("_seq_candidate")
+        ).with_columns(
+            pl.col("_seq_candidate").map_elements(self._strip_mods, return_dtype=str).alias("STRIPPED_SEQ")
+        ).drop(["_seq_candidate"], strict=False)
+
+        df = df.with_columns(
+            pl.col("STRIPPED_SEQ").alias("PARENT_PEPTIDE_ID"),
+            pl.when(pl.col("UNIPROT").is_not_null()).then(pl.col("UNIPROT")).otherwise(None).alias("PARENT_PROTEIN"),
+            pl.col("STRIPPED_SEQ").alias("INDEX"),
+        )
+
+        if "ASSAY" not in df.columns:
+            df = df.with_columns(pl.lit("PEPTIDOMICS").alias("ASSAY"))
+
+        return df
+
+    @log_time("Building Phospho Index")
+    def _build_phospho_index(self, df: pl.DataFrame) -> pl.DataFrame:
+        df = self._assert_required_phospho_columns(df)
+
+        cand_cols = [
+            "PEPTIDE_LSEQ", "PEP_SEQUENCE", "MODIFIED_SEQUENCE",
+            "PEP.StrippedSequence", "EG.ModifiedSequence", "FG.LabeledSequence"
+        ]
+        seq_col = self._first_existing(df, cand_cols)
+        if seq_col is None:
+            raise ValueError("[PHOSPHO] No sequence column found (tried: " + ", ".join(cand_cols) + ").")
+
+        df = df.with_columns(
+            pl.col(seq_col).cast(pl.Utf8).alias("_seq_candidate")
+        ).with_columns(
+            pl.col("_seq_candidate").map_elements(self._strip_mods, return_dtype=str).alias("STRIPPED_SEQ")
+        ).drop(["_seq_candidate"], strict=False)
+
+        # Split lists
+        with_lists = df.with_columns(
+            pl.when(pl.col("PTM_POSITIONS_STR").is_not_null())
+              .then(pl.col("PTM_POSITIONS_STR").cast(pl.Utf8).str.split(";"))
+              .otherwise(pl.lit([])).alias("_pos_list"),
+            pl.when(pl.col("PTM_PROBS_STR").is_not_null())
+              .then(pl.col("PTM_PROBS_STR").cast(pl.Utf8).str.split(";"))
+              .otherwise(pl.lit([])).alias("_prob_list"),
+        )
+
+        # Explode in lockstep
+        exploded = with_lists.explode(["_pos_list", "_prob_list"]).with_columns(
+            pl.col("_pos_list").cast(pl.Utf8).str.strip_chars().replace("", None).cast(pl.Int64, strict=False).alias("SITE_POS"),
+            pl.col("_prob_list").cast(pl.Utf8).str.strip_chars().replace("", None).cast(pl.Float64, strict=False).alias("LOC_PROB"),
+        ).filter(pl.col("SITE_POS").is_not_null())
+
+        # Normalize probs and drop zero-prob candidates (keeps only truly localized sites)
+        exploded = exploded.with_columns(
+            pl.when((pl.col("LOC_PROB") > 1.0) & (pl.col("LOC_PROB").is_not_null()))
+              .then(pl.col("LOC_PROB") / 100.0)
+              .otherwise(pl.col("LOC_PROB"))
+              .alias("LOC_PROB")
+        ).filter((pl.col("LOC_PROB").is_null()) | (pl.col("LOC_PROB") > 0.0))
+
+        # Build final keys and parents from STRIPPED_SEQ
+        out = exploded.with_columns(
+            (pl.col("STRIPPED_SEQ").cast(pl.Utf8) + pl.lit("|p") + pl.col("SITE_POS").cast(pl.Utf8)).alias("INDEX"),
+            pl.col("STRIPPED_SEQ").alias("PARENT_PEPTIDE_ID"),
+            pl.when(pl.col("UNIPROT").is_not_null()).then(pl.col("UNIPROT")).otherwise(None).alias("PARENT_PROTEIN"),
+            pl.lit("PHOSPHO").alias("ASSAY"),
+        ).drop(["_pos_list", "_prob_list"], strict=False)
+
+        return out
+
 
     @log_time("Data Harmonizing")
     def harmonize(self, df: pl.DataFrame) -> pl.DataFrame:
-        """
-        Layout-aware harmonization:
-          - 'wide': annotation-driven melt → rename → strict join
-          - 'long': rename → strict join
-        """
         if self.input_layout not in {"long", "wide"}:
             raise ValueError("dataset.input_layout must be 'long' or 'wide'.")
 
         if self.input_layout == "wide":
-            log_info("Input layout=wide; melting via annotation to canonical long format.")
             df = self._melt_wide_to_long(df)
             df = self._standardize_then_inject(df)
-            log_info(
-                f"Wide → long harmonization completed: rows={df.height}, cols={df.width}. "
-            )
             return df
 
-        # input_layout == "long"
-        log_info("Input layout=long")
+        # long
         df = self._standardize_then_inject(df)
+
+        if self.analysis_type == "phospho":
+            df = self._build_phospho_index(df)
+        elif self.analysis_type == "peptidomics":
+            df = self._build_peptido_index(df)
+
         return df

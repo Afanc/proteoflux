@@ -1,12 +1,20 @@
+"""PDF report exporter for Proteoflux results.
+
+Generates a multi-page PDF containing:
+  1) Title/summary page (pipeline settings, filtering counts, package versions)
+  2) IDs per sample + condition-level variability metrics
+  3) Volcano plots per contrast (annotated top hits)
+
+All visuals rely on the contents of an AnnData produced by the pipeline.
+"""
+
 import os
-import re
 import warnings
 from datetime import datetime
 import numpy as np
 import pandas as pd
 import scanpy as sc
 import matplotlib.pyplot as plt
-import seaborn as sns
 import matplotlib
 import proteoflux
 import inmoose
@@ -32,15 +40,14 @@ matplotlib.rcParams.update({
 
 def get_color_map(
     labels: List[str],
-    palette: List[str] = None,
+    palette: Optional[List[str]] = None,
     anchor: str = "Total",
     anchor_color: str = "red",
 ) -> Dict[str,str]:
-    """
-    Returns a stable mapping label→color.
+    """Return a stable mapping label→color.
 
-    - anchor: if present in labels, gets anchor_color.
-    - the remaining labels (in original order) get colors from matplotlib's cycle.
+    - If `anchor` is present in labels, it gets `anchor_color`.
+    - Remaining labels (original order) get colors from Matplotlib's cycle.
     """
     palette = palette or plt.rcParams["axes.prop_cycle"].by_key()["color"]
     out: Dict[str,str] = {}
@@ -55,16 +62,15 @@ def get_color_map(
 
 
 def CV(values: np.ndarray, axis: int = 1, log_base: float = 2) -> np.ndarray:
-    """
-    Computes %CV from log-transformed values -> transform back into linear scale and calculate CV
+    """Compute %CV from log-transformed values.
 
-    Parameters:
-        values: Log-transformed intensity matrix.
-        axis: Axis for computation.
-        log_base: Log base of the transformation (default: 2).
-
+    Values are exponentiated back to linear space before computing std/mean.
+    Args:
+        values: log-transformed intensity matrix.
+        axis:   axis to compute along (features by default).
+        log_base: log base used for the original transform.
     Returns:
-        Vector of %CV estimates.
+        Vector of %CV estimates (float array).
     """
     linear_values = log_base**values
 
@@ -76,16 +82,10 @@ def CV(values: np.ndarray, axis: int = 1, log_base: float = 2) -> np.ndarray:
     return cv
 
 def rMAD(values: np.ndarray, axis: int = 1, log_base: float = 2) -> np.ndarray:
-    """
-    Computes %rMAD from log-transformed values -> transform back into linear scale and calculate rMAD
+    """Compute %rMAD from log-transformed values.
 
-    Parameters:
-        values: Log-transformed intensity matrix.
-        axis: Axis for computation.
-        log_base: Log base of the transformation (default: 2).
-
-    Returns:
-        Vector of %rMAD estimates.
+    Values are exponentiated back to linear space before computing rMAD.
+    Args/Returns mirror `CV`.
     """
     linear = log_base**values
 
@@ -97,24 +97,13 @@ def rMAD(values: np.ndarray, axis: int = 1, log_base: float = 2) -> np.ndarray:
     return rmad
 
 def compute_metrics(mat: np.ndarray, metrics: List[str] = ["CV", "MAD"]) -> Dict[str, np.ndarray]:
-    """
-    Compute per-feature metrics across samples.
+    """Compute per-feature metrics across samples (features × samples).
 
-    Parameters:
-        mat (np.ndarray): 2D array (features x samples).
-        metrics (List[str], optional): List of metric names to compute.
-            Supported metrics include:
-              - "CV": Coefficient of variation (std / mean)
-              - "MAD": Median absolute deviation (with respect to the median)
-              - "PEV": Population explained variance (i.e. variance)
-              - "Mean": Mean value
-              - "Median": Median value
-              - "STD": Standard deviation
-            Defaults to ["CV", "MAD", "PEV"].
-
-    Returns:
-        Dict[str, np.ndarray]: Dictionary with metric names as keys and 1D arrays
-                               (one value per feature) as values.
+    Supported keys:
+      - "CV":   coefficient of variation (via `CV`, log-aware)
+      - "RMAD": relative MAD (via `rMAD`, log-aware)
+      - "Mean", "Median", "STD": standard statistics in log space
+    Default behavior computes CV and RMAD (legacy default shows "MAD" but maps to RMAD).
     """
     if metrics is None:
         metrics = ["CV", "RMAD"]
@@ -142,6 +131,7 @@ def compute_metrics(mat: np.ndarray, metrics: List[str] = ["CV", "MAD"]) -> Dict
     return result
 
 class ReportPlotter:
+    """Prepare plotting context from AnnData and config dict."""
     def __init__(
         self,
         adata: AnnData,
@@ -160,14 +150,24 @@ class ReportPlotter:
 
         # Cache stats for fast access
         self.log2fc = adata.varm["log2fc"]
-        self.q_ebayes = pd.DataFrame(adata.varm["q_ebayes"],
-                                     columns=self.contrast_names,
-                                     index=adata.var.index)
+        # eBayes may be absent in pilot mode
+        self.q_ebayes = (pd.DataFrame(adata.varm["q_ebayes"],
+                                      columns=self.contrast_names,
+                                      index=adata.var.index)
+                         if "q_ebayes" in adata.varm else None)
+        self.p_ebayes = (pd.DataFrame(adata.varm["p_ebayes"],
+                                      columns=self.contrast_names,
+                                      index=adata.var.index)
+                         if "p_ebayes" in adata.varm else None)
+        # pilot mode flag (set by limma_pipeline)
+        self.pilot_mode = bool(adata.uns.get("pilot_study_mode", False))
+
         self.missingness = adata.uns.get("missingness", {})
         self.fasta_headers = adata.var['FASTA_HEADERS'].to_numpy()
 
     @log_time("Preparing Pdf Report")
     def plot_all(self):
+        """Create the full PDF report to the configured path."""
         with PdfPages(self.export_config.get("path_plot")) as pdf:
             self.pdf = pdf
             # first blank page
@@ -195,6 +195,7 @@ class ReportPlotter:
         footer_text = self.analysis_config.get("footer_text", "")
         preproc     = self.config.get("preprocessing", {})
         filtering   = preproc.get("filtering", {})
+        quantification_method = preproc.get("pivot_signal_method", "sum")
         normalization = preproc.get("normalization", {})
         imputation  = preproc.get("imputation", {})
         de_method   = self.analysis_config.get("ebayes_method", "limma")
@@ -236,8 +237,6 @@ class ReportPlotter:
 
         fig.text(x0, y, "Output files:", ha="left", va="top",
                  fontsize=12, weight="semibold")
-        #y -= line_height
-        #fig.text(x0, y, "The following files were generated:", ha="left", va="top", fontsize=12)
         y -= 0.8 * line_height
         fig.text(x0+0.05, y, f"- {xlsx_export} (full data table)", ha="left", va="top", fontsize=12)
         y -= 0.8 * line_height
@@ -254,7 +253,7 @@ class ReportPlotter:
                  fontsize=12)
         y -= line_height
 
-        # 1) Contaminants
+        # Contaminants
         cont_cfg   = filtering.get("contaminants_files", [])
         flt_meta = self.adata.uns.get("preprocessing").get("filtering")
         base_names = [os.path.basename(f) for f in cont_cfg]
@@ -265,7 +264,7 @@ class ReportPlotter:
                  ha="left", va="top", fontsize=11)
         y -= 0.8 * line_height
 
-        # 2) q-value threshold
+        # q-value threshold
         if "qvalue" in filtering:
             removed_q = flt_meta.get("qvalue").get("number_dropped", 0)
             n_q = f"{removed_q}".replace(",","'")
@@ -274,7 +273,7 @@ class ReportPlotter:
                      ha="left", va="top", fontsize=11)
             y -= 0.8 * line_height
 
-        # 3) PEP threshold
+        # PEP threshold
         if "pep" in filtering:
             removed_pep = flt_meta.get("pep").get("number_dropped", 0)
             op = "≥" if flt_meta.get("pep").get("direction").startswith("greater") else "≤"
@@ -284,14 +283,20 @@ class ReportPlotter:
                      ha="left", va="top", fontsize=11)
             y -= 0.8 * line_height
 
-        # 4) Run evidence count
-        if "run_evidence_count" in filtering:
-            removed_rec = flt_meta.get("rec").get("number_dropped", 0)
-            n_r = f"{removed_rec}".replace(",", "'")
+        # Min precursors
+        if "min_precursors" in filtering:
+            removed_prec = flt_meta.get("prec").get("number_dropped", 0)
+            n_r = f"{removed_prec}".replace(",", "'")
             fig.text(x0 + 0.06, y,
-                     f"- Min. run evidence count = {filtering['run_evidence_count']}: {n_r} PSM removed",
+                     f"- Min. Num. Precursors = {filtering['min_precursors']}: {n_r} PSM removed",
                      ha="left", va="top", fontsize=11)
             y -= line_height
+
+        # Quantification method
+        fig.text(x0 + 0.02, y, f"- Quantification: {quantification_method}",
+                 ha="left", va="top", fontsize=12)
+
+        y -= line_height
 
         # Normalization
         norm_methods = normalization.get("method", [])
@@ -313,7 +318,7 @@ class ReportPlotter:
 
         # Imputation
         imp = preproc.get("imputation", {})
-        imp_method = imp.get("method", "")
+        imp_method = imp.get("method", [])
         if "knn" in imp_method:
             extras = []
             if "knn_k" in imp:
@@ -327,14 +332,23 @@ class ReportPlotter:
             rf_max_iter = preproc.get("imputation").get("rf_max_iter")
             imp_method += f", rf_max_iter={rf_max_iter}"
 
+        if "lc_conmed" in imp_method:
+            lc_conmed_lod_k = preproc.get("imputation").get("lc_conmed_lod_k")
+            imp_method += f", lod_k={lc_conmed_lod_k}"
+
         fig.text(x0 + 0.02, y, f"- Imputation: {imp_method} ",
                  ha="left", va="top", fontsize=12)
         y -= line_height
 
         # Differential Expression
-        fig.text(x0 + 0.02, y,
-                 f"- Differential expression: eBayes via {de_method}",
-                 ha="left", va="top", fontsize=12)
+        if self.pilot_mode:
+            fig.text(x0 + 0.02, y,
+                     f"- Pilot Study, LogFC only",
+                     ha="left", va="top", fontsize=12)
+        else:
+            fig.text(x0 + 0.02, y,
+                     f"- Differential expression: eBayes via {de_method}",
+                     ha="left", va="top", fontsize=12)
         y -= line_height
 
         # Package versions
@@ -377,7 +391,8 @@ class ReportPlotter:
         plt.close(fig)
 
     def _plot_IDs_and_metrics(self):
-        # barplot IDs per sample + violin metrics on one page
+        """Bar: IDs per sample; Violin: %CV/%rMAD per condition (single page)."""
+
         # prepare data
         df_raw = pd.DataFrame(self.adata.layers['raw'], index=self.adata.obs_names, columns=self.adata.var_names)
         counts = df_raw.notna().sum(axis=1)
@@ -451,20 +466,19 @@ class ReportPlotter:
         self.pdf.savefig(fig)
         plt.close(fig)
 
-    def plot_all_old(self):
-        with PdfPages(self.export_config.get("path_plot")) as pdf:
-            self.pdf = pdf
-            self._plot_IDs_per_sample()
-            self._plot_metrics_per_condition()
-            self._plot_volcano_plots()
-
     def _plot_volcano_plots(self):
+        """Volcano plots (one per contrast). eBayes-only; skip in pilot mode."""
+
+        if (self.q_ebayes is None):
+            return
+
         sign_threshold = self.analysis_config.get("sign_threshold", 0.05)
         volcano_top_annotated = self.analysis_config.get("exports").get("volcano_top_annotated", 10)
-
         for i, name in enumerate(self.contrast_names):
             logfc = self.log2fc[:, i]
-            qvals_bayes = self.q_ebayes.iloc[:, i]
+            # choose source: eBayes if available, else raw
+            qvals_src = self.q_ebayes.iloc[:, i]
+            pvals_src = self.p_ebayes.iloc[:, i]
 
             group1, group2 = name.split("_vs_")
 
@@ -476,13 +490,13 @@ class ReportPlotter:
 
             color = np.full(logfc.shape[0], "gray", dtype=object)
 
-            def plot_panel(ax, pvals, qvals, title):
+            def plot_panel(ax, qvals_for_y, qvals_for_pick, title):
                 mask = ~(missing_a | missing_b)
 
                 base_color = color[mask]
                 base_logfc = logfc[mask]
-                base_p = pvals.iloc[mask]
-                ax.scatter(base_logfc, -np.log10(base_p), c=base_color, alpha=0.7, s=10)
+                base_q = qvals_for_y.iloc[mask]
+                ax.scatter(base_logfc, -np.log10(base_q), c=base_color, alpha=0.7, s=10)
 
 
                 ax.axhline(-np.log10(sign_threshold), color="black", linestyle="--", linewidth=0.8)
@@ -491,16 +505,16 @@ class ReportPlotter:
                 # annotate top hits, excluding any protein missing in either group
                 for direction in ["up", "down"]:
                     dir_mask = (logfc > 0) if direction == "up" else (logfc < 0)
-                    sig_mask = mask & dir_mask & (qvals < sign_threshold)
+                    sig_mask = mask & dir_mask & (qvals_for_pick < sign_threshold)
 
                     # pick top by smallest q-value
-                    top_idx = np.argsort(qvals[sig_mask])[:volcano_top_annotated]
+                    top_idx = np.argsort(qvals_for_pick[sig_mask])[:volcano_top_annotated]
                     selected = np.where(sig_mask)[0][top_idx]
 
                     for j in selected:
                         ax.text(
                             logfc[j],
-                            -np.log10(pvals.iloc[j]),
+                            -np.log10(qvals_for_y.iloc[j]),
                             self.protein_names.iloc[j],
                             fontsize=6,
                             ha="right" if logfc[j] > 0 else "left",
@@ -512,7 +526,8 @@ class ReportPlotter:
                 ax.set_title(title)
 
             fig, ax = plt.subplots(1, 1, figsize=(10, 6))
-            plot_panel(ax, qvals_bayes, qvals_bayes, f"{name}")
+            # Use q on both axes/selection (consistent with ylabel)
+            plot_panel(ax, qvals_src, qvals_src, f"{name}")
 
             fig.tight_layout()
             self.pdf.savefig(fig)

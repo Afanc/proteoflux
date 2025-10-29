@@ -18,6 +18,7 @@ class IntermediateResults:
     metadata: Dict[str, Any] = field(default_factory=lambda: {
         "filtering": {},
         "normalization": {},
+        "covariate": {},
         "imputation": {}})
 
     # DataFrame columns post-pivot (samples)
@@ -58,17 +59,9 @@ class IntermediateResults:
                 raise ValueError(f"DataFrame '{name}' index does not match stored index.")
         self.dfs[name] = df
 
-    #def add_df(self, name: str, df: pl.DataFrame, index_col: str = "INDEX"):
-    #    """Add a DataFrame ensuring correct columns and indices."""
-    #    if self.index is not None:
-    #        df_index = df.select(index_col).to_series().to_numpy()
-    #        if not np.array_equal(df_index, self.index):
-    #            raise ValueError(f"DataFrame '{name}' index does not match stored index.")
-    #    self.dfs[name] = df
-
     def add_metadata(self, step: str, key: str, value: Any):
         """Store metadata like regression type, scale, etc."""
-        if step not in ["filtering", "normalization", "imputation"]:
+        if step not in ["filtering", "normalization", "imputation", "covariate"]:
             raise ValueError("step must be 'normalization' or 'imputation'")
         self.metadata[step][key] = value
 
