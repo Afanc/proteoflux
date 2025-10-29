@@ -81,9 +81,6 @@ def get_subdf(normed_array, indices_of_proteinname_switch, idx, protein_names, i
     index_sub_array = pd.MultiIndex.from_arrays([protein_names[start_switch:end_switch], ion_names[start_switch:end_switch]], names=[config.PROTEIN_ID, config.QUANT_ID])
     return pd.DataFrame(sub_array, index = index_sub_array)
 
-
-
-
 def get_list_with_sequential_processing(input_specification_tuplelist_idx__df__num_samples_quadratic__min_nonan):
     # realize the iterator so we know the total
     items = list(input_specification_tuplelist_idx__df__num_samples_quadratic__min_nonan)
@@ -91,10 +88,6 @@ def get_list_with_sequential_processing(input_specification_tuplelist_idx__df__n
     for args in tqdm(items, desc="DirectLFQ", file=sys.stdout, leave=False):
         out.append(calculate_peptide_and_protein_intensities(*args))
     return out
-
-def get_list_with_sequential_processing_works(input_specification_tuplelist_idx__df__num_samples_quadratic__min_nonan):
-    list_of_tuple_w_protein_profiles_and_shifted_peptides = list(map(lambda x : calculate_peptide_and_protein_intensities(*x), input_specification_tuplelist_idx__df__num_samples_quadratic__min_nonan))
-    return list_of_tuple_w_protein_profiles_and_shifted_peptides
 
 def get_list_with_multiprocessing(input_specification_tuplelist_idx__df__num_samples_quadratic__min_nonan, num_cores):
     pool = get_configured_multiprocessing_pool(num_cores)
@@ -110,14 +103,6 @@ def get_list_with_multiprocessing(input_specification_tuplelist_idx__df__num_sam
     pool.close()
     return list_of_tuple_w_protein_profiles_and_shifted_peptides
 
-
-def get_list_with_multiprocessing_works(input_specification_tuplelist_idx__df__num_samples_quadratic__min_nonan, num_cores):
-    pool = get_configured_multiprocessing_pool(num_cores)
-    list_of_tuple_w_protein_profiles_and_shifted_peptides = pool.starmap(calculate_peptide_and_protein_intensities, input_specification_tuplelist_idx__df__num_samples_quadratic__min_nonan)
-    pool.close()
-    return list_of_tuple_w_protein_profiles_and_shifted_peptides
-
-
 def get_configured_multiprocessing_pool(num_cores):
     multiprocess.freeze_support()
     if num_cores is None:
@@ -129,7 +114,6 @@ def get_configured_multiprocessing_pool(num_cores):
 def calculate_peptide_and_protein_intensities_from_list_of_peptide_intensity_dfs(idx, list_of_peptide_intensity_dfs, num_samples_quadratic, min_nonan):
     for peptide_intensity_df in list_of_peptide_intensity_dfs:
         calculate_peptide_and_protein_intensities
-
 
 def calculate_peptide_and_protein_intensities(idx, peptide_intensity_df, num_samples_quadratic, min_nonan):
     if len(peptide_intensity_df.index) > 1:
