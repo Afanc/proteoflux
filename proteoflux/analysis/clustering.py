@@ -158,7 +158,7 @@ def run_clustering_missingness(
 ) -> AnnData:
     """Cluster the binary missingness pattern (1=NaN, 0=observed) of `adata[layer]`.
 
-    Missingness is computed across the full matrix; for linkage, you may cap the
+    Missingness is computed across the full matrix; for linkage, we may cap the
     number of features considered (≤ `max_features`) using variance- or random-based
     selection. Orders saved in `adata.uns['missing_*_order']` reflect the subset if capped.
     """

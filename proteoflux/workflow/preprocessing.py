@@ -405,7 +405,7 @@ class Preprocessor:
             base_meta = base_meta.with_columns(
                 pl.col("IBAQ")
                   .cast(pl.Utf8, strict=False)
-                  .str.split(";").list.first()      # use .list.get(0) if your Polars is older
+                  .str.split(";").list.first()      # use .list.get(0) if Polars is older
                   .str.strip_chars()
                   .replace("", None)
                   .alias("IBAQ")
@@ -1100,7 +1100,7 @@ class Preprocessor:
                     log_info(f"median_equalization_by_tag: no proteins matched tag(s) {tags} in '{fasta_col}'. Step skipped.")
                     # leave mat as-is and continue
                 else:
-                    # compute medians on the reference subset (current space: log or linear, consistent with your existing method)
+                    # compute medians on the reference subset (current space: log or linear)
                     ref_sub = mat[ref_mask, :]
 
                     ref_counts = np.sum(np.isfinite(ref_sub), axis=0)  # per-sample non-NaN counts in the reference set
