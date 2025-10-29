@@ -30,7 +30,6 @@ def _pooled_sd(groups):
     if den == 0:
         non_empty = [g for g in groups if g.size > 0]
         if not non_empty:
-            # identical to previous fallback outcome: return _EPS when nothing observed
             return _EPS
         allv = np.concatenate(non_empty, axis=0)
         if allv.size >= 2:
@@ -130,7 +129,7 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
         for i, j in zip(rows, cols):
             per_row_missing.setdefault(i, []).append(j)
 
-        # Local bindings (micro-optimizations)
+        # Local bindings
         cond = self._cond
         cond_idx = self._cond_idx
         in_min_obs = self.in_min_obs
