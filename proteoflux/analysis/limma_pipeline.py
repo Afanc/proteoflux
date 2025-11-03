@@ -260,7 +260,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         # also require a minimum per-row SD to consider the covariate "non-flat"
         # (handles fully-imputed jitter where sCC is small but not tiny)
         sdC = np.sqrt(sCC / max(N - 1, 1))
-        eps_sd = 0.10  # log2 scale; ~2x your jitter (0.05)
+        eps_sd = 0.10  # log2 scale; ~2x jitter (0.05)
         flat = (sCC < tau) | (sdC < eps_sd)
         if np.any(flat):
             beta1[flat] = 0.0
@@ -691,13 +691,13 @@ def check_ft_consistency(adata, protein_id="Q8NEN9"):
 
     # Extract the flowthrough (FT) data
     ft = pd.DataFrame(
-        adata.layers["centered_covariate"],  # or "centered_covariate" if that’s your FT layer
+        adata.layers["centered_covariate"],
         index=adata.obs_names,
         columns=adata.var_names
     ).T
 
     ft2 = pd.DataFrame(
-        adata.layers["processed_covariate"],  # or "centered_covariate" if that’s your FT layer
+        adata.layers["processed_covariate"],
         index=adata.obs_names,
         columns=adata.var_names
     ).T

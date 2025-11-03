@@ -300,6 +300,7 @@ class ReportPlotter:
 
         # Normalization
         norm_methods = normalization.get("method", [])
+        norm_meta = self.adata.uns.get("preprocessing").get("normalization")
         line_height_mult = 1
         if isinstance(norm_methods, list):
             norm_methods = ", ".join(norm_methods)
@@ -308,7 +309,7 @@ class ReportPlotter:
             norm_methods += f" (loess_span={loess_span})"
         if "median_equalization_by_tag" in norm_methods:
             tags = preproc.get("normalization").get("reference_tag")
-            tag_matches = preproc.get("normalization").get("tag_matches")
+            tag_matches = norm_meta.get("tag_matches")
             norm_methods += f"\n   tags={tags}, matches={tag_matches}"
             line_height_mult = 1.5
 

@@ -7,7 +7,7 @@ class NSkNNImputer(BaseEstimator, TransformerMixin):
 
     Matrix shape: X is (n_features, n_samples)  [rows = proteins/features, cols = runs/samples]
 
-    Idea (kept from your original code):
+    Idea:
       - Compute pairwise distances between SAMPLES (columns), autoscaling per FEATURE.
       - Include neighbors even if they have missing at the target feature; for those, use
         the feature's minimum observed value as a stand-in.
