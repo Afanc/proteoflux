@@ -146,8 +146,9 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
             X_row = X_imp[i]
             row_nan = nan_mask[i]
 
+            obs_by_cond = {}
             # collect observed values per cond
-            obs_ld once per row: by_cond = {}
+
             for c, idx_c in cond_idx.items():
                 not_nan_c = ~row_nan[idx_c]
                 if np.any(not_nan_c):
