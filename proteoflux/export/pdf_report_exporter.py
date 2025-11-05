@@ -27,6 +27,7 @@ import platform
 import textwrap
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
+from scipy.cluster import hierarchy as sch
 import matplotlib.patches as mpatches
 from anndata import AnnData
 from typing import Optional, List, Union, Dict
@@ -62,11 +63,19 @@ def get_color_map(
 
 def _shorten_labels_smart(names: List[str], max_len: int = 28, min_common: int = 5) -> List[str]:
     """
-    Compress long labels by keeping common prefix/suffix and eliding the middle with '...'.
-    - Finds the longest common prefix and suffix across all names.
-    - If neither side has at least `min_common` characters, falls back to head+tail trim.
-    - Guarantees each label length <= max_len.
-    - Stable and pattern-agnostic (no assumptions about underscores, dashes, etc.).
+    Produce compact labels that preserve the differing part of similar sample names.
+
+    Logic:
+    - Find longest common prefix and suffix across all names.
+    - If both exist, keep prefix[:p] + '...' + suffix[-s:], where p+s <= max_len.
+    - Always keep the differing middle segment visible if it's short (<= 10).
+    - If no clear common parts, fall back to head/tail trim.
+
+    Examples
+    --------
+    ['1_fileA', '2_fileA']      -> ['1_...fileA', '2_...fileA']
+    ['fileA_1', 'fileA_2']      -> ['fileA_1', 'fileA_2']
+    ['longprefix_A', 'longprefix_B'] -> ['...A', '...B']
     """
     if not names:
         return names
@@ -74,16 +83,12 @@ def _shorten_labels_smart(names: List[str], max_len: int = 28, min_common: int =
         s = names[0]
         if len(s) <= max_len:
             return names
-        # head/tail split
-        head = max_len // 2 - 1
-        tail = max_len - head - 3
-        return [s[:head] + "..." + s[-tail:]]
+        return [s[: max_len // 2 - 1] + "..." + s[-(max_len // 2 - 2):]]
 
-    # common prefix
     pref = os.path.commonprefix(names)
-    # common suffix via reversed commonprefix
     rev = [s[::-1] for s in names]
     suff = os.path.commonprefix(rev)[::-1]
+
     if len(pref) < min_common:
         pref = ""
     if len(suff) < min_common:
@@ -92,16 +97,23 @@ def _shorten_labels_smart(names: List[str], max_len: int = 28, min_common: int =
     out = []
     for s in names:
         if len(s) <= max_len:
-            out.append(s); continue
-        if pref or suff:
-            keep_p = min(len(pref), max_len // 2)
-            keep_s = max(0, min(len(suff), max_len - keep_p - 3))
-            out.append(s[:keep_p] + "..." + s[len(s)-keep_s:])
-        else:
-            head = max_len // 2 - 1
-            tail = max_len - head - 3
-            out.append(s[:head] + "..." + s[-tail:])
+            out.append(s)
+            continue
+        # compute the part that differs
+        diff_start = len(pref)
+        diff_end = len(s) - len(suff)
+        diff = s[diff_start:diff_end]
+        if len(diff) > 10:  # cap visible diff size
+            diff = diff[:5] + "..."
+        # compose: prefix (trimmed), diff, suffix (trimmed)
+        keep_p = min(len(pref), max_len // 3)
+        keep_s = min(len(suff), max_len - keep_p - len(diff) - 3)
+        short = s[:keep_p] + diff + "..." + s[len(s) - keep_s:]
+        if len(short) > max_len:
+            short = short[: max_len // 2 - 1] + "..." + short[-(max_len // 2 - 2):]
+        out.append(short)
     return out
+
 
 def CV(values: np.ndarray, axis: int = 1, log_base: float = 2) -> np.ndarray:
     """Compute %CV from log-transformed values.
@@ -214,10 +226,16 @@ class ReportPlotter:
         """Create the full PDF report to the configured path."""
         with PdfPages(self.export_config.get("path_plot")) as pdf:
             self.pdf = pdf
+
             # first blank page
             self._plot_title_page()
+
             # combined IDs + metrics
             self._plot_IDs_and_metrics()
+
+            # hierch. clustering
+            self._plot_hclust_heatmap_matplotlib(tag = "intensity")
+
             # volcanoes
             if self._has_contrasts and (self.q_ebayes is not None):
                 self._plot_volcano_plots()
@@ -263,7 +281,7 @@ class ReportPlotter:
         fig.text(0.5, y, timestamp,
                  ha="center", va="top",
                  fontsize=13, color="black")
-        y -= 1.5 * line_height
+        y -= 1.2 * line_height
         # Intro
         if intro:
             wrapped_lines = []
@@ -533,6 +551,94 @@ class ReportPlotter:
         # shared legend
         handles = [mpatches.Patch(color=color_map[c],label=c) for c in conds]
         ax_bar.legend(handles=handles,title='Condition',bbox_to_anchor=(1.05,1),loc='upper left')
+        self.pdf.savefig(fig)
+        plt.close(fig)
+
+    def _plot_hclust_heatmap_matplotlib(self, tag: str = "intensity"):
+        """
+        Hierarchical clustering clustergram (dendrograms + heatmap) using
+        the precomputed linkages and orders stored in `adata.uns`.
+        """
+        # --- 1) pick the matrix (samples × features) and convert to DataFrame (features × samples)
+        if tag == "centered" and "centered" in self.adata.layers:
+            M = self.adata.layers["centered"]
+            title = "Hierarchical clustering (deviations from mean)"
+        else:
+            X = self.adata.X
+            M = X.toarray() if hasattr(X, "toarray") else X
+            title = "Hierarchical clustering (processed intensities)"
+
+        df = pd.DataFrame(M.T, index=self.adata.var_names, columns=self.adata.obs_names)
+
+        # --- 2) apply precomputed order if present
+        feat_order   = self.adata.uns.get(f"{tag}_feature_order")
+        sample_order = self.adata.uns.get(f"{tag}_sample_order")
+        if feat_order is not None:
+            df = df.reindex(index=list(feat_order))
+        if sample_order is not None:
+            df = df.reindex(columns=list(sample_order))
+
+        # --- 3) linkage trees: use precomputed linkages if available, else compute
+        row_link = self.adata.uns.get(f"{tag}_feature_linkage")
+        col_link = self.adata.uns.get(f"{tag}_sample_linkage")
+
+        # If orders were not supplied, derive from the linkages now
+        if feat_order is None:
+            feat_order = [df.index[i] for i in sch.leaves_list(row_link)]
+            df = df.reindex(index=feat_order)
+        if sample_order is None:
+            sample_order = [df.columns[i] for i in sch.leaves_list(col_link)]
+            df = df.reindex(columns=sample_order)
+
+        # --- 4) determine heatmap scale (diverging if centered spans +/-)
+        vmin = float(np.nanmin(df.values))
+        vmax = float(np.nanmax(df.values))
+        if (vmin < 0) and (vmax > 0):
+            # symmetric diverging scale around 0
+            a = max(abs(vmin), abs(vmax))
+            vmin, vmax, cmap = -a, a, "RdBu_r"
+        else:
+            cmap = "viridis"
+
+        # --- 5) layout: top dendrogram, left dendrogram, heatmap
+        fig = plt.figure(figsize=(10.5, 9.0))
+        fig.subplots_adjust(left=0.06, right=0.92, bottom=0.15, top=0.94, wspace=0.0, hspace=0.0)
+        gs = GridSpec(2, 2, width_ratios=[1, 4], height_ratios=[1, 4])
+
+        ax_dend_top  = fig.add_subplot(gs[0, 1])
+        ax_dend_left = fig.add_subplot(gs[1, 0])
+        ax_heat      = fig.add_subplot(gs[1, 1])
+
+        # top dendrogram (samples)
+        sch.dendrogram(
+            col_link, ax=ax_dend_top, orientation="top", no_labels=True, color_threshold=None
+        )
+        ax_dend_top.set_xticks([]); ax_dend_top.set_yticks([])
+        for spine in ax_dend_top.spines.values():
+            spine.set_visible(False)
+
+        # left dendrogram (features)
+        sch.dendrogram(
+            row_link, ax=ax_dend_left, orientation="left", no_labels=True, color_threshold=None
+        )
+        ax_dend_left.set_xticks([]); ax_dend_left.set_yticks([])
+        for spine in ax_dend_left.spines.values():
+            spine.set_visible(False)
+
+        # heatmap (already reordered)
+        im = ax_heat.imshow(df.values, aspect="auto", interpolation="nearest", cmap=cmap, vmin=vmin, vmax=vmax)
+        ax_heat.set_title(title, fontsize=12, pad=25)
+
+        # neat axes: y is features (no tick labels for speed), x shows shortened sample names
+        names_short = _shorten_labels_smart(list(df.columns), max_len=28, min_common=5)
+        ax_heat.set_xticks(range(len(names_short)))
+        ax_heat.set_xticklabels(names_short, rotation=45, ha="right", fontsize=8)
+        ax_heat.set_yticks([])
+
+        # colorbar
+        cbar = fig.colorbar(im, ax=ax_heat, fraction=0.046, pad=0.02)
+        cbar.ax.set_ylabel("Value", rotation=90)
+
         self.pdf.savefig(fig)
         plt.close(fig)
 

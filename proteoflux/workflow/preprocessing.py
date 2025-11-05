@@ -134,6 +134,7 @@ class Preprocessor:
             meta_qvalue = self.intermediate_results.metadata.get("filtering").get("meta_qvalue"),
             meta_pep =  self.intermediate_results.metadata.get("filtering").get("meta_pep"),
             meta_prec =  self.intermediate_results.metadata.get("filtering").get("meta_prec"),
+            meta_censor = self.intermediate_results.metadata.get("filtering").get("meta_censor"),
             raw_covariate=self.intermediate_results.dfs.get("raw_df_covariate"),
             lognormalized_covariate=self.intermediate_results.dfs.get("postlog_covariate"),
             normalized_covariate=self.intermediate_results.dfs.get("normalized_covariate"),
@@ -185,10 +186,10 @@ class Preprocessor:
             self.intermediate_results.add_df(f"filtered_PEP/{tag}", x)
 
             x = self._filter_by_num_precursors(x)
-            self.intermediate_results.add_df(f"filtered_final/PREC/{tag}", x)
+            self.intermediate_results.add_df(f"filtered_PREC/{tag}", x)
 
             x = self._censor_low_val(x)
-            self.intermediate_results.add_df(f"filtered_final/PREC/{tag}", x)
+            self.intermediate_results.add_df(f"filtered_final_censored/{tag}", x)
 
             return x
 
@@ -205,7 +206,7 @@ class Preprocessor:
         # concatenate back (same schema by construction)
         out = main_f if cov_f is None else pl.concat([main_f, cov_f], how="vertical_relaxed", rechunk=True)
 
-        self.intermediate_results.add_df("filtered_final/PREC", out)
+        self.intermediate_results.add_df("filtered_final_censored", out)
 
     def _filter_contaminants(self, df: pl.DataFrame) -> pl.DataFrame:
         if not self.remove_contaminants or "INDEX" not in df.columns:
@@ -354,6 +355,35 @@ class Preprocessor:
         return df_kept
 
     def _censor_low_val(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Set very low intensity values to NA and log the counts."""
+        if self.min_linear_intensity is None:
+            return df
+
+        thr = self.min_linear_intensity
+
+        # precompute mask once
+        mask = (pl.col("SIGNAL") < thr) & pl.col("SIGNAL").is_not_null()
+
+        # count true values directly from the boolean column
+        will_censor = int(df.select(mask.sum()).item())
+        df_kept = len(df) - will_censor
+
+        # apply masking only once
+        df = df.with_columns(
+            pl.when(mask).then(None).otherwise(pl.col("SIGNAL")).alias("SIGNAL")
+        )
+
+        log_info(f"Low-intensity censoring: kept={df_kept}, dropped={will_censor} (thr={thr}).")
+        # record threshold metadata
+        self.intermediate_results.add_metadata(
+            "filtering",
+            "meta_censor",
+            {"threshold": thr, "dropped": will_censor, "kept": df_kept},
+        )
+
+        return df
+
+    def _censor_low_val_old(self, df: pl.DataFrame) -> pl.DataFrame:
         """Set very low intensity values to NA."""
         if self.min_linear_intensity is not None:
                 thr = self.min_linear_intensity
@@ -367,7 +397,7 @@ class Preprocessor:
         return df
 
     def _get_protein_metadata(self) -> None:
-        df_full = self.intermediate_results.dfs["filtered_final/PREC"]  # long format, post filter
+        df_full = self.intermediate_results.dfs["filtered_final_censored"]  # long format, post filter
 
         # Base meta: "first" per protein (works for Spectronaut)
         keep_cols = {
@@ -423,7 +453,7 @@ class Preprocessor:
             base_meta = base_meta.with_columns(
                 pl.col("IBAQ")
                   .cast(pl.Utf8, strict=False)
-                  .str.split(";").list.first()      # use .list.get(0) if Polars is older
+                  .str.split(";").list.first()
                   .str.strip_chars()
                   .replace("", None)
                   .alias("IBAQ")
@@ -444,7 +474,7 @@ class Preprocessor:
 
         If covariates are present, enforce compatible replicate structures across main/covariate blocks.
         """
-        df = self.intermediate_results.dfs["filtered_final/PREC"]
+        df = self.intermediate_results.dfs["filtered_final_censored"]
         base_cols = ["FILENAME", "CONDITION", "REPLICATE"]
         if "ASSAY" in df.columns:
             base_cols.append("ASSAY")
@@ -693,7 +723,7 @@ class Preprocessor:
         return out
 
     def _build_peptide_tables(self) -> None:
-        df = self.intermediate_results.dfs["filtered_final/PREC"]
+        df = self.intermediate_results.dfs["filtered_final_censored"]
 
         needed = {"INDEX", "FILENAME", "SIGNAL", "PEPTIDE_LSEQ"}
         if not needed.issubset(df.columns):
@@ -755,7 +785,7 @@ class Preprocessor:
         spectral counts, localization probabilities), plus peptide drill-down tables.
         Maintains a strict row order across derived pivots for reliable downstream alignment.
         """
-        df = self.intermediate_results.dfs["filtered_final/PREC"]
+        df = self.intermediate_results.dfs["filtered_final_censored"]
 
         # QVALUE is optional (e.g., FragPipe TMT). Require only these:
         required_cols = {"INDEX", "FILENAME", "SIGNAL"}

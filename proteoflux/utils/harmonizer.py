@@ -56,7 +56,7 @@ class DataHarmonizer:
 
         # Pick a single join key (first match wins), then rename only that one -> 'FILENAME'
         join_col = None
-        for cand in ("FILENAME", "File Name", "Channel"):
+        for cand in ("FILENAME", "File Name", "File name", "filename", "Filename", "Channel"): #could be smarter
             if cand in ann.columns:
                 join_col = cand
                 break
@@ -73,6 +73,21 @@ class DataHarmonizer:
 
         # Be tolerant about whitespace on the join key
         ann = ann.with_columns(pl.col("FILENAME").cast(pl.Utf8).str.strip_chars())
+
+        # Strip common MS file extensions to make join robust
+        def _strip_ext(s: str | None) -> str | None:
+            if s is None:
+                return None
+            s = s.strip()
+            # remove common vendor suffixes
+            for ext in (".raw", ".d", ".mzML", ".mzXML", ".wiff"):
+                if s.lower().endswith(ext.lower()):
+                    return s[: -len(ext)]
+            return s
+
+        ann = ann.with_columns(
+            pl.col("FILENAME").map_elements(_strip_ext, return_dtype=pl.Utf8).alias("FILENAME")
+        )
         return ann
 
     def _fmt_diff(self, missing: list[str], extra: list[str], what: str) -> None:
