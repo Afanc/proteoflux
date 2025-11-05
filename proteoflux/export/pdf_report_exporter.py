@@ -60,6 +60,48 @@ def get_color_map(
         out[lbl] = palette[i % len(palette)]
     return out
 
+def _shorten_labels_smart(names: List[str], max_len: int = 28, min_common: int = 5) -> List[str]:
+    """
+    Compress long labels by keeping common prefix/suffix and eliding the middle with '...'.
+    - Finds the longest common prefix and suffix across all names.
+    - If neither side has at least `min_common` characters, falls back to head+tail trim.
+    - Guarantees each label length <= max_len.
+    - Stable and pattern-agnostic (no assumptions about underscores, dashes, etc.).
+    """
+    if not names:
+        return names
+    if len(names) == 1:
+        s = names[0]
+        if len(s) <= max_len:
+            return names
+        # head/tail split
+        head = max_len // 2 - 1
+        tail = max_len - head - 3
+        return [s[:head] + "..." + s[-tail:]]
+
+    # common prefix
+    pref = os.path.commonprefix(names)
+    # common suffix via reversed commonprefix
+    rev = [s[::-1] for s in names]
+    suff = os.path.commonprefix(rev)[::-1]
+    if len(pref) < min_common:
+        pref = ""
+    if len(suff) < min_common:
+        suff = ""
+
+    out = []
+    for s in names:
+        if len(s) <= max_len:
+            out.append(s); continue
+        if pref or suff:
+            keep_p = min(len(pref), max_len // 2)
+            keep_s = max(0, min(len(suff), max_len - keep_p - 3))
+            out.append(s[:keep_p] + "..." + s[len(s)-keep_s:])
+        else:
+            head = max_len // 2 - 1
+            tail = max_len - head - 3
+            out.append(s[:head] + "..." + s[-tail:])
+    return out
 
 def CV(values: np.ndarray, axis: int = 1, log_base: float = 2) -> np.ndarray:
     """Compute %CV from log-transformed values.
@@ -146,10 +188,11 @@ class ReportPlotter:
         self.adata = adata
         self.protein_labels = adata.var.get(protein_label_key, adata.var_names)
         self.protein_names = adata.var["GENE_NAMES"] #TODO option ? 
-        self.contrast_names = adata.uns.get("contrast_names", [f"C{i}" for i in range(adata.varm['log2fc'].shape[1])])
+        self.contrast_names = adata.uns.get("contrast_names", [])
 
         # Cache stats for fast access
-        self.log2fc = adata.varm["log2fc"]
+        self.log2fc = adata.varm["log2fc"] if "log2fc" in adata.varm else None
+
         # eBayes may be absent in pilot mode
         self.q_ebayes = (pd.DataFrame(adata.varm["q_ebayes"],
                                       columns=self.contrast_names,
@@ -161,6 +204,7 @@ class ReportPlotter:
                          if "p_ebayes" in adata.varm else None)
         # pilot mode flag (set by limma_pipeline)
         self.pilot_mode = bool(adata.uns.get("pilot_study_mode", False))
+        self._has_contrasts = bool(self.contrast_names) and (self.log2fc is not None)
 
         self.missingness = adata.uns.get("missingness", {})
         self.fasta_headers = adata.var['FASTA_HEADERS'].to_numpy()
@@ -175,7 +219,8 @@ class ReportPlotter:
             # combined IDs + metrics
             self._plot_IDs_and_metrics()
             # volcanoes
-            self._plot_volcano_plots()
+            if self._has_contrasts and (self.q_ebayes is not None):
+                self._plot_volcano_plots()
 
     def _plot_title_page(self):
         """Render a formatted title + intro + pipeline summary + package versions."""
@@ -200,6 +245,7 @@ class ReportPlotter:
         imputation  = preproc.get("imputation", {})
         de_method   = self.analysis_config.get("ebayes_method", "limma")
         input_layout = self.dataset_config.get("input_layout", "")
+        analysis_type = "Proteomics" if self.dataset_config.get("analysis_type", "") == "DIA" else "Phosphoproteomics" #TODO have to do this better evenutually, 1.8
         xlsx_export = os.path.basename(self.analysis_config.get('exports').get('path_table'))
         h5ad_export = os.path.basename(self.analysis_config.get('exports').get('path_h5ad'))
 
@@ -232,6 +278,12 @@ class ReportPlotter:
         fig.text(x0, y, "Input Layout: ",
                  ha="left", va="top", fontsize=12, weight="semibold")
         fig.text(x0 + 0.14, y, f"{input_layout}",
+                 ha="left", va="top", fontsize=12)
+        y -= line_height
+
+        fig.text(x0, y, "Analysis Type: ",
+                 ha="left", va="top", fontsize=12, weight="semibold")
+        fig.text(x0 + 0.14, y, f"{analysis_type}",
                  ha="left", va="top", fontsize=12)
         y -= line_height
 
@@ -342,10 +394,13 @@ class ReportPlotter:
         y -= line_height
 
         # Differential Expression
-        if self.pilot_mode:
+        if self.pilot_mode and not self._has_contrasts:
             fig.text(x0 + 0.02, y,
-                     f"- Pilot Study, LogFC only",
+                     f"- Pilot study: single-condition run, statistical testing skipped",
                      ha="left", va="top", fontsize=12)
+        elif self.pilot_mode:
+            fig.text(x0 + 0.02, y, f"- Pilot study: LogFC only", ha="left", va="top", fontsize=12)
+
         else:
             fig.text(x0 + 0.02, y,
                      f"- Differential expression: eBayes via {de_method}",
@@ -397,21 +452,29 @@ class ReportPlotter:
         # prepare data
         df_raw = pd.DataFrame(self.adata.layers['raw'], index=self.adata.obs_names, columns=self.adata.var_names)
         counts = df_raw.notna().sum(axis=1)
-        raw_conds = (self.adata.obs['CONDITION'].cat.categories if hasattr(self.adata.obs['CONDITION'], 'cat') else self.adata.obs['CONDITION'].unique())
-        conds = ['Total'] + list(raw_conds)
+        raw_conds = (self.adata.obs['CONDITION'].cat.categories
+                     if hasattr(self.adata.obs['CONDITION'], 'cat')
+                     else self.adata.obs['CONDITION'].unique())
+        # If only one condition, show Total-only violins
+        single_condition = (len(list(raw_conds)) == 1)
+        conds = ['Total'] if single_condition else (['Total'] + list(raw_conds))
+
         # color map
         color_map = get_color_map(labels=conds)
+
         # metrics
         mat_all = self.adata.X.T
         res_all = compute_metrics(mat_all, metrics=["CV","RMAD"])
         data_cv = [res_all["CV"]]
         data_rmad = [res_all["RMAD"]]
-        for cond in raw_conds:
-            mask = self.adata.obs['CONDITION'] == cond
-            mat = self.adata.X[mask.values,:].T
-            res = compute_metrics(mat, metrics=["CV","RMAD"])
-            data_cv.append(res["CV"])
-            data_rmad.append(res["RMAD"])
+        if not single_condition:
+            for cond in raw_conds:
+                mask = self.adata.obs['CONDITION'] == cond
+                mat = self.adata.X[mask.values,:].T
+                res = compute_metrics(mat, metrics=["CV","RMAD"])
+                data_cv.append(res["CV"])
+                data_rmad.append(res["RMAD"])
+
         # plotting
         fig = plt.figure(figsize=(12,12))
         fig.subplots_adjust(top=0.95, bottom=0.10, left=0.10, right=0.85)
@@ -420,14 +483,20 @@ class ReportPlotter:
         inner = GridSpecFromSubplotSpec(1,2,subplot_spec=outer[1],wspace=0.3)
         ax_rm = fig.add_subplot(inner[0])
         ax_cv = fig.add_subplot(inner[1])
+
         # barplot
-        sample_colors = [color_map[c] for c in self.adata.obs['CONDITION']]
+        sample_colors = [color_map.get(c, color_map['Total']) for c in self.adata.obs['CONDITION']]
         ax_bar.grid(axis='y', which='both', visible=True)
         ax_bar.bar(counts.index, counts.values, color=sample_colors)
         ax_bar.set_xticks(range(len(counts.index)))
-        ax_bar.set_xticklabels(counts.index,rotation=45, ha='right')
+
+        # short sample names
+        sample_names = list(counts.index)
+        sample_names_short = _shorten_labels_smart(sample_names, max_len=28, min_common=5)
+        ax_bar.set_xticklabels(sample_names_short, rotation=45, ha='right')
+
         ax_bar.set_ylabel('Number of IDs')
-        ax_bar.set_ylim([0, np.max(counts.values)+700]) #add some padding for annotation
+        ax_bar.set_ylim([0, np.max(counts.values)+850]) #add some padding for annotation
         ax_bar.set_title('Protein IDs per Sample')
         for i, val in enumerate(counts.values):
             ax_bar.text(i, val+50, str(int(val)),
@@ -469,9 +538,6 @@ class ReportPlotter:
 
     def _plot_volcano_plots(self):
         """Volcano plots (one per contrast). eBayes-only; skip in pilot mode."""
-
-        if (self.q_ebayes is None):
-            return
 
         sign_threshold = self.analysis_config.get("sign_threshold", 0.05)
         volcano_top_annotated = self.analysis_config.get("exports").get("volcano_top_annotated", 10)

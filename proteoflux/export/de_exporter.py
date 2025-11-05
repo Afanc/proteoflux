@@ -161,13 +161,12 @@ class DEExporter:
             max_missing_col = miss_ratios.max(axis=1).rename("MAX_MISSINGNESS")
 
         # Build base Summary
-        if log2fc is None:
-            raise AssertionError("Missing one of required varm matrices: log2fc")
+        has_contrasts = bool(self.contrasts) and (log2fc is not None)
 
-        log2fc_pref = log2fc.add_prefix("log2FC_")
+        log2fc_pref = log2fc.add_prefix("log2FC_") if has_contrasts else None
 
         pval_pref = qval_pref = None
-        if q_ebayes is not None and p_ebayes is not None:
+        if has_contrasts and (q_ebayes is not None) and (p_ebayes is not None):
             qval_pref = q_ebayes.add_prefix("QVALUE_")
             pval_pref = p_ebayes.add_prefix("PVALUE_")
 
@@ -175,10 +174,15 @@ class DEExporter:
         log2_int_cols = X.add_prefix("processed_log2_") if X is not None else None
         raw_int_cols  = raw.add_prefix("Raw_") if raw is not None else None
 
-        blocks = [meta_df, log2fc_pref]
+        # Always include metadata; include log2FC only if contrasts exist
+        blocks = [meta_df]
+        if log2fc_pref is not None:
+            blocks.append(log2fc_pref)
 
-        if qval_pref is not None: blocks.append(qval_pref)
-        if pval_pref is not None: blocks.append(pval_pref)
+        if qval_pref is not None:
+            blocks.append(qval_pref)
+        if pval_pref is not None:
+            blocks.append(pval_pref)
 
         if miss_renamed is not None:
             blocks.append(miss_renamed)
