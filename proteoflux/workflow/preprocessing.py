@@ -57,6 +57,7 @@ class Preprocessor:
         self.filter_qvalue = self.filtering.get("qvalue", 0.01)
         self.filter_pep = self.filtering.get("pep", 0.2)
         self.filter_num_precursors = self.filtering.get("min_precursors", 1)
+        self.min_linear_intensity = self.filtering.get("min_linear_intensity", None)
         self.pep_direction = (self.filtering.get("pep_direction", "lower") or "lower").lower()
         if self.pep_direction not in {"lower", "higher"}:
             raise ValueError(f"Invalid pep_direction='{self.pep_direction}'. Use 'lower' or 'higher'.")
@@ -185,6 +186,10 @@ class Preprocessor:
 
             x = self._filter_by_num_precursors(x)
             self.intermediate_results.add_df(f"filtered_final/PREC/{tag}", x)
+
+            x = self._censor_low_val(x)
+            self.intermediate_results.add_df(f"filtered_final/PREC/{tag}", x)
+
             return x
 
         log_info("Filtering (main)")
@@ -347,6 +352,19 @@ class Preprocessor:
         log_info(f"Precursors filtering: kept={len(df_kept)} dropped={len(df_dropped)} (thr={self.filter_num_precursors}).")
 
         return df_kept
+
+    def _censor_low_val(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Set very low intensity values to NA."""
+        if self.min_linear_intensity is not None:
+                thr = self.min_linear_intensity
+                # count how many will be censored
+                will_censor = df.select((pl.col("SIGNAL") < thr) & pl.col("SIGNAL").is_not_null()).to_series().sum()
+                df_kept = len(df) - will_censor
+                df = df.with_columns(
+                    pl.when(pl.col("SIGNAL") < thr).then(None).otherwise(pl.col("SIGNAL")).alias("SIGNAL")
+                )
+                log_info(f"Low-intensity censoring: kept={df_kept}, dropped={int(will_censor)} (thr={thr})).")
+        return df
 
     def _get_protein_metadata(self) -> None:
         df_full = self.intermediate_results.dfs["filtered_final/PREC"]  # long format, post filter
