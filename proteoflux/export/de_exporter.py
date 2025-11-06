@@ -56,20 +56,33 @@ class DEExporter:
             index=pep["rows"],
         )
 
+        # Pull protein annotations and join onto peptide meta
+        prot_cols = [c for c in ["FASTA_HEADERS", "GENE_NAMES", "PROTEIN_DESCRIPTIONS"] if c in self.adata.var.columns]
+        if prot_cols:
+            prot_annot = self.adata.var[prot_cols].copy()
+            prot_annot.index.name = "PROTEIN_UNIPROT_AC"
+            meta = meta.merge(
+                prot_annot,
+                how="left",
+                left_on="PROTEIN_UNIPROT_AC",
+                right_index=True,
+                copy=False,
+            )
+
         raw_df = pd.DataFrame(pep["raw"], index=pep["rows"], columns=pep["cols"])
         centered_df = pd.DataFrame(pep["centered"], index=pep["rows"], columns=pep["cols"])
 
         # PEPTIDES (raw): drop PEPTIDE_ID and reorder to [PEPTIDE_SEQ, PROTEIN_INDEX, samples...]
         raw_df = pd.concat([meta, raw_df], axis=1)
         raw_df = raw_df.drop(columns=["PEPTIDE_ID"], errors="ignore")
-        leading = [c for c in ["PEPTIDE_SEQ", "PROTEIN_INDEX"] if c in raw_df.columns]
+        leading = [c for c in ["PEPTIDE_SEQ", "PROTEIN_UNIPROT_AC", "FASTA_HEADERS", "GENE_NAMES"] if c in raw_df.columns]
         others = [c for c in raw_df.columns if c not in leading]
         raw_df = raw_df[leading + others]
 
-        # PEPTIDES (centered): keep same leading order (even if we don't export for phospho)
+        # PEPTIDES (centered): keep same leading order
         centered_df = pd.concat([meta, centered_df], axis=1)
         centered_df = centered_df.drop(columns=["PEPTIDE_ID"], errors="ignore")
-        leading_c = [c for c in ["PEPTIDE_SEQ", "PROTEIN_INDEX"] if c in centered_df.columns]
+        leading_c = [c for c in ["PEPTIDE_SEQ", "PROTEIN_UNIPROT_AC", "FASTA_HEADERS", "GENE_NAMES"] if c in centered_df.columns]
         others_c = [c for c in centered_df.columns if c not in leading_c]
         centered_df = centered_df[leading_c + others_c]
 
