@@ -560,13 +560,9 @@ class ReportPlotter:
         the precomputed linkages and orders stored in `adata.uns`.
         """
         # --- 1) pick the matrix (samples × features) and convert to DataFrame (features × samples)
-        if tag == "centered" and "centered" in self.adata.layers:
-            M = self.adata.layers["centered"]
-            title = "Hierarchical clustering (deviations from mean)"
-        else:
-            X = self.adata.X
-            M = X.toarray() if hasattr(X, "toarray") else X
-            title = "Hierarchical clustering (processed intensities)"
+        X = self.adata.X
+        M = X.toarray() if hasattr(X, "toarray") else X
+        title = "Hierarchical clustering (processed intensities)"
 
         df = pd.DataFrame(M.T, index=self.adata.var_names, columns=self.adata.obs_names)
 
@@ -593,12 +589,7 @@ class ReportPlotter:
         # --- 4) determine heatmap scale (diverging if centered spans +/-)
         vmin = float(np.nanmin(df.values))
         vmax = float(np.nanmax(df.values))
-        if (vmin < 0) and (vmax > 0):
-            # symmetric diverging scale around 0
-            a = max(abs(vmin), abs(vmax))
-            vmin, vmax, cmap = -a, a, "RdBu_r"
-        else:
-            cmap = "viridis"
+        cmap = "viridis"
 
         # --- 5) layout: top dendrogram, left dendrogram, heatmap
         fig = plt.figure(figsize=(10.5, 9.0))
@@ -636,7 +627,7 @@ class ReportPlotter:
         ax_heat.set_yticks([])
 
         # colorbar
-        cbar = fig.colorbar(im, ax=ax_heat, fraction=0.046, pad=0.02)
+        cbar = fig.colorbar(im, ax=[ax_heat, ax_dend_top], fraction=0.046, shrink=0.5, pad=0.02)
         cbar.ax.set_ylabel("Value", rotation=90)
 
         self.pdf.savefig(fig)

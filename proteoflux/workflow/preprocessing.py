@@ -654,13 +654,22 @@ class Preprocessor:
         n_valid  = is_valid.sum().alias("_NVALID")
 
         # 2) Pre-aggregate per (protein, ion, sample) with a null-preserving guard:
+        #print(df[protein_col, ion_col, values_col])
         df_ion_agg = (
             df
             .group_by([protein_col, ion_col, sample_col], maintain_order=True)
             .agg([
-                pl.col(values_col).first().alias(values_col),
-                n_valid
+                pl.col(values_col)
+                  .filter(pl.col(values_col) > 0)
+                  .sum()
+                  .alias(values_col),
+                # recompute n_valid on the same criterion
+                (pl.col(values_col).is_not_null() & (pl.col(values_col) > 0)).sum().alias("_NVALID"),
             ])
+                        #.agg([
+            #    pl.col(values_col).first().alias(values_col),
+            #    n_valid
+            #])
             .with_columns(
                 pl.when(pl.col("_NVALID") == 0)
                   .then(pl.lit(None))
@@ -706,11 +715,39 @@ class Preprocessor:
             prot_df = prot_df.reset_index()
         prot_df = prot_df.set_index(protein_col).astype(float)  # linear scale
 
+        prot_df = prot_df.replace(0.0, np.nan) #directlfq will output 0 instead of NA
+
+        ## --- DEBUG: where does DirectLFQ emit zeros? (pre-mask) ---
+        #total_zeros = int((prot_df.values == 0).sum())
+        #if total_zeros:
+        #    zloc = np.argwhere(prot_df.values == 0)  # list of [row_i, col_j]
+        #    examples = [(prot_df.index[i], prot_df.columns[j]) for i, j in zloc[:5]]
+        #    log_info(f"DLFQ zeros (pre-mask): total={total_zeros}, examples={examples}")
+
+        #    # pick the first example and inspect its ion evidence in the log2 peptide matrix (pw)
+        #    p0, s0 = examples[0]
+        #    ions_p = pw.loc[p0] if p0 in pw.index.get_level_values(0) else None
+        #    if ions_p is not None:
+        #        n_ions = ions_p.shape[0]
+        #        fin_in_sample = int(np.isfinite(ions_p[s0]).sum())
+        #        fin_any = int(np.isfinite(ions_p.values).sum())
+        #        log_info(f"Trace {p0}/{s0}: ions={n_ions}, finite_in_sample={fin_in_sample}, finite_total={fin_any}")
+        #        some_ions = list(ions_p.index[np.isfinite(ions_p[s0])][:5])
+        #        log_info(f"Ions with signal in {s0} (log2) examples: {some_ions}")
+        ## --- DEBUG: where does DirectLFQ emit zeros? (pre-mask) ---
+
         # 7) Apply the mask: where no ion existed in a run, force NaN (not 0)
         mask_pd = has_valid.to_pandas().set_index(protein_col)
         # align mask rows/cols to prot_df
         mask_pd = mask_pd.reindex(index=prot_df.index, columns=prot_df.columns, fill_value=False)
         prot_df = prot_df.mask(~mask_pd)  # False → NaN
+
+        #DEBUG
+        #mask_pd = has_valid.to_pandas().set_index(protein_col)  # pandas True/False
+        #if total_zeros:
+        #    p0, s0 = examples[0]
+        #    hv = bool(mask_pd.loc[p0, s0]) if (p0 in mask_pd.index and s0 in mask_pd.columns) else False
+        #    log_info(f"Mask check {p0}/{s0}: has_valid={hv}")
 
         # 8) Back to Polars; preserve sample order; turn NaN -> null
         out = pl.DataFrame(prot_df.reset_index())
@@ -720,6 +757,38 @@ class Preprocessor:
             pl.when(pl.col(c).is_nan()).then(None).otherwise(pl.col(c)).alias(c)
             for c in out.columns if c != protein_col
         ])
+
+        ## --- DEBUG: zeros that survived to final OUT (post-mask) ---
+        #z_post = int(out.select([
+        #    (pl.col(c) == 0).sum().alias(c)
+        #    for c, dt in zip(out.columns, out.dtypes)
+        #    if c != protein_col and dt in pl.NUMERIC_DTYPES
+        #]).to_numpy().sum())
+        #if z_post:
+        #    # find up to 5 (protein, sample) locations with zero in OUT
+        #    sample_cols = [c for c, dt in zip(out.columns, out.dtypes) if c != protein_col and dt in pl.NUMERIC_DTYPES]
+        #    z_rows = out.filter(pl.any_horizontal([pl.col(c) == 0 for c in sample_cols])) \
+        #                .select(protein_col, *sample_cols).head(5).to_pandas()
+        #    log_info(f"DLFQ zeros (post-mask): total={z_post}, head:\n{z_rows}")
+
+        #out = out.with_columns([
+        #    #pl.when(pl.col(c).cast(pl.Float64, strict=False) <= self.min_linear_intensity)
+        #    pl.when(pl.col(c).cast(pl.Float64, strict=False) == 0)
+        #      .then(None)
+        #      .otherwise(pl.col(c))
+        #      .alias(c)
+        #    for c, dt in zip(out.columns, out.dtypes)
+        #    if c != protein_col and dt in pl.NUMERIC_DTYPES
+        #])
+
+        # count zeros only in numeric columns, excluding the protein id col
+        log_info(f"Zeros after pivot: {int(out.select([ (pl.col(c) == 0).sum().alias(c)
+                                                       for c, dt in zip(out.columns, out.dtypes)
+                                                       if c != protein_col and dt in pl.NUMERIC_DTYPES
+                                                      ]).to_numpy().sum())}")
+
+
+
         return out
 
     def _build_peptide_tables(self) -> None:

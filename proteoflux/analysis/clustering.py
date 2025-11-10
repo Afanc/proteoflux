@@ -67,6 +67,10 @@ def run_clustering(
     `feature_selection`. Sample-level results are written back to the original `adata`.
     """
 
+    # Small-n guard: UMAP's spectral init fails when n_obs <= 3 (eigsh requires k < N).
+    n_obs = adata.n_obs
+    small_n = n_obs <= 3
+
     # choose feature subset (indices on original adata)
     feat_idx = _pick_feature_indices(adata, layer, max_features, feature_selection, random_seed)
 
@@ -81,13 +85,23 @@ def run_clustering(
     data = A.layers[layer] if layer is not None else A.X  # samples × features
 
     # PCA
-    sc.tl.pca(A, n_comps=n_pcs)
+    # cap n_pcs for tiny sample counts
+    n_comps = max(1, min(n_pcs, A.n_obs - 1))
+    sc.tl.pca(A, n_comps=n_comps)
+
     adata.uns['pca'] = A.uns.get('pca', {})
 
     # UMAP
     if 'neighbors' not in A.uns:
-        sc.pp.neighbors(A, n_pcs=n_pcs)
-    sc.tl.umap(A, **(umap_kwargs or {}))
+        # choose a sensible n_neighbors for small n; scanpy will clamp internally, but be explicit
+        nn = max(2, min(15, A.n_obs - 1))
+        sc.pp.neighbors(A, n_pcs=n_comps, n_neighbors=nn)
+    # skip UMAP for tiny cohorts; otherwise standard call
+    if not small_n:
+        sc.tl.umap(A, **(umap_kwargs or {}))
+    else:
+        # annotate why we skipped, so it shows up in logs/uns for provenance
+        A.uns['umap'] = {"skipped_reason": "n_obs<=3"}
 
     # Hierarchical clustering on samples (using PCA space)
     pca_matrix = A.obsm['X_pca'][:, :n_pcs]  # shape: n_samples × n_pcs

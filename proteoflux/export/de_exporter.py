@@ -323,7 +323,7 @@ class DEExporter:
         """Write a compact .h5ad with categorical metadata and summarized preprocessing config."""
         for col in ["CONDITION", "GENE_NAMES", "PROTEIN_WEIGHT", "PROTEIN_DESCRIPTIONS",
                     "FASTA_HEADERS", "ASSAY", "PARENT_PEPTIDE_ID", "PARENT_PROTEIN",
-                    "CONDITION_ORIG"]:
+                    "CONDITION_ORIG", "ALIGN_KEY"]:
             if col in self.adata.obs.columns:
                 self.adata.obs[col] = self.adata.obs[col].astype("category")
             if col in self.adata.var.columns:
