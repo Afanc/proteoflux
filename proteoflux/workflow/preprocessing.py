@@ -454,18 +454,30 @@ class Preprocessor:
             )
             base_meta = base_meta.drop("PRECURSORS_EXP", strict=False).join(prec_df, on="INDEX", how="left")
 
-        # Numeric casts (same as before)
+        # --- IBAQ: compute mean across runs (handle ';'-separated per-row values) ---
+        if "IBAQ" in df_full.columns:
+            ibaq_mean = (
+                df_full
+                .select(["INDEX", "IBAQ"])
+                .with_columns(
+                    pl.col("IBAQ")
+                      .cast(pl.Utf8, strict=False)
+                      .str.split(";")
+                      .list.eval(pl.element().cast(pl.Float64, strict=False))
+                      .list.mean()
+                      .alias("IBAQ")
+                )
+                .group_by("INDEX")
+                .agg(pl.col("IBAQ").mean().alias("IBAQ"))  # average across samples/runs
+            )
+            base_meta = (
+                base_meta.drop("IBAQ", strict=False)
+                         .join(ibaq_mean, on="INDEX", how="left")
+            )
+
+        # Numeric casts
         casts = []
         if "IBAQ" in base_meta.columns:
-            # Normalize: keep first value before ';', trim, empty -> null, then cast
-            base_meta = base_meta.with_columns(
-                pl.col("IBAQ")
-                  .cast(pl.Utf8, strict=False)
-                  .str.split(";").list.first()
-                  .str.strip_chars()
-                  .replace("", None)
-                  .alias("IBAQ")
-            )
             casts.append(pl.col("IBAQ").cast(pl.Float64, strict=False))
         if "PROTEIN_WEIGHT" in base_meta.columns:
             casts.append(pl.col("PROTEIN_WEIGHT").cast(pl.Float64, strict=False))
@@ -980,6 +992,7 @@ class Preprocessor:
         sc_pivot      = _align_to_intensity(sc_pivot)
         prec_pivot    = _align_to_intensity(prec_pivot)
         locprob_pivot = _align_to_intensity(locprob_pivot)
+        ibaq_pivot    = _align_to_intensity(ibaq_pivot)
 
         # --- Optional phospho localization filtering (row-wise, after alignment) ---
         filtered_intensity = intensity_pivot
@@ -1014,6 +1027,7 @@ class Preprocessor:
                 prec_pivot         = _row_filter(prec_pivot)
                 sc_pivot           = _row_filter(sc_pivot)
                 locprob_pivot      = _row_filter(locprob_pivot)
+                ibaq_pivot         = _row_filter(ibaq_pivot)
 
         self.intermediate_results.set_columns_and_index(filtered_intensity)
         self.intermediate_results.add_df("raw_df", filtered_intensity)

@@ -145,7 +145,7 @@ class DEExporter:
         p_raw = self._get_dataframe("p_raw")
 
         # Metadata (rename PRECURSORS_EXP → NUM_PRECURSORS; add NUM_UNIQUE_PEPTIDES placeholder if proteomics)
-        meta_cols = [c for c in ["GENE_NAMES", "FASTA_HEADERS", "PROTEIN_DESCRIPTIONS", "IBAQ", "PRECURSORS_EXP", "PARENT_PROTEIN"] if c in ad.var.columns]
+        meta_cols = [c for c in ["GENE_NAMES", "FASTA_HEADERS", "PROTEIN_DESCRIPTIONS", "PRECURSORS_EXP", "PARENT_PROTEIN"] if c in ad.var.columns]
         meta_df = ad.var[meta_cols].copy() if meta_cols else pd.DataFrame(index=ad.var.index)
 
         if "PRECURSORS_EXP" in meta_df.columns:
