@@ -12,6 +12,7 @@ class PreprocessResults:
     pep: Optional[pl.DataFrame]              # <- optional
     locprob: Optional[pl.DataFrame]          # <- optional
     spectral_counts: Optional[pl.DataFrame]  # <- optional
+    ibaq: Optional[pl.DataFrame]             # <- optional
     condition_pivot: pl.DataFrame
     protein_meta: pl.DataFrame
     peptides_wide: Optional[pl.DataFrame]    # <- optional

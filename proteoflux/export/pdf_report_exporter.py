@@ -248,7 +248,7 @@ class ReportPlotter:
         fig.subplots_adjust(
             left   = x0,
             right  = 0.96,
-            top    = 0.96,
+            top    = 0.98,
             bottom = 0.04
         )
 
@@ -274,7 +274,7 @@ class ReportPlotter:
         if title:
             fig.text(0.5, y, title,
                      ha="center", va="top", fontsize=20, weight="bold")
-            y -= 1.5 * line_height
+            y -= 1.3 * line_height
 
         # datetime
         timestamp = datetime.now().strftime("%Y-%m-%d")
@@ -362,6 +362,14 @@ class ReportPlotter:
                      ha="left", va="top", fontsize=11)
             y -= line_height
 
+        if "min_linear_intensity" in filtering:
+            removed_censor = flt_meta.get("censor").get("number_dropped", 0)
+            n_r = f"{removed_censor}".replace(",", "'")
+            fig.text(x0 + 0.06, y,
+                     f"- Left Censoring ≤ {filtering['min_linear_intensity']}: {n_r} PSM removed",
+                     ha="left", va="top", fontsize=11)
+            y -= line_height
+
         # Quantification method
         fig.text(x0 + 0.02, y, f"- Quantification: {quantification_method}",
                  ha="left", va="top", fontsize=12)
@@ -446,7 +454,7 @@ class ReportPlotter:
         for name, ver in pkgs.items():
             fig.text(x0 + 0.02, y, f"- {name}: {ver}",
                      ha="left", va="top", fontsize=12)
-            y -= 0.8*line_height
+            y -= 0.6*line_height
 
         y -= line_height
 

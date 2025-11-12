@@ -164,14 +164,30 @@ class DEExporter:
         id_qval = pd.DataFrame(ad.layers.get("qvalue"), index=ad.obs_names, columns=ad.var_names).T if "qvalue" in ad.layers else None
         id_pep  = pd.DataFrame(ad.layers.get("pep"),    index=ad.obs_names, columns=ad.var_names).T if "pep"    in ad.layers else None
         spectral_counts = pd.DataFrame(ad.layers.get("spectral_counts"), index=ad.obs_names, columns=ad.var_names).T if "spectral_counts" in ad.layers else None
+        ibaq = pd.DataFrame(ad.layers.get("ibaq"), index=ad.obs_names, columns=ad.var_names).T if "ibaq" in ad.layers else None
 
-        # Missingness per group
-        miss_ratios = ad.uns.get("missingness", None)
-        miss_renamed = None
-        max_missing_col = None
-        if miss_ratios is not None:
-            miss_renamed = miss_ratios.add_prefix("Missingness_")
-            max_missing_col = miss_ratios.max(axis=1).rename("MAX_MISSINGNESS")
+        # Observed counts per condition
+        # We compute: for each condition, count of non-NaN entries per feature.
+        observed_df = None
+        max_observed_col = None
+        # 1) choose pre-imputation matrix (samples × features) WITHOUT clobbering the `raw` DataFrame
+        raw_layer = ad.layers.get("raw", ad.X)
+        raw_mat = raw_layer.A if hasattr(raw_layer, "A") else raw_layer
+
+        # 2) group by condition and count non-NaNs per feature
+        conds = ad.obs["CONDITION"].astype(str).values
+        cond_levels = sorted(pd.unique(conds).tolist())
+        cols = {}
+        for c in cond_levels:
+            m = (conds == c)
+            if np.any(m):
+                cnt = np.sum(~np.isnan(raw_mat[m, :]), axis=0).astype(int)
+            else:
+                cnt = np.zeros(raw_mat.shape[1], dtype=int)
+            cols[f"Observed_{c}"] = pd.Series(cnt, index=ad.var_names)
+        if cols:
+            observed_df = pd.DataFrame(cols, index=ad.var_names)
+            max_observed_col = observed_df.max(axis=1).rename("MAX_OBSERVED")
 
         # Build base Summary
         has_contrasts = bool(self.contrasts) and (log2fc is not None)
@@ -184,8 +200,8 @@ class DEExporter:
             pval_pref = p_ebayes.add_prefix("PVALUE_")
 
         # Processed & Raw intensities integrated
-        log2_int_cols = X.add_prefix("processed_log2_") if X is not None else None
-        raw_int_cols  = raw.add_prefix("Raw_") if raw is not None else None
+        log2_int_cols = X.add_prefix("Processed_log2_Intensities") if X is not None else None
+        raw_int_cols  = raw.add_prefix("Raw_Intensities") if raw is not None else None
 
         # Always include metadata; include log2FC only if contrasts exist
         blocks = [meta_df]
@@ -197,10 +213,10 @@ class DEExporter:
         if pval_pref is not None:
             blocks.append(pval_pref)
 
-        if miss_renamed is not None:
-            blocks.append(miss_renamed)
-            if max_missing_col is not None:
-                blocks.append(max_missing_col)
+        if observed_df is not None:
+            blocks.append(observed_df)
+            if max_observed_col is not None:
+                blocks.append(max_observed_col)
 
         if log2_int_cols is not None:
             blocks.append(log2_int_cols)
@@ -283,11 +299,17 @@ class DEExporter:
             else:
                 summary_df.insert(0, "NUM_UNIQUE_PEPTIDES", mapped)
 
+        #ibaq_df = None
+        #if "ibaq" in ad.layers:
+        #    ibaq_df = pd.DataFrame(ad.layers["ibaq"], index=ad.var_names, columns=ad.obs_names).T
+        #    ibaq_df.index.name = "UNIPROT_AC"
+        #    ibaq_df = ibaq_df.add_prefix("IBAQ_")
+
         # Peptide tables
         pep_wide_df, pep_centered_df = self._peptide_frames()
 
         # proper indexing
-        for df_ in (id_qval, id_pep, spectral_counts):
+        for df_ in (id_qval, id_pep, spectral_counts, ibaq):
             if df_ is not None:
                 df_.index.name = idx_name
 
@@ -298,7 +320,8 @@ class DEExporter:
             "- Summary: metadata, Log2FC, intensities, Q/P-values, missingness.\n"
             "- Identification Qvalue: PSM-level q-values (from search engine), if available.\n"
             "- Identification PEP: Posterior error probability (from search engine), if available.\n"
-            "- Spectral Counts: mean run-evidence counts per (protein × sample), if available.\n"
+            "- Spectral Counts: mean run-evidence counts per (protein x sample), if available.\n"
+            "- IBAQ Values: Intensity based absolute quantification per (protein x sample), if available"
             "- Peptides (raw): wide peptide-by-sample matrix.\n"
         )
 
@@ -308,6 +331,7 @@ class DEExporter:
             "Identification Qvalue": id_qval if id_qval is not None else None,
             "Identification PEP": id_pep if id_pep is not None else None,
             "Spectral Counts": spectral_counts if spectral_counts is not None else None,
+            "IBAQ Values": ibaq if ibaq is not None else None,
             "Peptides (raw)": (None if (str(preproc.get("analysis_type", "DIA")).lower()=="phospho") else pep_wide_df),
         }
 

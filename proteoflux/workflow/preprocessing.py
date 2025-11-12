@@ -126,6 +126,7 @@ class Preprocessor:
             pep=self.intermediate_results.dfs.get("pep"),
             locprob=self.intermediate_results.dfs.get("locprob"),
             spectral_counts=self.intermediate_results.dfs.get("spectral_counts"),
+            ibaq=self.intermediate_results.dfs.get("ibaq"),
             condition_pivot=self.intermediate_results.dfs.get("condition_pivot"),
             protein_meta=self.intermediate_results.dfs.get("protein_metadata"),
             peptides_wide=self.intermediate_results.dfs.get("peptides_wide"),
@@ -364,6 +365,8 @@ class Preprocessor:
         # precompute mask once
         mask = (pl.col("SIGNAL") < thr) & pl.col("SIGNAL").is_not_null()
 
+        raw_vals_np = df["SIGNAL"].to_numpy()
+
         # count true values directly from the boolean column
         will_censor = int(df.select(mask.sum()).item())
         df_kept = len(df) - will_censor
@@ -378,7 +381,12 @@ class Preprocessor:
         self.intermediate_results.add_metadata(
             "filtering",
             "meta_censor",
-            {"threshold": thr, "dropped": will_censor, "kept": df_kept},
+            {
+                "threshold": thr,
+                "number_dropped": will_censor,
+                "number_kept": df_kept,
+                "raw_values": raw_vals_np,
+            },
         )
 
         return df
@@ -927,7 +935,19 @@ class Preprocessor:
                 prec = self._pivot_df(_df, "FILENAME", "INDEX", "PRECURSORS_EXP", "mean")
             if "LOC_PROB" in _df.columns:
                 lp = self._pivot_df(_df, "FILENAME", "INDEX", "LOC_PROB", "max")
-            return {"intensity": intensity, "qv": qv, "pep": pp, "sc": sc, "prec": prec, "lp": lp}
+            ibaq = None
+            if "IBAQ" in _df.columns and "INDEX" in _df.columns:
+                # Explode INDEX on ';' for proteins with multiple accessions
+                _df = _df.with_columns(
+                    pl.col("IBAQ")
+                      .cast(pl.Utf8, strict=False)
+                      .str.split(";")
+                      .list.eval(pl.element().cast(pl.Float64, strict=False))
+                      .list.mean()
+                      .alias("IBAQ")
+                )
+                ibaq = self._pivot_df(_df, "FILENAME", "INDEX", "IBAQ", "mean")
+            return {"intensity": intensity, "qv": qv, "pep": pp, "sc": sc, "prec": prec, "lp": lp, "ibaq": ibaq}
 
         main_piv = _pivot_block(df_main)
 
@@ -937,6 +957,7 @@ class Preprocessor:
         prec_pivot      = main_piv["prec"]
         sc_pivot        = main_piv["sc"]
         locprob_pivot   = main_piv["lp"]
+        ibaq_pivot      = main_piv["ibaq"]
 
         # Peptide drill-down (optional)
         pep_tables = self._build_peptide_tables()
@@ -1001,6 +1022,7 @@ class Preprocessor:
         self.intermediate_results.add_df("pep", pep_pivot)
         self.intermediate_results.add_df("locprob", locprob_pivot)
         self.intermediate_results.add_df("spectral_counts", sc_pivot)
+        self.intermediate_results.add_df("ibaq", ibaq_pivot)
         self.intermediate_results.dfs["peptides_wide"]     = raw_pep_pivot
         self.intermediate_results.dfs["peptides_centered"] = centered_pep_pivot
 

@@ -306,6 +306,7 @@ class Dataset:
         pep_mat = self.preprocessed_data.pep
         locprob_mat = getattr(self.preprocessed_data, "locprob", None)
         sc_mat = self.preprocessed_data.spectral_counts
+        ibaq_mat = self.preprocessed_data.ibaq
         condition_df = self.preprocessed_data.condition_pivot.to_pandas().set_index("Sample")
 
         pep_wide_mat  = self.preprocessed_data.peptides_wide
@@ -327,6 +328,7 @@ class Dataset:
         pep, _        = _to_np(pep_mat)
         locprob, _    = _to_np(locprob_mat)
         sc, _         = _to_np(sc_mat)
+        ibaq, _       = _to_np(ibaq_mat)
         lognorm, _    = _to_np(lognorm_mat)
         normalized, _ = _to_np(normalized_mat)
         raw, _        = _to_np(filtered_mat)
@@ -358,6 +360,8 @@ class Dataset:
             self.adata.layers["locprob"] = locprob.T
         if sc is not None:
             self.adata.layers["spectral_counts"] = sc.T
+        if ibaq is not None:
+            self.adata.layers["ibaq"] = ibaq.T
 
         # Covariate (centered, imputed) - only if present
         if centered_cov_mat is not None:
@@ -368,6 +372,7 @@ class Dataset:
             qval_cov_mat        = getattr(self.preprocessed_data, "qvalues_covariate", None)
             pep_cov_mat         = getattr(self.preprocessed_data, "pep_covariate", None)
             sc_cov_mat          = getattr(self.preprocessed_data, "spectral_counts_covariate", None)
+            ibaq_cov_mat        = getattr(self.preprocessed_data, "ibaq_covariate", None)
 
             filtered_cov_np, _ = _to_np(filtered_cov_mat)
             lognorm_cov_np, _ = _to_np(lognorm_cov_mat)
@@ -377,6 +382,7 @@ class Dataset:
             qval_cov_np, _ = _to_np(qval_cov_mat)
             pep_cov_np, _ = _to_np(pep_cov_mat)
             sc_cov_np, _ = _to_np(sc_cov_mat)
+            ibaq_cov_np, _ = _to_np(ibaq_cov_mat)
 
             self.adata.layers["raw_covariate"] = filtered_cov_np.T
             self.adata.layers["lognorm_covariate"] = lognorm_cov_np.T
@@ -386,6 +392,7 @@ class Dataset:
             self.adata.layers["qval_covariate"] = qval_cov_np.T
             self.adata.layers["pep_covariate"] = pep_cov_np.T
             self.adata.layers["sc_covariate"] = sc_cov_np.T
+            self.adata.layers["ibaq_covariate"] = ibaq_cov_np.T
 
         self.adata.uns["preprocessing"] = {
             "input_layout": self.input_layout,
@@ -395,6 +402,7 @@ class Dataset:
                 "qvalue":  self.preprocessed_data.meta_qvalue,
                 "pep":     self.preprocessed_data.meta_pep,
                 "prec":     self.preprocessed_data.meta_prec,
+                "censor":   self.preprocessed_data.meta_censor,
             },
             "quantification_method": self.preprocessor.pivot_signal_method,
             "normalization": self.preprocessor.normalization,
