@@ -136,6 +136,7 @@ class DEExporter:
         ad = self.adata
         preproc = ad.uns.get("preprocessing", {})
         analysis_type = str(preproc.get("analysis_type", "DIA")).lower()
+        is_phospho = analysis_type == "phospho"
 
         # Core statistics
         log2fc = self._get_dataframe("log2fc")
@@ -164,7 +165,10 @@ class DEExporter:
         id_qval = pd.DataFrame(ad.layers.get("qvalue"), index=ad.obs_names, columns=ad.var_names).T if "qvalue" in ad.layers else None
         id_pep  = pd.DataFrame(ad.layers.get("pep"),    index=ad.obs_names, columns=ad.var_names).T if "pep"    in ad.layers else None
         spectral_counts = pd.DataFrame(ad.layers.get("spectral_counts"), index=ad.obs_names, columns=ad.var_names).T if "spectral_counts" in ad.layers else None
-        ibaq = pd.DataFrame(ad.layers.get("ibaq"), index=ad.obs_names, columns=ad.var_names).T if "ibaq" in ad.layers else None
+
+        ibaq = None
+        if not is_phospho and "ibaq" in ad.layers:
+            ibaq = pd.DataFrame(ad.layers.get("ibaq"), index=ad.obs_names, columns=ad.var_names).T
 
         # Observed counts per condition
         # We compute: for each condition, count of non-NaN entries per feature.
@@ -235,7 +239,6 @@ class DEExporter:
             has_ft_cfg = False
 
         has_cov_layers = ("processed_covariate" in ad.layers) or ("raw_covariate" in ad.layers)
-        is_phospho = analysis_type == "phospho"
 
         if is_phospho:
             # Add covariate-part if present
@@ -298,12 +301,6 @@ class DEExporter:
                 summary_df["NUM_UNIQUE_PEPTIDES"] = mapped
             else:
                 summary_df.insert(0, "NUM_UNIQUE_PEPTIDES", mapped)
-
-        #ibaq_df = None
-        #if "ibaq" in ad.layers:
-        #    ibaq_df = pd.DataFrame(ad.layers["ibaq"], index=ad.var_names, columns=ad.obs_names).T
-        #    ibaq_df.index.name = "UNIPROT_AC"
-        #    ibaq_df = ibaq_df.add_prefix("IBAQ_")
 
         # Peptide tables
         pep_wide_df, pep_centered_df = self._peptide_frames()

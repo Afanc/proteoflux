@@ -144,6 +144,7 @@ class Preprocessor:
             qvalues_covariate=self.intermediate_results.dfs.get("qvalues_covariate"),
             pep_covariate=self.intermediate_results.dfs.get("pep_covariate"),
             spectral_counts_covariate=self.intermediate_results.dfs.get("spectral_counts_covariate"),
+            ibaq_covariate=self.intermediate_results.dfs.get("ibaq_covariate"),
         )
 
     @log_time("Filtering")
@@ -1065,6 +1066,16 @@ class Preprocessor:
                         return None
                     # Attach the parent key to covariate rows and drop ones without mapping
                     long_with_key = frame.join(cov_key_map, on="INDEX", how="left").drop_nulls([key_col])
+                    # IBAQ: mean of each protein
+                    if value_col == "IBAQ":
+                        long_with_key = long_with_key.with_columns(
+                            pl.col("IBAQ")
+                              .cast(pl.Utf8, strict=False)
+                              .str.split(";")
+                              .list.eval(pl.element().cast(pl.Float64, strict=False))
+                              .list.mean()
+                              .alias("IBAQ")
+                        )
 
                     # Branch: DirectLFQ vs. simple aggregation
                     #if self.pivot_signal_method.lower() == "directlfq":
@@ -1102,7 +1113,7 @@ class Preprocessor:
                 # 2) yeah this is confusing. like we want protein level info but peptide level indexed, we have to clarify this at some point, make it with the config update. see point 1)
                 cov_prec_by_key = _pivot_cov_by_key(df_cov, "PRECURSORS_EXP", "max")
                 cov_sc_by_key = _pivot_cov_by_key(df_cov, "SPECTRAL_COUNTS", "max") if "SPECTRAL_COUNTS" in df_cov.columns else None
-
+                cov_ibaq_by_key = _pivot_cov_by_key(df_cov, "IBAQ", "mean") if "IBAQ" in df_cov.columns else None
                 # 5) broadcast to main rows: INDEX -> key, then join the covariate-by-key row
                 order_idx = filtered_intensity.select("INDEX")
                 main_with_key = order_idx.join(main_key_map, on="INDEX", how="left")
@@ -1119,6 +1130,7 @@ class Preprocessor:
                 cov_pep = _broadcast(cov_pep_by_key)
                 cov_prec = _broadcast(cov_prec_by_key)
                 cov_sc = _broadcast(cov_sc_by_key)
+                cov_ibaq = _broadcast(cov_ibaq_by_key)
 
                 # 6a) Store covariate key
                 self.intermediate_results.add_df(
@@ -1133,6 +1145,7 @@ class Preprocessor:
                 self.intermediate_results.add_df("qvalues_covariate",  cov_qv)
                 self.intermediate_results.add_df("pep_covariate",      cov_pep)
                 self.intermediate_results.add_df("spectral_counts_covariate", cov_prec)
+                self.intermediate_results.add_df("ibaq_covariate", cov_ibaq)
                 log_info(f"Built covariate pivot block - broadcast on {key_col}; shape matches main.")
 
     @log_time("Normalization")
