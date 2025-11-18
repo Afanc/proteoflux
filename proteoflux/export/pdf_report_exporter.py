@@ -27,6 +27,7 @@ import platform
 import textwrap
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
+from scipy.cluster import hierarchy as sch
 import matplotlib.patches as mpatches
 from anndata import AnnData
 from typing import Optional, List, Union, Dict
@@ -58,6 +59,59 @@ def get_color_map(
     others = [l for l in labels if l != anchor]
     for i, lbl in enumerate(others):
         out[lbl] = palette[i % len(palette)]
+    return out
+
+def _shorten_labels_smart(names: List[str], max_len: int = 28, min_common: int = 5) -> List[str]:
+    """
+    Produce compact labels that preserve the differing part of similar sample names.
+
+    Logic:
+    - Find longest common prefix and suffix across all names.
+    - If both exist, keep prefix[:p] + '...' + suffix[-s:], where p+s <= max_len.
+    - Always keep the differing middle segment visible if it's short (<= 10).
+    - If no clear common parts, fall back to head/tail trim.
+
+    Examples
+    --------
+    ['1_fileA', '2_fileA']      -> ['1_...fileA', '2_...fileA']
+    ['fileA_1', 'fileA_2']      -> ['fileA_1', 'fileA_2']
+    ['longprefix_A', 'longprefix_B'] -> ['...A', '...B']
+    """
+    if not names:
+        return names
+    if len(names) == 1:
+        s = names[0]
+        if len(s) <= max_len:
+            return names
+        return [s[: max_len // 2 - 1] + "..." + s[-(max_len // 2 - 2):]]
+
+    pref = os.path.commonprefix(names)
+    rev = [s[::-1] for s in names]
+    suff = os.path.commonprefix(rev)[::-1]
+
+    if len(pref) < min_common:
+        pref = ""
+    if len(suff) < min_common:
+        suff = ""
+
+    out = []
+    for s in names:
+        if len(s) <= max_len:
+            out.append(s)
+            continue
+        # compute the part that differs
+        diff_start = len(pref)
+        diff_end = len(s) - len(suff)
+        diff = s[diff_start:diff_end]
+        if len(diff) > 10:  # cap visible diff size
+            diff = diff[:5] + "..."
+        # compose: prefix (trimmed), diff, suffix (trimmed)
+        keep_p = min(len(pref), max_len // 3)
+        keep_s = min(len(suff), max_len - keep_p - len(diff) - 3)
+        short = s[:keep_p] + diff + "..." + s[len(s) - keep_s:]
+        if len(short) > max_len:
+            short = short[: max_len // 2 - 1] + "..." + short[-(max_len // 2 - 2):]
+        out.append(short)
     return out
 
 
@@ -146,10 +200,11 @@ class ReportPlotter:
         self.adata = adata
         self.protein_labels = adata.var.get(protein_label_key, adata.var_names)
         self.protein_names = adata.var["GENE_NAMES"] #TODO option ? 
-        self.contrast_names = adata.uns.get("contrast_names", [f"C{i}" for i in range(adata.varm['log2fc'].shape[1])])
+        self.contrast_names = adata.uns.get("contrast_names", [])
 
         # Cache stats for fast access
-        self.log2fc = adata.varm["log2fc"]
+        self.log2fc = adata.varm["log2fc"] if "log2fc" in adata.varm else None
+
         # eBayes may be absent in pilot mode
         self.q_ebayes = (pd.DataFrame(adata.varm["q_ebayes"],
                                       columns=self.contrast_names,
@@ -161,6 +216,7 @@ class ReportPlotter:
                          if "p_ebayes" in adata.varm else None)
         # pilot mode flag (set by limma_pipeline)
         self.pilot_mode = bool(adata.uns.get("pilot_study_mode", False))
+        self._has_contrasts = bool(self.contrast_names) and (self.log2fc is not None)
 
         self.missingness = adata.uns.get("missingness", {})
         self.fasta_headers = adata.var['FASTA_HEADERS'].to_numpy()
@@ -170,12 +226,19 @@ class ReportPlotter:
         """Create the full PDF report to the configured path."""
         with PdfPages(self.export_config.get("path_plot")) as pdf:
             self.pdf = pdf
+
             # first blank page
             self._plot_title_page()
+
             # combined IDs + metrics
             self._plot_IDs_and_metrics()
+
+            # hierch. clustering
+            self._plot_hclust_heatmap_matplotlib(tag = "intensity")
+
             # volcanoes
-            self._plot_volcano_plots()
+            if self._has_contrasts and (self.q_ebayes is not None):
+                self._plot_volcano_plots()
 
     def _plot_title_page(self):
         """Render a formatted title + intro + pipeline summary + package versions."""
@@ -185,7 +248,7 @@ class ReportPlotter:
         fig.subplots_adjust(
             left   = x0,
             right  = 0.96,
-            top    = 0.96,
+            top    = 0.98,
             bottom = 0.04
         )
 
@@ -200,6 +263,7 @@ class ReportPlotter:
         imputation  = preproc.get("imputation", {})
         de_method   = self.analysis_config.get("ebayes_method", "limma")
         input_layout = self.dataset_config.get("input_layout", "")
+        analysis_type = "Proteomics" if self.dataset_config.get("analysis_type", "") == "DIA" else "Phosphoproteomics" #TODO have to do this better evenutually, 1.8
         xlsx_export = os.path.basename(self.analysis_config.get('exports').get('path_table'))
         h5ad_export = os.path.basename(self.analysis_config.get('exports').get('path_h5ad'))
 
@@ -210,14 +274,14 @@ class ReportPlotter:
         if title:
             fig.text(0.5, y, title,
                      ha="center", va="top", fontsize=20, weight="bold")
-            y -= 1.5 * line_height
+            y -= 1.3 * line_height
 
         # datetime
         timestamp = datetime.now().strftime("%Y-%m-%d")
         fig.text(0.5, y, timestamp,
                  ha="center", va="top",
                  fontsize=13, color="black")
-        y -= 1.5 * line_height
+        y -= 1.2 * line_height
         # Intro
         if intro:
             wrapped_lines = []
@@ -232,6 +296,12 @@ class ReportPlotter:
         fig.text(x0, y, "Input Layout: ",
                  ha="left", va="top", fontsize=12, weight="semibold")
         fig.text(x0 + 0.14, y, f"{input_layout}",
+                 ha="left", va="top", fontsize=12)
+        y -= line_height
+
+        fig.text(x0, y, "Analysis Type: ",
+                 ha="left", va="top", fontsize=12, weight="semibold")
+        fig.text(x0 + 0.14, y, f"{analysis_type}",
                  ha="left", va="top", fontsize=12)
         y -= line_height
 
@@ -292,6 +362,14 @@ class ReportPlotter:
                      ha="left", va="top", fontsize=11)
             y -= line_height
 
+        if "min_linear_intensity" in filtering:
+            removed_censor = flt_meta.get("censor").get("number_dropped", 0)
+            n_r = f"{removed_censor}".replace(",", "'")
+            fig.text(x0 + 0.06, y,
+                     f"- Left Censoring ≤ {filtering['min_linear_intensity']}: {n_r} PSM removed",
+                     ha="left", va="top", fontsize=11)
+            y -= line_height
+
         # Quantification method
         fig.text(x0 + 0.02, y, f"- Quantification: {quantification_method}",
                  ha="left", va="top", fontsize=12)
@@ -342,10 +420,13 @@ class ReportPlotter:
         y -= line_height
 
         # Differential Expression
-        if self.pilot_mode:
+        if self.pilot_mode and not self._has_contrasts:
             fig.text(x0 + 0.02, y,
-                     f"- Pilot Study, LogFC only",
+                     f"- Pilot study: single-condition run, statistical testing skipped",
                      ha="left", va="top", fontsize=12)
+        elif self.pilot_mode:
+            fig.text(x0 + 0.02, y, f"- Pilot study: LogFC only", ha="left", va="top", fontsize=12)
+
         else:
             fig.text(x0 + 0.02, y,
                      f"- Differential expression: eBayes via {de_method}",
@@ -373,7 +454,7 @@ class ReportPlotter:
         for name, ver in pkgs.items():
             fig.text(x0 + 0.02, y, f"- {name}: {ver}",
                      ha="left", va="top", fontsize=12)
-            y -= 0.8*line_height
+            y -= 0.6*line_height
 
         y -= line_height
 
@@ -397,21 +478,29 @@ class ReportPlotter:
         # prepare data
         df_raw = pd.DataFrame(self.adata.layers['raw'], index=self.adata.obs_names, columns=self.adata.var_names)
         counts = df_raw.notna().sum(axis=1)
-        raw_conds = (self.adata.obs['CONDITION'].cat.categories if hasattr(self.adata.obs['CONDITION'], 'cat') else self.adata.obs['CONDITION'].unique())
-        conds = ['Total'] + list(raw_conds)
+        raw_conds = (self.adata.obs['CONDITION'].cat.categories
+                     if hasattr(self.adata.obs['CONDITION'], 'cat')
+                     else self.adata.obs['CONDITION'].unique())
+        # If only one condition, show Total-only violins
+        single_condition = (len(list(raw_conds)) == 1)
+        conds = ['Total'] if single_condition else (['Total'] + list(raw_conds))
+
         # color map
         color_map = get_color_map(labels=conds)
+
         # metrics
         mat_all = self.adata.X.T
         res_all = compute_metrics(mat_all, metrics=["CV","RMAD"])
         data_cv = [res_all["CV"]]
         data_rmad = [res_all["RMAD"]]
-        for cond in raw_conds:
-            mask = self.adata.obs['CONDITION'] == cond
-            mat = self.adata.X[mask.values,:].T
-            res = compute_metrics(mat, metrics=["CV","RMAD"])
-            data_cv.append(res["CV"])
-            data_rmad.append(res["RMAD"])
+        if not single_condition:
+            for cond in raw_conds:
+                mask = self.adata.obs['CONDITION'] == cond
+                mat = self.adata.X[mask.values,:].T
+                res = compute_metrics(mat, metrics=["CV","RMAD"])
+                data_cv.append(res["CV"])
+                data_rmad.append(res["RMAD"])
+
         # plotting
         fig = plt.figure(figsize=(12,12))
         fig.subplots_adjust(top=0.95, bottom=0.10, left=0.10, right=0.85)
@@ -420,14 +509,20 @@ class ReportPlotter:
         inner = GridSpecFromSubplotSpec(1,2,subplot_spec=outer[1],wspace=0.3)
         ax_rm = fig.add_subplot(inner[0])
         ax_cv = fig.add_subplot(inner[1])
+
         # barplot
-        sample_colors = [color_map[c] for c in self.adata.obs['CONDITION']]
+        sample_colors = [color_map.get(c, color_map['Total']) for c in self.adata.obs['CONDITION']]
         ax_bar.grid(axis='y', which='both', visible=True)
         ax_bar.bar(counts.index, counts.values, color=sample_colors)
         ax_bar.set_xticks(range(len(counts.index)))
-        ax_bar.set_xticklabels(counts.index,rotation=45, ha='right')
+
+        # short sample names
+        sample_names = list(counts.index)
+        sample_names_short = _shorten_labels_smart(sample_names, max_len=28, min_common=5)
+        ax_bar.set_xticklabels(sample_names_short, rotation=45, ha='right')
+
         ax_bar.set_ylabel('Number of IDs')
-        ax_bar.set_ylim([0, np.max(counts.values)+700]) #add some padding for annotation
+        ax_bar.set_ylim([0, np.max(counts.values)+850]) #add some padding for annotation
         ax_bar.set_title('Protein IDs per Sample')
         for i, val in enumerate(counts.values):
             ax_bar.text(i, val+50, str(int(val)),
@@ -467,11 +562,87 @@ class ReportPlotter:
         self.pdf.savefig(fig)
         plt.close(fig)
 
+    def _plot_hclust_heatmap_matplotlib(self, tag: str = "intensity"):
+        """
+        Hierarchical clustering clustergram (dendrograms + heatmap) using
+        the precomputed linkages and orders stored in `adata.uns`.
+        """
+        # --- 1) pick the matrix (samples × features) and convert to DataFrame (features × samples)
+        X = self.adata.X
+        M = X.toarray() if hasattr(X, "toarray") else X
+        title = "Hierarchical clustering (processed intensities)"
+
+        df = pd.DataFrame(M.T, index=self.adata.var_names, columns=self.adata.obs_names)
+
+        # --- 2) apply precomputed order if present
+        feat_order   = self.adata.uns.get(f"{tag}_feature_order")
+        sample_order = self.adata.uns.get(f"{tag}_sample_order")
+        if feat_order is not None:
+            df = df.reindex(index=list(feat_order))
+        if sample_order is not None:
+            df = df.reindex(columns=list(sample_order))
+
+        # --- 3) linkage trees: use precomputed linkages if available, else compute
+        row_link = self.adata.uns.get(f"{tag}_feature_linkage")
+        col_link = self.adata.uns.get(f"{tag}_sample_linkage")
+
+        # If orders were not supplied, derive from the linkages now
+        if feat_order is None:
+            feat_order = [df.index[i] for i in sch.leaves_list(row_link)]
+            df = df.reindex(index=feat_order)
+        if sample_order is None:
+            sample_order = [df.columns[i] for i in sch.leaves_list(col_link)]
+            df = df.reindex(columns=sample_order)
+
+        # --- 4) determine heatmap scale (diverging if centered spans +/-)
+        vmin = float(np.nanmin(df.values))
+        vmax = float(np.nanmax(df.values))
+        cmap = "viridis"
+
+        # --- 5) layout: top dendrogram, left dendrogram, heatmap
+        fig = plt.figure(figsize=(10.5, 9.0))
+        fig.subplots_adjust(left=0.06, right=0.92, bottom=0.15, top=0.94, wspace=0.0, hspace=0.0)
+        gs = GridSpec(2, 2, width_ratios=[1, 4], height_ratios=[1, 4])
+
+        ax_dend_top  = fig.add_subplot(gs[0, 1])
+        ax_dend_left = fig.add_subplot(gs[1, 0])
+        ax_heat      = fig.add_subplot(gs[1, 1])
+
+        # top dendrogram (samples)
+        sch.dendrogram(
+            col_link, ax=ax_dend_top, orientation="top", no_labels=True, color_threshold=None
+        )
+        ax_dend_top.set_xticks([]); ax_dend_top.set_yticks([])
+        for spine in ax_dend_top.spines.values():
+            spine.set_visible(False)
+
+        # left dendrogram (features)
+        sch.dendrogram(
+            row_link, ax=ax_dend_left, orientation="left", no_labels=True, color_threshold=None
+        )
+        ax_dend_left.set_xticks([]); ax_dend_left.set_yticks([])
+        for spine in ax_dend_left.spines.values():
+            spine.set_visible(False)
+
+        # heatmap (already reordered)
+        im = ax_heat.imshow(df.values, aspect="auto", interpolation="nearest", cmap=cmap, vmin=vmin, vmax=vmax)
+        ax_heat.set_title(title, fontsize=12, pad=25)
+
+        # neat axes: y is features (no tick labels for speed), x shows shortened sample names
+        names_short = _shorten_labels_smart(list(df.columns), max_len=28, min_common=5)
+        ax_heat.set_xticks(range(len(names_short)))
+        ax_heat.set_xticklabels(names_short, rotation=45, ha="right", fontsize=8)
+        ax_heat.set_yticks([])
+
+        # colorbar
+        cbar = fig.colorbar(im, ax=[ax_heat, ax_dend_top], fraction=0.046, shrink=0.5, pad=0.02)
+        cbar.ax.set_ylabel("Value", rotation=90)
+
+        self.pdf.savefig(fig)
+        plt.close(fig)
+
     def _plot_volcano_plots(self):
         """Volcano plots (one per contrast). eBayes-only; skip in pilot mode."""
-
-        if (self.q_ebayes is None):
-            return
 
         sign_threshold = self.analysis_config.get("sign_threshold", 0.05)
         volcano_top_annotated = self.analysis_config.get("exports").get("volcano_top_annotated", 10)

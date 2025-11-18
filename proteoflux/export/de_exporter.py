@@ -56,20 +56,33 @@ class DEExporter:
             index=pep["rows"],
         )
 
+        # Pull protein annotations and join onto peptide meta
+        prot_cols = [c for c in ["FASTA_HEADERS", "GENE_NAMES", "PROTEIN_DESCRIPTIONS"] if c in self.adata.var.columns]
+        if prot_cols:
+            prot_annot = self.adata.var[prot_cols].copy()
+            prot_annot.index.name = "PROTEIN_UNIPROT_AC"
+            meta = meta.merge(
+                prot_annot,
+                how="left",
+                left_on="PROTEIN_UNIPROT_AC",
+                right_index=True,
+                copy=False,
+            )
+
         raw_df = pd.DataFrame(pep["raw"], index=pep["rows"], columns=pep["cols"])
         centered_df = pd.DataFrame(pep["centered"], index=pep["rows"], columns=pep["cols"])
 
         # PEPTIDES (raw): drop PEPTIDE_ID and reorder to [PEPTIDE_SEQ, PROTEIN_INDEX, samples...]
         raw_df = pd.concat([meta, raw_df], axis=1)
         raw_df = raw_df.drop(columns=["PEPTIDE_ID"], errors="ignore")
-        leading = [c for c in ["PEPTIDE_SEQ", "PROTEIN_INDEX"] if c in raw_df.columns]
+        leading = [c for c in ["PEPTIDE_SEQ", "PROTEIN_UNIPROT_AC", "FASTA_HEADERS", "GENE_NAMES"] if c in raw_df.columns]
         others = [c for c in raw_df.columns if c not in leading]
         raw_df = raw_df[leading + others]
 
-        # PEPTIDES (centered): keep same leading order (even if we don't export for phospho)
+        # PEPTIDES (centered): keep same leading order
         centered_df = pd.concat([meta, centered_df], axis=1)
         centered_df = centered_df.drop(columns=["PEPTIDE_ID"], errors="ignore")
-        leading_c = [c for c in ["PEPTIDE_SEQ", "PROTEIN_INDEX"] if c in centered_df.columns]
+        leading_c = [c for c in ["PEPTIDE_SEQ", "PROTEIN_UNIPROT_AC", "FASTA_HEADERS", "GENE_NAMES"] if c in centered_df.columns]
         others_c = [c for c in centered_df.columns if c not in leading_c]
         centered_df = centered_df[leading_c + others_c]
 
@@ -123,6 +136,7 @@ class DEExporter:
         ad = self.adata
         preproc = ad.uns.get("preprocessing", {})
         analysis_type = str(preproc.get("analysis_type", "DIA")).lower()
+        is_phospho = analysis_type == "phospho"
 
         # Core statistics
         log2fc = self._get_dataframe("log2fc")
@@ -152,38 +166,61 @@ class DEExporter:
         id_pep  = pd.DataFrame(ad.layers.get("pep"),    index=ad.obs_names, columns=ad.var_names).T if "pep"    in ad.layers else None
         spectral_counts = pd.DataFrame(ad.layers.get("spectral_counts"), index=ad.obs_names, columns=ad.var_names).T if "spectral_counts" in ad.layers else None
 
-        # Missingness per group
-        miss_ratios = ad.uns.get("missingness", None)
-        miss_renamed = None
-        max_missing_col = None
-        if miss_ratios is not None:
-            miss_renamed = miss_ratios.add_prefix("Missingness_")
-            max_missing_col = miss_ratios.max(axis=1).rename("MAX_MISSINGNESS")
+        ibaq = None
+        if not is_phospho and "ibaq" in ad.layers:
+            ibaq = pd.DataFrame(ad.layers.get("ibaq"), index=ad.obs_names, columns=ad.var_names).T
+
+        # Observed counts per condition
+        # We compute: for each condition, count of non-NaN entries per feature.
+        observed_df = None
+        max_observed_col = None
+        # 1) choose pre-imputation matrix (samples × features) WITHOUT clobbering the `raw` DataFrame
+        raw_layer = ad.layers.get("raw", ad.X)
+        raw_mat = raw_layer.A if hasattr(raw_layer, "A") else raw_layer
+
+        # 2) group by condition and count non-NaNs per feature
+        conds = ad.obs["CONDITION"].astype(str).values
+        cond_levels = sorted(pd.unique(conds).tolist())
+        cols = {}
+        for c in cond_levels:
+            m = (conds == c)
+            if np.any(m):
+                cnt = np.sum(~np.isnan(raw_mat[m, :]), axis=0).astype(int)
+            else:
+                cnt = np.zeros(raw_mat.shape[1], dtype=int)
+            cols[f"Observed_{c}"] = pd.Series(cnt, index=ad.var_names)
+        if cols:
+            observed_df = pd.DataFrame(cols, index=ad.var_names)
+            max_observed_col = observed_df.max(axis=1).rename("MAX_OBSERVED")
 
         # Build base Summary
-        if log2fc is None:
-            raise AssertionError("Missing one of required varm matrices: log2fc")
+        has_contrasts = bool(self.contrasts) and (log2fc is not None)
 
-        log2fc_pref = log2fc.add_prefix("log2FC_")
+        log2fc_pref = log2fc.add_prefix("log2FC_") if has_contrasts else None
 
         pval_pref = qval_pref = None
-        if q_ebayes is not None and p_ebayes is not None:
+        if has_contrasts and (q_ebayes is not None) and (p_ebayes is not None):
             qval_pref = q_ebayes.add_prefix("QVALUE_")
             pval_pref = p_ebayes.add_prefix("PVALUE_")
 
         # Processed & Raw intensities integrated
-        log2_int_cols = X.add_prefix("processed_log2_") if X is not None else None
-        raw_int_cols  = raw.add_prefix("Raw_") if raw is not None else None
+        log2_int_cols = X.add_prefix("Processed_log2_Intensities") if X is not None else None
+        raw_int_cols  = raw.add_prefix("Raw_Intensities") if raw is not None else None
 
-        blocks = [meta_df, log2fc_pref]
+        # Always include metadata; include log2FC only if contrasts exist
+        blocks = [meta_df]
+        if log2fc_pref is not None:
+            blocks.append(log2fc_pref)
 
-        if qval_pref is not None: blocks.append(qval_pref)
-        if pval_pref is not None: blocks.append(pval_pref)
+        if qval_pref is not None:
+            blocks.append(qval_pref)
+        if pval_pref is not None:
+            blocks.append(pval_pref)
 
-        if miss_renamed is not None:
-            blocks.append(miss_renamed)
-            if max_missing_col is not None:
-                blocks.append(max_missing_col)
+        if observed_df is not None:
+            blocks.append(observed_df)
+            if max_observed_col is not None:
+                blocks.append(max_observed_col)
 
         if log2_int_cols is not None:
             blocks.append(log2_int_cols)
@@ -202,7 +239,6 @@ class DEExporter:
             has_ft_cfg = False
 
         has_cov_layers = ("processed_covariate" in ad.layers) or ("raw_covariate" in ad.layers)
-        is_phospho = analysis_type == "phospho"
 
         if is_phospho:
             # Add covariate-part if present
@@ -270,7 +306,7 @@ class DEExporter:
         pep_wide_df, pep_centered_df = self._peptide_frames()
 
         # proper indexing
-        for df_ in (id_qval, id_pep, spectral_counts):
+        for df_ in (id_qval, id_pep, spectral_counts, ibaq):
             if df_ is not None:
                 df_.index.name = idx_name
 
@@ -281,7 +317,8 @@ class DEExporter:
             "- Summary: metadata, Log2FC, intensities, Q/P-values, missingness.\n"
             "- Identification Qvalue: PSM-level q-values (from search engine), if available.\n"
             "- Identification PEP: Posterior error probability (from search engine), if available.\n"
-            "- Spectral Counts: mean run-evidence counts per (protein × sample), if available.\n"
+            "- Spectral Counts: mean run-evidence counts per (protein x sample), if available.\n"
+            "- IBAQ Values: Intensity based absolute quantification per (protein x sample), if available"
             "- Peptides (raw): wide peptide-by-sample matrix.\n"
         )
 
@@ -291,6 +328,7 @@ class DEExporter:
             "Identification Qvalue": id_qval if id_qval is not None else None,
             "Identification PEP": id_pep if id_pep is not None else None,
             "Spectral Counts": spectral_counts if spectral_counts is not None else None,
+            "IBAQ Values": ibaq if ibaq is not None else None,
             "Peptides (raw)": (None if (str(preproc.get("analysis_type", "DIA")).lower()=="phospho") else pep_wide_df),
         }
 
@@ -306,7 +344,7 @@ class DEExporter:
         """Write a compact .h5ad with categorical metadata and summarized preprocessing config."""
         for col in ["CONDITION", "GENE_NAMES", "PROTEIN_WEIGHT", "PROTEIN_DESCRIPTIONS",
                     "FASTA_HEADERS", "ASSAY", "PARENT_PEPTIDE_ID", "PARENT_PROTEIN",
-                    "CONDITION_ORIG"]:
+                    "CONDITION_ORIG", "ALIGN_KEY"]:
             if col in self.adata.obs.columns:
                 self.adata.obs[col] = self.adata.obs[col].astype("category")
             if col in self.adata.var.columns:

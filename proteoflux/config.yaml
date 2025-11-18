@@ -3,10 +3,11 @@ dataset:
   input_layout: "long"
   analysis_type: "DIA"
   annotation_file: "data/annotation_searle2.tsv"
-  exclude_runs: null
+  exclude_runs:
   index_column: "PG.ProteinGroups"
   signal_column: "FG.MS2RawQuantity"
   qvalue_column: "PG.Qvalue"
+  charge_column: "FG.Charge"
   pep_column: "PG.PEP"
   condition_column: "R.Condition"
   replicate_column: "R.Replicate"
@@ -26,7 +27,8 @@ preprocessing:
   filtering:
     qvalue: 0.01
     pep: 0.003
-    min_precursors: 1
+    min_precursors: 3
+    min_linear_intensity: 2
     contaminants_files:
       - "data/Contaminants_2022.fasta"
   normalization:
@@ -45,6 +47,7 @@ analysis:
   sign_threshold: 0.05
   clustering_max: 8000
   only_against: null
+  only_contrasts: null
   exports:
     export_plot: true
     export_table: false
@@ -57,6 +60,6 @@ analysis:
   title: "Proteoflux Analysis Report"
   intro_text: |
     This report summarizes the proteomic analysis pipeline applied to your dataset.
-    We performed filtering to remove low-confidence identifications and contaminants, computed protein intensities,
-    normalized these and imputed missing values, and finally ran Differential Expression analysis using limma.
+    We performed filtering to remove low-confidence identifications and contaminants, normalized intensities,
+    imputed missing values, and finally ran Differential Expression analysis using limma.
   footer_text: "Proteomics Core Facility - Biozentrum - University of Basel"

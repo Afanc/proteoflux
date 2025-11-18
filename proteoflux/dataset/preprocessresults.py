@@ -12,6 +12,7 @@ class PreprocessResults:
     pep: Optional[pl.DataFrame]              # <- optional
     locprob: Optional[pl.DataFrame]          # <- optional
     spectral_counts: Optional[pl.DataFrame]  # <- optional
+    ibaq: Optional[pl.DataFrame]             # <- optional
     condition_pivot: pl.DataFrame
     protein_meta: pl.DataFrame
     peptides_wide: Optional[pl.DataFrame]    # <- optional
@@ -20,6 +21,7 @@ class PreprocessResults:
     meta_qvalue: Dict
     meta_pep: Dict
     meta_prec: Dict
+    meta_censor: Dict
     raw_covariate: Optional[pl.DataFrame] = None
     lognormalized_covariate: Optional[pl.DataFrame] = None
     normalized_covariate:   Optional[pl.DataFrame] = None
@@ -28,3 +30,6 @@ class PreprocessResults:
     qvalues_covariate:      Optional[pl.DataFrame] = None
     pep_covariate:          Optional[pl.DataFrame] = None
     spectral_counts_covariate: Optional[pl.DataFrame] = None
+    ibaq_covariate: Optional[pl.DataFrame] = None
+    raw_unfiltered: Optional[pl.DataFrame] = None
+    raw_covariate_unfiltered: Optional[pl.DataFrame] = None

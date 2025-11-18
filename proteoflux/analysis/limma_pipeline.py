@@ -17,7 +17,7 @@ from scipy.stats import t as t_dist
 from scipy.special import digamma, polygamma
 from statsmodels.stats.multitest import multipletests
 from itertools import combinations
-from proteoflux.utils.utils import log_time, log_warning
+from proteoflux.utils.utils import log_time, log_warning, log_info
 from proteoflux.analysis.statisticaltester import StatisticalTester
 from proteoflux.analysis.clustering import run_clustering, run_clustering_missingness
 
@@ -35,8 +35,41 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     obs = adata.obs.copy()
 
     repl_counts = obs["CONDITION"].value_counts()
-    pilot_mode = (repl_counts.min() <= 1)
-    if pilot_mode:
+    levels = sorted(obs["CONDITION"].unique())
+    pilot_mode   = (repl_counts.min() <= 1) or (len(levels) < 2)
+
+    # Early-out when there is only one condition: mark pilot mode and skip stats cleanly
+    if len(levels) < 2:
+        log_warning("Pilot study mode: only 1 condition detected; skipping statistical analysis.")
+
+        # Compute missingness exactly like the standard path
+        if "qvalue" in adata.layers:
+            miss_mat = adata.layers["qvalue"].T
+            miss_source = "qvalue"
+        elif "raw" in adata.layers:
+            miss_mat = adata.layers["raw"].T
+            miss_source = "raw"
+        else:
+            miss_mat = adata.X.T
+            miss_source = "X"
+
+        missing_df = StatisticalTester.compute_missingness(
+            intensity_matrix = miss_mat,
+            conditions       = adata.obs['CONDITION'].tolist(),
+            feature_ids      = adata.var_names.tolist(),
+        )
+
+        out = adata.copy()
+        out.uns["contrast_names"]     = []
+        out.uns["pilot_study_mode"]   = True
+        out.uns["missingness"]        = missing_df
+        out.uns["missingness_source"] = miss_source
+        out.uns["missingness_rule"]   = "nan-is-missing"
+        out.uns["has_covariate"]      = False
+        return out
+
+    # Pilot mode due to singleton replicates (keep existing behavior/logging)
+    if repl_counts.min() <= 1:
         log_warning(
             "Pilot study mode: at least one condition has only 1 replicate, no statistical analysis done. "
         )
@@ -44,7 +77,6 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     if has_covariate_cfg:
         return run_limma_pipeline_covariate(adata, config, pilot_mode)
 
-    levels = sorted(obs["CONDITION"].unique())
     if len(levels) < 2:
         raise ValueError(f"Need ≥2 conditions for contrasts; found {levels}")
     for lvl in levels:
@@ -66,13 +98,40 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     resid_var = np.asarray(fit_imo.sigma, dtype=np.float32) ** 2
     adata.uns["residual_variance"] = resid_var
 
-    # Contrasts (with optional only_against)
-    base = (config or {}).get("analysis", {}).get("only_against", None)
+    # Contrasts: support either 'only_contrasts' (A_v_B / A_vs_B) or 'only_against'
+    analysis_cfg   = (config or {}).get("analysis", {}) or {}
+    only_list      = analysis_cfg.get("only_contrasts") or []
+    base           = analysis_cfg.get("only_against", None)
 
-    if base is not None:
+    if isinstance(only_list, str):
+        only_list = [only_list]
+
+    def _parse_only_list(items, valid_levels):
+        """Return list of 'A - B' strings from ['A_v_B', 'A_vs_B', ...]."""
+        out = []
+        for it in items:
+            s = str(it)
+            if "_vs_" in s:
+                A, B = s.split("_vs_", 1)
+            elif "_v_" in s:
+                A, B = s.split("_v_", 1)
+            else:
+                raise ValueError(f"only_contrasts item '{s}' must use _v_ or _vs_ as separator")
+            A, B = A.strip(), B.strip()
+            if A not in valid_levels or B not in valid_levels:
+                raise ValueError(f"only_contrasts '{s}': conditions must be in {valid_levels}")
+            out.append(f"{A} - {B}")
+        return out
+
+    if len(only_list) > 0:
+        # only_contrasts takes precedence if provided
+        contrast_defs = _parse_only_list(only_list, levels)
+        log_info("Analysis only on selected contrasts")
+    elif base is not None:
         if base not in levels:
             raise ValueError(f"only_against='{base}' not found in Condition levels {levels}")
         contrast_defs = [f"{c} - {base}" for c in levels if c != base]
+        log_info("Analysis only on against selected condition")
     else:
         contrast_defs = [f"{a} - {b}" for a, b in combinations(levels, 2)]
 
@@ -218,8 +277,32 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         return patsy.dmatrix("0 + " + " + ".join(levels), tmp)
 
     def _make_contrasts(levels: list, design_dm, cfg: dict) -> pd.DataFrame:
-        base = (cfg or {}).get("analysis", {}).get("only_against", None)
-        if base is not None:
+        analysis_cfg = (cfg or {}).get("analysis", {}) or {}
+        only_list    = analysis_cfg.get("only_contrasts") or []
+        base         = analysis_cfg.get("only_against", None)
+
+        if isinstance(only_list, str):
+            only_list = [only_list]
+
+        def _parse_only_list(items, valid_levels):
+            out = []
+            for it in items:
+                s = str(it)
+                if "_vs_" in s:
+                    A, B = s.split("_vs_", 1)
+                elif "_v_" in s:
+                    A, B = s.split("_v_", 1)
+                else:
+                    raise ValueError(f"only_contrasts item '{s}' must use _v_ or _vs_ as separator")
+                A, B = A.strip(), B.strip()
+                if A not in valid_levels or B not in valid_levels:
+                    raise ValueError(f"only_contrasts '{s}': conditions must be in {valid_levels}")
+                out.append(f"{A} - {B}")
+            return out
+
+        if isinstance(only_list, (list, tuple)) and len(only_list) > 0:
+            defs = _parse_only_list(only_list, levels)
+        elif base is not None:
             if base not in levels:
                 raise ValueError(f"only_against='{base}' not found in Condition levels {levels}")
             defs = [f"{c} - {base}" for c in levels if c != base]

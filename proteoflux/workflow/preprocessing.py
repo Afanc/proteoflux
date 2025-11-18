@@ -57,6 +57,7 @@ class Preprocessor:
         self.filter_qvalue = self.filtering.get("qvalue", 0.01)
         self.filter_pep = self.filtering.get("pep", 0.2)
         self.filter_num_precursors = self.filtering.get("min_precursors", 1)
+        self.min_linear_intensity = self.filtering.get("min_linear_intensity", None)
         self.pep_direction = (self.filtering.get("pep_direction", "lower") or "lower").lower()
         if self.pep_direction not in {"lower", "higher"}:
             raise ValueError(f"Invalid pep_direction='{self.pep_direction}'. Use 'lower' or 'higher'.")
@@ -97,6 +98,10 @@ class Preprocessor:
 
     def fit_transform(self, df: pl.DataFrame) -> PreprocessResults:
         """Run the full preprocessing pipeline and return a `PreprocessResults` bundle."""
+
+        # Step 0: super raw pivot
+        self._build_raw_pivot(df)
+
         # Step 1: Filtering
         self._filter(df)
 
@@ -125,6 +130,7 @@ class Preprocessor:
             pep=self.intermediate_results.dfs.get("pep"),
             locprob=self.intermediate_results.dfs.get("locprob"),
             spectral_counts=self.intermediate_results.dfs.get("spectral_counts"),
+            ibaq=self.intermediate_results.dfs.get("ibaq"),
             condition_pivot=self.intermediate_results.dfs.get("condition_pivot"),
             protein_meta=self.intermediate_results.dfs.get("protein_metadata"),
             peptides_wide=self.intermediate_results.dfs.get("peptides_wide"),
@@ -133,6 +139,7 @@ class Preprocessor:
             meta_qvalue = self.intermediate_results.metadata.get("filtering").get("meta_qvalue"),
             meta_pep =  self.intermediate_results.metadata.get("filtering").get("meta_pep"),
             meta_prec =  self.intermediate_results.metadata.get("filtering").get("meta_prec"),
+            meta_censor = self.intermediate_results.metadata.get("filtering").get("meta_censor"),
             raw_covariate=self.intermediate_results.dfs.get("raw_df_covariate"),
             lognormalized_covariate=self.intermediate_results.dfs.get("postlog_covariate"),
             normalized_covariate=self.intermediate_results.dfs.get("normalized_covariate"),
@@ -141,7 +148,105 @@ class Preprocessor:
             qvalues_covariate=self.intermediate_results.dfs.get("qvalues_covariate"),
             pep_covariate=self.intermediate_results.dfs.get("pep_covariate"),
             spectral_counts_covariate=self.intermediate_results.dfs.get("spectral_counts_covariate"),
+            ibaq_covariate=self.intermediate_results.dfs.get("ibaq_covariate"),
+            raw_unfiltered=self.intermediate_results.dfs.get("raw_unfiltered"),
+            raw_covariate_unfiltered=self.intermediate_results.dfs.get("raw_unfiltered_covariate"),
         )
+
+    def _build_raw_pivot(self, df: pl.DataFrame) -> None:
+        """
+        Build a *pre-filter* wide matrix at precursor level (no DirectLFQ, no protein
+        summarization).
+
+        - Precursor is defined by PEPTIDE_LSEQ + CHARGE (kept as-is, PTMs included).
+        - Row key is PRECURSOR_ID = "{PEPTIDE_LSEQ}:{CHARGE}".
+        - We also attach:
+            * INDEX      (protein group index)
+        - Columns are: [INDEX, PRECURSOR_ID, sample_1, sample_2, ...].
+
+        Results are stored as:
+            self.intermediate_results.dfs["raw_unfiltered"]
+            self.intermediate_results.dfs["raw_unfiltered_covariate"]
+        and are intentionally *not* forced to share the filtered INDEX universe.
+        """
+
+        # If we can't build a proper precursor table at that point, we're missing data
+        needed = {"INDEX", "FILENAME", "SIGNAL", "PEPTIDE_LSEQ", "CHARGE"}
+        if not needed.issubset(df.columns):
+            raise KeyError("Missing Column in import file. Check harmonizer warnings.")
+
+        # ---------- Split main vs covariate (same logic as _filter) ----------
+        if "IS_COVARIATE" in df.columns:
+            is_cov = pl.coalesce([pl.col("IS_COVARIATE"), pl.lit(False)])
+            df_cov  = df.filter(is_cov)
+            df_main = df.filter(~is_cov)
+        else:
+            has_assay = "ASSAY" in df.columns
+            assay_lc = set(a.lower() for a in (self.covariate_assays or []))
+            if has_assay and assay_lc:
+                df_cov  = df.filter(pl.col("ASSAY").str.to_lowercase().is_in(list(assay_lc)))
+                df_main = df.filter(~pl.col("ASSAY").str.to_lowercase().is_in(list(assay_lc)))
+            else:
+                df_main = df
+                df_cov  = None
+
+        # ---------- Helper: make precursor base table ----------
+        def _make_precursor_base(frame: pl.DataFrame) -> pl.DataFrame | None:
+            if frame is None or frame.height == 0:
+                return None
+
+            select_cols = ["INDEX", "FILENAME", "SIGNAL", "PEPTIDE_LSEQ", "CHARGE"]
+
+            base = frame.select(select_cols).with_columns(
+                # Keep LSEQ as-is (with PTMs etc.) and build precursor ID
+                (
+                    pl.col("PEPTIDE_LSEQ").cast(pl.Utf8)
+                    + pl.lit(":")
+                    + pl.col("CHARGE").cast(pl.Utf8)
+                ).alias("PRECURSOR_ID")
+            )
+
+            return base
+
+        # ---------- Helper: pivot precursor base to wide ----------
+        def _pivot_prec(base: pl.DataFrame | None) -> pl.DataFrame | None:
+            if base is None:
+                return None
+
+            # Basic precursor × sample pivot using the generic _pivot_df
+            prec_pivot = self._pivot_df(
+                df=base.select(["PRECURSOR_ID", "FILENAME", "SIGNAL"]),
+                sample_col="FILENAME",
+                protein_col="PRECURSOR_ID",   # row key = precursor ID
+                values_col="SIGNAL",
+                aggregate_fn="sum",           # sum duplicate rows if any
+            )
+
+            # Bring back INDEX per precursor
+            id_cols = ["PRECURSOR_ID", "INDEX"]
+
+            id_map = base.select(id_cols).unique()
+            out = prec_pivot.join(id_map, on="PRECURSOR_ID", how="left")
+
+            # Reorder columns: INDEX, PRECURSOR_ID, then samples
+            sample_cols = [c for c in out.columns if c not in {"INDEX", "PRECURSOR_ID"}]
+            ordered = []
+            ordered.extend(["INDEX", "PRECURSOR_ID"])
+            ordered.extend(sample_cols)
+
+            return out.select(ordered)
+
+        base_main = _make_precursor_base(df_main)
+        base_cov  = _make_precursor_base(df_cov) if df_cov is not None else None
+
+        prec_pivot_main = _pivot_prec(base_main)
+        prec_pivot_cov  = _pivot_prec(base_cov)
+
+        # IMPORTANT: write directly into dfs[...] so we don't enforce INDEX alignment
+        if prec_pivot_main is not None:
+            self.intermediate_results.dfs["raw_unfiltered"] = prec_pivot_main
+        if prec_pivot_cov is not None:
+            self.intermediate_results.dfs["raw_unfiltered_covariate"] = prec_pivot_cov
 
     @log_time("Filtering")
     def _filter(self, df: pl.DataFrame) -> None:
@@ -184,7 +289,11 @@ class Preprocessor:
             self.intermediate_results.add_df(f"filtered_PEP/{tag}", x)
 
             x = self._filter_by_num_precursors(x)
-            self.intermediate_results.add_df(f"filtered_final/PREC/{tag}", x)
+            self.intermediate_results.add_df(f"filtered_PREC/{tag}", x)
+
+            x = self._censor_low_val(x)
+            self.intermediate_results.add_df(f"filtered_final_censored/{tag}", x)
+
             return x
 
         log_info("Filtering (main)")
@@ -200,7 +309,7 @@ class Preprocessor:
         # concatenate back (same schema by construction)
         out = main_f if cov_f is None else pl.concat([main_f, cov_f], how="vertical_relaxed", rechunk=True)
 
-        self.intermediate_results.add_df("filtered_final/PREC", out)
+        self.intermediate_results.add_df("filtered_final_censored", out)
 
     def _filter_contaminants(self, df: pl.DataFrame) -> pl.DataFrame:
         if not self.remove_contaminants or "INDEX" not in df.columns:
@@ -348,8 +457,57 @@ class Preprocessor:
 
         return df_kept
 
+    def _censor_low_val(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Set very low intensity values to NA and log the counts."""
+        if self.min_linear_intensity is None:
+            return df
+
+        thr = self.min_linear_intensity
+
+        # precompute mask once
+        mask = (pl.col("SIGNAL") < thr) & pl.col("SIGNAL").is_not_null()
+
+        raw_vals_np = df["SIGNAL"].to_numpy()
+
+        # count true values directly from the boolean column
+        will_censor = int(df.select(mask.sum()).item())
+        df_kept = len(df) - will_censor
+
+        # apply masking only once
+        df = df.with_columns(
+            pl.when(mask).then(None).otherwise(pl.col("SIGNAL")).alias("SIGNAL")
+        )
+
+        log_info(f"Low-intensity censoring: kept={df_kept}, dropped={will_censor} (thr={thr}).")
+        # record threshold metadata
+        self.intermediate_results.add_metadata(
+            "filtering",
+            "meta_censor",
+            {
+                "threshold": thr,
+                "number_dropped": will_censor,
+                "number_kept": df_kept,
+                "raw_values": raw_vals_np,
+            },
+        )
+
+        return df
+
+    def _censor_low_val_old(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Set very low intensity values to NA."""
+        if self.min_linear_intensity is not None:
+                thr = self.min_linear_intensity
+                # count how many will be censored
+                will_censor = df.select((pl.col("SIGNAL") < thr) & pl.col("SIGNAL").is_not_null()).to_series().sum()
+                df_kept = len(df) - will_censor
+                df = df.with_columns(
+                    pl.when(pl.col("SIGNAL") < thr).then(None).otherwise(pl.col("SIGNAL")).alias("SIGNAL")
+                )
+                log_info(f"Low-intensity censoring: kept={df_kept}, dropped={int(will_censor)} (thr={thr})).")
+        return df
+
     def _get_protein_metadata(self) -> None:
-        df_full = self.intermediate_results.dfs["filtered_final/PREC"]  # long format, post filter
+        df_full = self.intermediate_results.dfs["filtered_final_censored"]  # long format, post filter
 
         # Base meta: "first" per protein (works for Spectronaut)
         keep_cols = {
@@ -398,18 +556,30 @@ class Preprocessor:
             )
             base_meta = base_meta.drop("PRECURSORS_EXP", strict=False).join(prec_df, on="INDEX", how="left")
 
-        # Numeric casts (same as before)
+        # --- IBAQ: compute mean across runs (handle ';'-separated per-row values) ---
+        if "IBAQ" in df_full.columns:
+            ibaq_mean = (
+                df_full
+                .select(["INDEX", "IBAQ"])
+                .with_columns(
+                    pl.col("IBAQ")
+                      .cast(pl.Utf8, strict=False)
+                      .str.split(";")
+                      .list.eval(pl.element().cast(pl.Float64, strict=False))
+                      .list.mean()
+                      .alias("IBAQ")
+                )
+                .group_by("INDEX")
+                .agg(pl.col("IBAQ").mean().alias("IBAQ"))  # average across samples/runs
+            )
+            base_meta = (
+                base_meta.drop("IBAQ", strict=False)
+                         .join(ibaq_mean, on="INDEX", how="left")
+            )
+
+        # Numeric casts
         casts = []
         if "IBAQ" in base_meta.columns:
-            # Normalize: keep first value before ';', trim, empty -> null, then cast
-            base_meta = base_meta.with_columns(
-                pl.col("IBAQ")
-                  .cast(pl.Utf8, strict=False)
-                  .str.split(";").list.first()      # use .list.get(0) if Polars is older
-                  .str.strip_chars()
-                  .replace("", None)
-                  .alias("IBAQ")
-            )
             casts.append(pl.col("IBAQ").cast(pl.Float64, strict=False))
         if "PROTEIN_WEIGHT" in base_meta.columns:
             casts.append(pl.col("PROTEIN_WEIGHT").cast(pl.Float64, strict=False))
@@ -426,7 +596,7 @@ class Preprocessor:
 
         If covariates are present, enforce compatible replicate structures across main/covariate blocks.
         """
-        df = self.intermediate_results.dfs["filtered_final/PREC"]
+        df = self.intermediate_results.dfs["filtered_final_censored"]
         base_cols = ["FILENAME", "CONDITION", "REPLICATE"]
         if "ASSAY" in df.columns:
             base_cols.append("ASSAY")
@@ -606,13 +776,22 @@ class Preprocessor:
         n_valid  = is_valid.sum().alias("_NVALID")
 
         # 2) Pre-aggregate per (protein, ion, sample) with a null-preserving guard:
+        #print(df[protein_col, ion_col, values_col])
         df_ion_agg = (
             df
             .group_by([protein_col, ion_col, sample_col], maintain_order=True)
             .agg([
-                pl.col(values_col).first().alias(values_col),
-                n_valid
+                pl.col(values_col)
+                  .filter(pl.col(values_col) > 0)
+                  .sum()
+                  .alias(values_col),
+                # recompute n_valid on the same criterion
+                (pl.col(values_col).is_not_null() & (pl.col(values_col) > 0)).sum().alias("_NVALID"),
             ])
+                        #.agg([
+            #    pl.col(values_col).first().alias(values_col),
+            #    n_valid
+            #])
             .with_columns(
                 pl.when(pl.col("_NVALID") == 0)
                   .then(pl.lit(None))
@@ -658,11 +837,39 @@ class Preprocessor:
             prot_df = prot_df.reset_index()
         prot_df = prot_df.set_index(protein_col).astype(float)  # linear scale
 
+        prot_df = prot_df.replace(0.0, np.nan) #directlfq will output 0 instead of NA
+
+        ## --- DEBUG: where does DirectLFQ emit zeros? (pre-mask) ---
+        #total_zeros = int((prot_df.values == 0).sum())
+        #if total_zeros:
+        #    zloc = np.argwhere(prot_df.values == 0)  # list of [row_i, col_j]
+        #    examples = [(prot_df.index[i], prot_df.columns[j]) for i, j in zloc[:5]]
+        #    log_info(f"DLFQ zeros (pre-mask): total={total_zeros}, examples={examples}")
+
+        #    # pick the first example and inspect its ion evidence in the log2 peptide matrix (pw)
+        #    p0, s0 = examples[0]
+        #    ions_p = pw.loc[p0] if p0 in pw.index.get_level_values(0) else None
+        #    if ions_p is not None:
+        #        n_ions = ions_p.shape[0]
+        #        fin_in_sample = int(np.isfinite(ions_p[s0]).sum())
+        #        fin_any = int(np.isfinite(ions_p.values).sum())
+        #        log_info(f"Trace {p0}/{s0}: ions={n_ions}, finite_in_sample={fin_in_sample}, finite_total={fin_any}")
+        #        some_ions = list(ions_p.index[np.isfinite(ions_p[s0])][:5])
+        #        log_info(f"Ions with signal in {s0} (log2) examples: {some_ions}")
+        ## --- DEBUG: where does DirectLFQ emit zeros? (pre-mask) ---
+
         # 7) Apply the mask: where no ion existed in a run, force NaN (not 0)
         mask_pd = has_valid.to_pandas().set_index(protein_col)
         # align mask rows/cols to prot_df
         mask_pd = mask_pd.reindex(index=prot_df.index, columns=prot_df.columns, fill_value=False)
         prot_df = prot_df.mask(~mask_pd)  # False → NaN
+
+        #DEBUG
+        #mask_pd = has_valid.to_pandas().set_index(protein_col)  # pandas True/False
+        #if total_zeros:
+        #    p0, s0 = examples[0]
+        #    hv = bool(mask_pd.loc[p0, s0]) if (p0 in mask_pd.index and s0 in mask_pd.columns) else False
+        #    log_info(f"Mask check {p0}/{s0}: has_valid={hv}")
 
         # 8) Back to Polars; preserve sample order; turn NaN -> null
         out = pl.DataFrame(prot_df.reset_index())
@@ -672,10 +879,42 @@ class Preprocessor:
             pl.when(pl.col(c).is_nan()).then(None).otherwise(pl.col(c)).alias(c)
             for c in out.columns if c != protein_col
         ])
+
+        ## --- DEBUG: zeros that survived to final OUT (post-mask) ---
+        #z_post = int(out.select([
+        #    (pl.col(c) == 0).sum().alias(c)
+        #    for c, dt in zip(out.columns, out.dtypes)
+        #    if c != protein_col and dt in pl.NUMERIC_DTYPES
+        #]).to_numpy().sum())
+        #if z_post:
+        #    # find up to 5 (protein, sample) locations with zero in OUT
+        #    sample_cols = [c for c, dt in zip(out.columns, out.dtypes) if c != protein_col and dt in pl.NUMERIC_DTYPES]
+        #    z_rows = out.filter(pl.any_horizontal([pl.col(c) == 0 for c in sample_cols])) \
+        #                .select(protein_col, *sample_cols).head(5).to_pandas()
+        #    log_info(f"DLFQ zeros (post-mask): total={z_post}, head:\n{z_rows}")
+
+        #out = out.with_columns([
+        #    #pl.when(pl.col(c).cast(pl.Float64, strict=False) <= self.min_linear_intensity)
+        #    pl.when(pl.col(c).cast(pl.Float64, strict=False) == 0)
+        #      .then(None)
+        #      .otherwise(pl.col(c))
+        #      .alias(c)
+        #    for c, dt in zip(out.columns, out.dtypes)
+        #    if c != protein_col and dt in pl.NUMERIC_DTYPES
+        #])
+
+        # count zeros only in numeric columns, excluding the protein id col
+        log_info(f"Zeros after pivot: {int(out.select([ (pl.col(c) == 0).sum().alias(c)
+                                                       for c, dt in zip(out.columns, out.dtypes)
+                                                       if c != protein_col and dt in pl.NUMERIC_DTYPES
+                                                      ]).to_numpy().sum())}")
+
+
+
         return out
 
     def _build_peptide_tables(self) -> None:
-        df = self.intermediate_results.dfs["filtered_final/PREC"]
+        df = self.intermediate_results.dfs["filtered_final_censored"]
 
         needed = {"INDEX", "FILENAME", "SIGNAL", "PEPTIDE_LSEQ"}
         if not needed.issubset(df.columns):
@@ -737,7 +976,7 @@ class Preprocessor:
         spectral counts, localization probabilities), plus peptide drill-down tables.
         Maintains a strict row order across derived pivots for reliable downstream alignment.
         """
-        df = self.intermediate_results.dfs["filtered_final/PREC"]
+        df = self.intermediate_results.dfs["filtered_final_censored"]
 
         # QVALUE is optional (e.g., FragPipe TMT). Require only these:
         required_cols = {"INDEX", "FILENAME", "SIGNAL"}
@@ -810,7 +1049,19 @@ class Preprocessor:
                 prec = self._pivot_df(_df, "FILENAME", "INDEX", "PRECURSORS_EXP", "mean")
             if "LOC_PROB" in _df.columns:
                 lp = self._pivot_df(_df, "FILENAME", "INDEX", "LOC_PROB", "max")
-            return {"intensity": intensity, "qv": qv, "pep": pp, "sc": sc, "prec": prec, "lp": lp}
+            ibaq = None
+            if "IBAQ" in _df.columns and "INDEX" in _df.columns:
+                # Explode INDEX on ';' for proteins with multiple accessions
+                _df = _df.with_columns(
+                    pl.col("IBAQ")
+                      .cast(pl.Utf8, strict=False)
+                      .str.split(";")
+                      .list.eval(pl.element().cast(pl.Float64, strict=False))
+                      .list.mean()
+                      .alias("IBAQ")
+                )
+                ibaq = self._pivot_df(_df, "FILENAME", "INDEX", "IBAQ", "mean")
+            return {"intensity": intensity, "qv": qv, "pep": pp, "sc": sc, "prec": prec, "lp": lp, "ibaq": ibaq}
 
         main_piv = _pivot_block(df_main)
 
@@ -820,6 +1071,7 @@ class Preprocessor:
         prec_pivot      = main_piv["prec"]
         sc_pivot        = main_piv["sc"]
         locprob_pivot   = main_piv["lp"]
+        ibaq_pivot      = main_piv["ibaq"]
 
         # Peptide drill-down (optional)
         pep_tables = self._build_peptide_tables()
@@ -842,6 +1094,7 @@ class Preprocessor:
         sc_pivot      = _align_to_intensity(sc_pivot)
         prec_pivot    = _align_to_intensity(prec_pivot)
         locprob_pivot = _align_to_intensity(locprob_pivot)
+        ibaq_pivot    = _align_to_intensity(ibaq_pivot)
 
         # --- Optional phospho localization filtering (row-wise, after alignment) ---
         filtered_intensity = intensity_pivot
@@ -876,6 +1129,7 @@ class Preprocessor:
                 prec_pivot         = _row_filter(prec_pivot)
                 sc_pivot           = _row_filter(sc_pivot)
                 locprob_pivot      = _row_filter(locprob_pivot)
+                ibaq_pivot         = _row_filter(ibaq_pivot)
 
         self.intermediate_results.set_columns_and_index(filtered_intensity)
         self.intermediate_results.add_df("raw_df", filtered_intensity)
@@ -884,6 +1138,7 @@ class Preprocessor:
         self.intermediate_results.add_df("pep", pep_pivot)
         self.intermediate_results.add_df("locprob", locprob_pivot)
         self.intermediate_results.add_df("spectral_counts", sc_pivot)
+        self.intermediate_results.add_df("ibaq", ibaq_pivot)
         self.intermediate_results.dfs["peptides_wide"]     = raw_pep_pivot
         self.intermediate_results.dfs["peptides_centered"] = centered_pep_pivot
 
@@ -912,6 +1167,16 @@ class Preprocessor:
                         return None
                     # Attach the parent key to covariate rows and drop ones without mapping
                     long_with_key = frame.join(cov_key_map, on="INDEX", how="left").drop_nulls([key_col])
+                    # IBAQ: mean of each protein
+                    if value_col == "IBAQ":
+                        long_with_key = long_with_key.with_columns(
+                            pl.col("IBAQ")
+                              .cast(pl.Utf8, strict=False)
+                              .str.split(";")
+                              .list.eval(pl.element().cast(pl.Float64, strict=False))
+                              .list.mean()
+                              .alias("IBAQ")
+                        )
 
                     # Branch: DirectLFQ vs. simple aggregation
                     #if self.pivot_signal_method.lower() == "directlfq":
@@ -949,7 +1214,7 @@ class Preprocessor:
                 # 2) yeah this is confusing. like we want protein level info but peptide level indexed, we have to clarify this at some point, make it with the config update. see point 1)
                 cov_prec_by_key = _pivot_cov_by_key(df_cov, "PRECURSORS_EXP", "max")
                 cov_sc_by_key = _pivot_cov_by_key(df_cov, "SPECTRAL_COUNTS", "max") if "SPECTRAL_COUNTS" in df_cov.columns else None
-
+                cov_ibaq_by_key = _pivot_cov_by_key(df_cov, "IBAQ", "mean") if "IBAQ" in df_cov.columns else None
                 # 5) broadcast to main rows: INDEX -> key, then join the covariate-by-key row
                 order_idx = filtered_intensity.select("INDEX")
                 main_with_key = order_idx.join(main_key_map, on="INDEX", how="left")
@@ -966,6 +1231,7 @@ class Preprocessor:
                 cov_pep = _broadcast(cov_pep_by_key)
                 cov_prec = _broadcast(cov_prec_by_key)
                 cov_sc = _broadcast(cov_sc_by_key)
+                cov_ibaq = _broadcast(cov_ibaq_by_key)
 
                 # 6a) Store covariate key
                 self.intermediate_results.add_df(
@@ -980,6 +1246,7 @@ class Preprocessor:
                 self.intermediate_results.add_df("qvalues_covariate",  cov_qv)
                 self.intermediate_results.add_df("pep_covariate",      cov_pep)
                 self.intermediate_results.add_df("spectral_counts_covariate", cov_prec)
+                self.intermediate_results.add_df("ibaq_covariate", cov_ibaq)
                 log_info(f"Built covariate pivot block - broadcast on {key_col}; shape matches main.")
 
     @log_time("Normalization")
