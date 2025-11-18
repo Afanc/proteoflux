@@ -31,3 +31,5 @@ class PreprocessResults:
     pep_covariate:          Optional[pl.DataFrame] = None
     spectral_counts_covariate: Optional[pl.DataFrame] = None
     ibaq_covariate: Optional[pl.DataFrame] = None
+    raw_unfiltered: Optional[pl.DataFrame] = None
+    raw_covariate_unfiltered: Optional[pl.DataFrame] = None
