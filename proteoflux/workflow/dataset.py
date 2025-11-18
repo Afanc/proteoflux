@@ -368,8 +368,7 @@ class Dataset:
 
         raw_unf_cov = raw_unf_cov_idx = None
         if raw_unfiltered_cov_mat is not None:
-            sample_names = [c for c in processed_mat.columns if c != "INDEX"]
-            prec_cols_cov = ["PRECURSOR_ID"] + [c for c in sample_names if c in raw_unfiltered_cov_mat.columns]
+            prec_cols_cov = [c for c in raw_unfiltered_cov_mat.columns if c != "INDEX"]
 
             raw_unf_cov, raw_unf_cov_idx = polars_matrix_to_numpy(
                 raw_unfiltered_cov_mat.select(prec_cols_cov),
