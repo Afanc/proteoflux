@@ -235,19 +235,6 @@ class Preprocessor:
             )
 
             out = prec_pivot.join(id_map, on="PRECURSOR_ID", how="left")
-            #prec_pivot = self._pivot_df(
-            #    df=base.select(["PRECURSOR_ID", "FILENAME", "SIGNAL"]),
-            #    sample_col="FILENAME",
-            #    protein_col="PRECURSOR_ID",   # row key = precursor ID
-            #    values_col="SIGNAL",
-            #    aggregate_fn="sum",           # sum duplicate rows if any
-            #)
-
-            ## Bring back INDEX per precursor
-            #id_cols = ["PRECURSOR_ID", "INDEX"]
-
-            #id_map = base.select(id_cols).unique()
-            #out = prec_pivot.join(id_map, on="PRECURSOR_ID", how="left")
 
             # Reorder columns: INDEX, PRECURSOR_ID, then samples
             sample_cols = [c for c in out.columns if c not in {"INDEX", "PRECURSOR_ID"}]
@@ -341,7 +328,19 @@ class Preprocessor:
         for path in self.remove_contaminants:
             all_contaminants |= load_contaminant_accessions(path)
 
-        mask_keep = ~pl.col("INDEX").is_in(list(all_contaminants))
+        contaminants_list = list(all_contaminants)
+
+        # A row is contaminant if ANY accession in its semicolon-separated INDEX is in contaminants_list
+        mask_is_contam = (
+            pl.col("INDEX")
+            .cast(pl.Utf8, strict=False)
+            .str.split(";")
+            .list.eval(pl.element().str.strip_chars())
+            .list.eval(pl.element().is_in(contaminants_list))
+            .list.any()      # True if any element is contaminant
+        )
+
+        mask_keep = ~mask_is_contam
 
         # keep & drop
         df_kept    = df.filter(mask_keep)

@@ -373,7 +373,7 @@ class Dataset:
         # Align to the same order as raw_unf_idx (rows of the matrix)
         protein_index_for_rows = (
             prec_index_df.loc[list(raw_unf_idx), "INDEX"]
-            .astype(str)        # or keep native dtype if you prefer
+            .astype(str)
             .to_numpy()
         )
 
@@ -557,7 +557,9 @@ class Dataset:
             for col in ["CONDITION_ORIG", "ALIGN_KEY", "ASSAY", "IS_COVARIATE"]:
                 if col in prec_obs.columns:
                     prec_obs = prec_obs.drop(columns=[col])
-            # -> obs now has CONDITION, REPLICATE only (as you wanted)
+
+            if "CONDITION" in prec_obs.columns:
+                prec_obs["CONDITION"] = prec_obs["CONDITION"].astype("category")
 
             # var: one row per precursor, indexed by PRECURSOR_ID
             prec_index = [str(x) for x in raw_unf_idx]
