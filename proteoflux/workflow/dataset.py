@@ -42,6 +42,10 @@ class Dataset:
         self._dataset_cfg_original = deepcopy(dataset_cfg)
         self.inject_runs_cfg: dict = dataset_cfg.get("inject_runs", {}) or {}
 
+        analysis_cfg  = kwargs.get("analysis", {}) or {}
+        exports_cfg = analysis_cfg.get("exports", {}) or {}
+        self.path_raw_pivot = exports_cfg.get("path_raw_pivot", None)
+
         # Accept string OR list for exclude_runs
         raw_excl = dataset_cfg.get("exclude_runs")
 
@@ -317,6 +321,13 @@ class Dataset:
 
         protein_meta_df = self.preprocessed_data.protein_meta.to_pandas().set_index("INDEX")
 
+        parent_protein_map = None
+        if "PARENT_PROTEIN" in protein_meta_df.columns:
+            tmp = protein_meta_df["PARENT_PROTEIN"].copy()
+            tmp.index = tmp.index.astype(str)
+            parent_protein_map = tmp
+
+
         # Use filtered_mat to infer sample names (columns) and protein IDs (rows)
         X, protein_index = polars_matrix_to_numpy(processed_mat, index_col="INDEX")
 
@@ -387,10 +398,42 @@ class Dataset:
                 .to_numpy()
             )
 
+            parent_protein_for_rows = parent_protein_for_rows_cov = None
+            if parent_protein_map is not None:
+                if raw_unf is not None:
+                    parent_protein_for_rows = (
+                        parent_protein_map.reindex(protein_index_for_rows).astype(str).to_numpy()
+                    )
+                if raw_unf_cov is not None:
+                    parent_protein_for_rows_cov = (
+                        parent_protein_map.reindex(protein_index_for_rows_cov).astype(str).to_numpy()
+                    )
+
+            # Store raw precursor data in .uns on the main adata
+            raw_entry = {
+                "rows": [str(x) for x in raw_unf_idx],   # PRECURSOR_IDs (LSEQ:CHARGE)
+                "index": protein_index_for_rows,         # protein INDEX per precursor
+                "cols": sample_names,
+                "matrix": np.asarray(raw_unf, dtype=np.float32),
+            }
+            if parent_protein_for_rows is not None:
+                raw_entry["parent_protein"] = parent_protein_for_rows
+
+            if raw_unf_cov is not None:
+                raw_cov_entry = {
+                    "rows": [str(x) for x in raw_unf_cov_idx],
+                    "cols": sample_names,
+                    "matrix": np.asarray(raw_unf_cov, dtype=np.float32),
+                }
+                if parent_protein_for_rows_cov is not None:
+                    raw_cov_entry["parent_protein"] = parent_protein_for_rows_cov
+
         # Create var and obs metadata
         sample_names = [col for col in processed_mat.columns if col != "INDEX"]
 
         obs = condition_df.loc[sample_names]
+        if "CONDITION" in obs.columns:
+            obs["CONDITION"] = obs["CONDITION"].astype(str)
 
         # Final AnnData
         self.adata = ad.AnnData(
@@ -505,25 +548,67 @@ class Dataset:
             "analysis_type": self.analysis_type,
         }
 
-        # Store raw precursor level data
-        sample_names = [c for c in processed_mat.columns if c != "INDEX"]
+        if getattr(self, "path_raw_pivot", None) and raw_unf is not None:
+            # Main precursor block: X = samples × precursors
+            prec_X = np.asarray(raw_unf, dtype=np.float32).T  # shape: (n_samples, n_precursors)
 
-        # shape: (n_raw_precursors × n_samples), stored as float32 to keep size reasonable
-        if raw_unf is not None:
-            self.adata.uns["raw_input"] = {
-                "rows": [str(x) for x in raw_unf_idx],   # PRECURSOR_IDs (LSEQ:CHARGE)
-                "index":  protein_index_for_rows,            # protein INDEX per precursor
-                "cols": sample_names,
-                "matrix": np.asarray(raw_unf, dtype=np.float32),
-            }
+            # obs: same samples as main, but drop helper columns for the raw pivot
+            prec_obs = obs.copy()
+            for col in ["CONDITION_ORIG", "ALIGN_KEY", "ASSAY", "IS_COVARIATE"]:
+                if col in prec_obs.columns:
+                    prec_obs = prec_obs.drop(columns=[col])
+            # -> obs now has CONDITION, REPLICATE only (as you wanted)
 
-        if raw_unf_cov is not None:
-            self.adata.uns["raw_input_covariate"] = {
-                "rows": [str(x) for x in raw_unf_cov_idx],
-                "index":  protein_index_for_rows_cov,
-                "cols": sample_names,
-                "matrix": np.asarray(raw_unf_cov, dtype=np.float32),
-            }
+            # var: one row per precursor, indexed by PRECURSOR_ID
+            prec_index = [str(x) for x in raw_unf_idx]
+
+            prec_loc = None
+            if "LOC_PROB" in raw_unfiltered_mat.columns:
+                loc_df = (
+                    raw_unfiltered_mat
+                    .select(["PRECURSOR_ID", "LOC_PROB"])
+                    .drop_nulls("LOC_PROB")
+                    .unique(subset=["PRECURSOR_ID"], maintain_order=True)
+                    .to_pandas()
+                    .set_index("PRECURSOR_ID")
+                )
+                # Align LOC_PROB to the same precursor order as raw_unf_idx
+                prec_loc = loc_df.reindex(raw_unf_idx)["LOC_PROB"].to_numpy()
+
+            var_data = {}
+            if protein_index_for_rows is not None and len(protein_index_for_rows) == len(prec_index):
+                var_data["INDEX"] = pd.Categorical(protein_index_for_rows)
+
+                # Optional parent protein label per precursor
+                if parent_protein_map is not None:
+                    parent_for_prec = parent_protein_map.reindex(protein_index_for_rows)
+                    var_data["PARENT_PROTEIN"] = pd.Categorical(parent_for_prec.astype(str))
+
+                if prec_loc is not None:
+                    var_data["LOC_PROB"] = prec_loc.astype(float)
+
+            prec_var = pd.DataFrame(var_data, index=prec_index)
+            prec_var.index.name = "PRECURSOR_ID"
+
+            prec_adata = ad.AnnData(
+                X=prec_X,
+                obs=prec_obs,
+                var=prec_var,
+            )
+
+            # Add flowthrough / covariate block as .uns alongside the main matrix
+            if raw_unf_cov is not None:
+                ft_entry = {
+                    "rows": [str(x) for x in raw_unf_cov_idx],
+                    "index": protein_index_for_rows_cov,
+                    "cols": sample_names,
+                    "matrix": np.asarray(raw_unf_cov, dtype=np.float32),
+                }
+                if parent_protein_for_rows_cov is not None:
+                    ft_entry["parent_protein"] = parent_protein_for_rows_cov
+                prec_adata.uns["flowthrough_raw"] = ft_entry
+
+            prec_adata.write_h5ad(self.path_raw_pivot)
 
         # check index is fine between proteins and matrix index
         assert list(protein_meta_df.index) == list(protein_index)

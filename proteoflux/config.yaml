@@ -55,6 +55,7 @@ analysis:
     path_plot: "data/proteoflux_report.pdf"
     path_table: "data/proteoflux_table.xslx"
     path_h5ad: "data/proteoflux_results.h5ad"
+    path_raw_pivot: "data/raw_pivot.h5ad"
     umap_n_neighbors: 15
     volcano_top_annotated: 20
   title: "Proteoflux Analysis Report"

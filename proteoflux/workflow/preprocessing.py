@@ -197,6 +197,9 @@ class Preprocessor:
 
             select_cols = ["INDEX", "FILENAME", "SIGNAL", "PEPTIDE_LSEQ", "CHARGE"]
 
+            if self.analysis_type == "phospho" and "LOC_PROB" in frame.columns:
+                select_cols.append("LOC_PROB")
+
             base = frame.select(select_cols).with_columns(
                 # Keep LSEQ as-is (with PTMs etc.) and build precursor ID
                 (
@@ -222,11 +225,29 @@ class Preprocessor:
                 aggregate_fn="sum",           # sum duplicate rows if any
             )
 
-            # Bring back INDEX per precursor
             id_cols = ["PRECURSOR_ID", "INDEX"]
+            if self.analysis_type == "phospho" and "LOC_PROB" in base.columns:
+                id_cols.append("LOC_PROB")
+            id_map = (
+                base.select(id_cols)
+                    .drop_nulls("INDEX")
+                    .unique(subset=["PRECURSOR_ID"], maintain_order=True)
+            )
 
-            id_map = base.select(id_cols).unique()
             out = prec_pivot.join(id_map, on="PRECURSOR_ID", how="left")
+            #prec_pivot = self._pivot_df(
+            #    df=base.select(["PRECURSOR_ID", "FILENAME", "SIGNAL"]),
+            #    sample_col="FILENAME",
+            #    protein_col="PRECURSOR_ID",   # row key = precursor ID
+            #    values_col="SIGNAL",
+            #    aggregate_fn="sum",           # sum duplicate rows if any
+            #)
+
+            ## Bring back INDEX per precursor
+            #id_cols = ["PRECURSOR_ID", "INDEX"]
+
+            #id_map = base.select(id_cols).unique()
+            #out = prec_pivot.join(id_map, on="PRECURSOR_ID", how="left")
 
             # Reorder columns: INDEX, PRECURSOR_ID, then samples
             sample_cols = [c for c in out.columns if c not in {"INDEX", "PRECURSOR_ID"}]
