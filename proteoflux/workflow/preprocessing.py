@@ -99,9 +99,6 @@ class Preprocessor:
     def fit_transform(self, df: pl.DataFrame) -> PreprocessResults:
         """Run the full preprocessing pipeline and return a `PreprocessResults` bundle."""
 
-        # Step 0: super raw pivot
-        self._build_raw_pivot(df)
-
         # Step 1: Filtering
         self._filter(df)
 
@@ -149,104 +146,7 @@ class Preprocessor:
             pep_covariate=self.intermediate_results.dfs.get("pep_covariate"),
             spectral_counts_covariate=self.intermediate_results.dfs.get("spectral_counts_covariate"),
             ibaq_covariate=self.intermediate_results.dfs.get("ibaq_covariate"),
-            raw_unfiltered=self.intermediate_results.dfs.get("raw_unfiltered"),
-            raw_covariate_unfiltered=self.intermediate_results.dfs.get("raw_unfiltered_covariate"),
         )
-
-    def _build_raw_pivot(self, df: pl.DataFrame) -> None:
-        """
-        Build a *pre-filter* wide matrix at precursor level (no DirectLFQ, no protein
-        summarization).
-
-        - Precursor is defined by PEPTIDE_LSEQ + CHARGE (kept as-is, PTMs included).
-        - Row key is PRECURSOR_ID = "{PEPTIDE_LSEQ}:{CHARGE}".
-        - We also attach:
-            * INDEX      (protein group index)
-        - Columns are: [INDEX, PRECURSOR_ID, sample_1, sample_2, ...].
-
-        Results are stored as:
-            self.intermediate_results.dfs["raw_unfiltered"]
-            self.intermediate_results.dfs["raw_unfiltered_covariate"]
-        and are intentionally *not* forced to share the filtered INDEX universe.
-        """
-
-        # If we can't build a proper precursor table at that point, we're missing data
-        needed = {"INDEX", "FILENAME", "SIGNAL", "PEPTIDE_LSEQ", "CHARGE"}
-        if not needed.issubset(df.columns):
-            raise KeyError("Missing Column in import file. Check harmonizer warnings.")
-
-        # ---------- Split main vs covariate (same logic as _filter) ----------
-        if "IS_COVARIATE" in df.columns:
-            is_cov = pl.coalesce([pl.col("IS_COVARIATE"), pl.lit(False)])
-            df_cov  = df.filter(is_cov)
-            df_main = df.filter(~is_cov)
-        else:
-            has_assay = "ASSAY" in df.columns
-            assay_lc = set(a.lower() for a in (self.covariate_assays or []))
-            if has_assay and assay_lc:
-                df_cov  = df.filter(pl.col("ASSAY").str.to_lowercase().is_in(list(assay_lc)))
-                df_main = df.filter(~pl.col("ASSAY").str.to_lowercase().is_in(list(assay_lc)))
-            else:
-                df_main = df
-                df_cov  = None
-
-        # ---------- Helper: make precursor base table ----------
-        def _make_precursor_base(frame: pl.DataFrame) -> pl.DataFrame | None:
-            if frame is None or frame.height == 0:
-                return None
-
-            select_cols = ["INDEX", "FILENAME", "SIGNAL", "PEPTIDE_LSEQ", "CHARGE"]
-
-            base = frame.select(select_cols).with_columns(
-                # Keep LSEQ as-is (with PTMs etc.) and build precursor ID
-                (
-                    pl.col("PEPTIDE_LSEQ").cast(pl.Utf8)
-                    + pl.lit(":")
-                    + pl.col("CHARGE").cast(pl.Utf8)
-                ).alias("PRECURSOR_ID")
-            )
-
-            return base
-
-        # ---------- Helper: pivot precursor base to wide ----------
-        def _pivot_prec(base: pl.DataFrame | None) -> pl.DataFrame | None:
-            if base is None:
-                return None
-
-            # Basic precursor × sample pivot using the generic _pivot_df
-            prec_pivot = self._pivot_df(
-                df=base.select(["PRECURSOR_ID", "FILENAME", "SIGNAL"]),
-                sample_col="FILENAME",
-                protein_col="PRECURSOR_ID",   # row key = precursor ID
-                values_col="SIGNAL",
-                aggregate_fn="sum",           # sum duplicate rows if any
-            )
-
-            # Bring back INDEX per precursor
-            id_cols = ["PRECURSOR_ID", "INDEX"]
-
-            id_map = base.select(id_cols).unique()
-            out = prec_pivot.join(id_map, on="PRECURSOR_ID", how="left")
-
-            # Reorder columns: INDEX, PRECURSOR_ID, then samples
-            sample_cols = [c for c in out.columns if c not in {"INDEX", "PRECURSOR_ID"}]
-            ordered = []
-            ordered.extend(["INDEX", "PRECURSOR_ID"])
-            ordered.extend(sample_cols)
-
-            return out.select(ordered)
-
-        base_main = _make_precursor_base(df_main)
-        base_cov  = _make_precursor_base(df_cov) if df_cov is not None else None
-
-        prec_pivot_main = _pivot_prec(base_main)
-        prec_pivot_cov  = _pivot_prec(base_cov)
-
-        # IMPORTANT: write directly into dfs[...] so we don't enforce INDEX alignment
-        if prec_pivot_main is not None:
-            self.intermediate_results.dfs["raw_unfiltered"] = prec_pivot_main
-        if prec_pivot_cov is not None:
-            self.intermediate_results.dfs["raw_unfiltered_covariate"] = prec_pivot_cov
 
     @log_time("Filtering")
     def _filter(self, df: pl.DataFrame) -> None:
@@ -320,7 +220,19 @@ class Preprocessor:
         for path in self.remove_contaminants:
             all_contaminants |= load_contaminant_accessions(path)
 
-        mask_keep = ~pl.col("INDEX").is_in(list(all_contaminants))
+        contaminants_list = list(all_contaminants)
+
+        # A row is contaminant if ANY accession in its semicolon-separated INDEX is in contaminants_list
+        mask_is_contam = (
+            pl.col("INDEX")
+            .cast(pl.Utf8, strict=False)
+            .str.split(";")
+            .list.eval(pl.element().str.strip_chars())
+            .list.eval(pl.element().is_in(contaminants_list))
+            .list.any()      # True if any element is contaminant
+        )
+
+        mask_keep = ~mask_is_contam
 
         # keep & drop
         df_kept    = df.filter(mask_keep)

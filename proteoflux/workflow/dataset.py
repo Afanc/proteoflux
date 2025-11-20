@@ -312,20 +312,28 @@ class Dataset:
         pep_wide_mat  = self.preprocessed_data.peptides_wide
         pep_cent_mat  = self.preprocessed_data.peptides_centered
 
-        raw_unfiltered_mat      = getattr(self.preprocessed_data, "raw_unfiltered", None)
-        raw_unfiltered_cov_mat  = getattr(self.preprocessed_data, "raw_covariate_unfiltered", None)
-
         protein_meta_df = self.preprocessed_data.protein_meta.to_pandas().set_index("INDEX")
+
+        parent_protein_map = None
+        if "PARENT_PROTEIN" in protein_meta_df.columns:
+            tmp = protein_meta_df["PARENT_PROTEIN"].copy()
+            tmp.index = tmp.index.astype(str)
+            parent_protein_map = tmp
+
 
         # Use filtered_mat to infer sample names (columns) and protein IDs (rows)
         X, protein_index = polars_matrix_to_numpy(processed_mat, index_col="INDEX")
+        X = np.asarray(X, dtype=np.float32)
 
         # Ensure the metadata index matches the order of protein_index from X
         protein_meta_df = protein_meta_df.loc[protein_index]
 
         # Layers
         def _to_np(opt_df):
-            return polars_matrix_to_numpy(opt_df, index_col="INDEX")
+            arr, idx = polars_matrix_to_numpy(opt_df, index_col="INDEX")
+            if arr is not None:
+                arr = np.asarray(arr, dtype=np.float32)
+            return arr, idx
 
         # protein level data
         qval, _       = _to_np(qval_mat)
@@ -336,56 +344,6 @@ class Dataset:
         lognorm, _    = _to_np(lognorm_mat)
         normalized, _ = _to_np(normalized_mat)
         raw, _        = _to_np(filtered_mat)
-
-        # raw precursor level data
-        raw_unf = raw_unf_idx = None
-        if raw_unfiltered_mat is not None:
-            # keep PRECURSOR_ID as index, drop INDEX from the numeric part
-            sample_names = [c for c in processed_mat.columns if c != "INDEX"]
-            prec_cols = ["PRECURSOR_ID"] + [c for c in sample_names if c in raw_unfiltered_mat.columns]
-
-            raw_unf, raw_unf_idx = polars_matrix_to_numpy(
-                raw_unfiltered_mat.select(prec_cols),
-                index_col="PRECURSOR_ID",
-            )
-
-        # Map each precursor (row) back to its protein INDEX
-        # raw_unfiltered_mat still has INDEX + PRECURSOR_ID
-        prec_index_df = (
-            raw_unfiltered_mat
-            .select(["PRECURSOR_ID", "INDEX"])
-            .unique()
-            .to_pandas()
-            .set_index("PRECURSOR_ID")
-        )
-
-        # Align to the same order as raw_unf_idx (rows of the matrix)
-        protein_index_for_rows = (
-            prec_index_df.loc[list(raw_unf_idx), "INDEX"]
-            .astype(str)        # or keep native dtype if you prefer
-            .to_numpy()
-        )
-
-        raw_unf_cov = raw_unf_cov_idx = None
-        if raw_unfiltered_cov_mat is not None:
-            prec_cols_cov = [c for c in raw_unfiltered_cov_mat.columns if c != "INDEX"]
-
-            raw_unf_cov, raw_unf_cov_idx = polars_matrix_to_numpy(
-                raw_unfiltered_cov_mat.select(prec_cols_cov),
-                index_col="PRECURSOR_ID",
-            )
-            prec_index_cov_df = (
-                raw_unfiltered_cov_mat
-                .select(["PRECURSOR_ID", "INDEX"])
-                .unique()
-                .to_pandas()
-                .set_index("PRECURSOR_ID")
-            )
-            protein_index_for_rows_cov = (
-                prec_index_cov_df.loc[list(raw_unf_cov_idx), "INDEX"]
-                .astype(str)
-                .to_numpy()
-            )
 
         # Create var and obs metadata
         sample_names = [col for col in processed_mat.columns if col != "INDEX"]
@@ -504,26 +462,6 @@ class Dataset:
             "de_method":     "limma_ebayes",
             "analysis_type": self.analysis_type,
         }
-
-        # Store raw precursor level data
-        sample_names = [c for c in processed_mat.columns if c != "INDEX"]
-
-        # shape: (n_raw_precursors × n_samples), stored as float32 to keep size reasonable
-        if raw_unf is not None:
-            self.adata.uns["raw_input"] = {
-                "rows": [str(x) for x in raw_unf_idx],   # PRECURSOR_IDs (LSEQ:CHARGE)
-                "index":  protein_index_for_rows,            # protein INDEX per precursor
-                "cols": sample_names,
-                "matrix": np.asarray(raw_unf, dtype=np.float32),
-            }
-
-        if raw_unf_cov is not None:
-            self.adata.uns["raw_input_covariate"] = {
-                "rows": [str(x) for x in raw_unf_cov_idx],
-                "index":  protein_index_for_rows_cov,
-                "cols": sample_names,
-                "matrix": np.asarray(raw_unf_cov, dtype=np.float32),
-            }
 
         # check index is fine between proteins and matrix index
         assert list(protein_meta_df.index) == list(protein_index)
