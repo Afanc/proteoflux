@@ -66,6 +66,7 @@ class Preprocessor:
         # Pivoting
         self.pivot_signal_method = config.get("pivot_signal_method", "sum")
         self.directlfq_cores = config.get("directlfq_cores", 4)
+        self.directlfq_min_nonan = config.get("directlfq_min_nonan", 1)
 
         # Normalization
         self.normalization = config.get("normalization")
@@ -741,7 +742,7 @@ class Preprocessor:
         dlcfg.QUANT_ID   = ion_col
         prot_df, _ = estimate_protein_intensities(
             normed_df=pw,
-            min_nonan=1,
+            min_nonan=self.directlfq_min_nonan,
             num_samples_quadratic=2,
             num_cores=self.directlfq_cores,
         )

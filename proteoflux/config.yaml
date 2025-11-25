@@ -22,8 +22,9 @@ dataset:
   peptide_seq_column: "FG.LabeledSequence"
 
 preprocessing:
-  pivot_signal_method: "sum"
+  pivot_signal_method: "directlfq"
   directlfq_cores: 8
+  directlfq_min_nonan: 3
   filtering:
     qvalue: 0.01
     pep: 0.003
