@@ -2,6 +2,7 @@ import re
 import polars as pl
 from typing import Dict
 from proteoflux.utils.utils import log_time, logger, log_info, log_warning
+from proteoflux.utils.ptm_map import PTM_MAP
 
 
 class DataHarmonizer:
@@ -18,13 +19,14 @@ class DataHarmonizer:
         "spectral_counts_column": "SPECTRAL_COUNTS",
         "fasta_column": "FASTA_HEADERS",
         "protein_weight": "PROTEIN_WEIGHT",
-        "protein_descriptions": "PROTEIN_DESCRIPTIONS",
-        "gene_names": "GENE_NAMES",
+        "protein_descriptions_column": "PROTEIN_DESCRIPTIONS",
+        "gene_names_column": "GENE_NAMES",
         "precursors_exp_column": "PRECURSORS_EXP",
         "ibaq_column": "IBAQ",
         "peptide_seq_column": "PEPTIDE_LSEQ",
         "uniprot_column": "UNIPROT", #this should be default, and then index_column is redefined as additional to that
         "modified_seq_column": "MODIFIED_SEQUENCE",
+        "peptide_start_column": "PEPTIDE_START",
         "charge_column": "CHARGE",
         "ptm_positions_column": "PTM_POSITIONS_STR",
         "ptm_probabilities_column": "PTM_PROBS_STR",
@@ -37,10 +39,14 @@ class DataHarmonizer:
         self.column_map: Dict[str, str] = {}
         self.annotation_file = column_config.get("annotation_file", None)
 
-        # vendor-agnostic layout toggle (required if data are pre-pivoted)
-        # Accepted: "long" (default), "wide"
         self.input_layout = (column_config.get("input_layout") or "long").strip().lower()
         self.analysis_type = (column_config.get("analysis_type") or "DIA").strip().lower()
+
+        self.signal_key = column_config.get("signal_column")
+        self.spectral_counts_key = column_config.get("spectral_counts_column")
+
+        self.convert_numeric_ptms = bool(column_config.get("convert_numeric_ptms", True))
+        self.collapse_all_ptms = bool(column_config.get("collapse_all_ptms", False))
 
         for config_key, std_name in self.DEFAULT_COLUMN_MAP.items():
             original_col = column_config.get(config_key)
@@ -141,6 +147,14 @@ class DataHarmonizer:
                     )
                 rename_map[original] = target
             else:
+                # For wide input without annotation, 'signal_column' and 'spectral_counts_column'
+                # have already been consumed when melting (e.g. 'A_1 Intensity' -> SIGNAL).
+                if (
+                    self.input_layout == "wide"
+                    and not self.annotation_file
+                    and original in {self.signal_key, self.spectral_counts_key}
+                ):
+                    continue
                 log_warning(f"Column '{original}' not found in input data, skipping harmonization for it.")
 
         return df.rename(rename_map) if rename_map else df
@@ -189,7 +203,221 @@ class DataHarmonizer:
 
         return df
 
+    def _melt_wide_to_long_no_annotation(self, df: pl.DataFrame) -> pl.DataFrame:
+        """
+        Melt a wide matrix without external annotation.
+
+        Uses dataset.signal_column (signal_key) to detect intensity columns,
+        and expects column names of the form '<CONDITION>_<N> <signal_key>',
+        for example: 'A_1 Intensity', 'B_4 Intensity', ...
+        """
+        if not self.signal_key:
+            raise ValueError(
+                "Wide input without annotation: dataset.signal_column must be set "
+                "(for FragPipe this is typically 'Intensity')."
+            )
+
+        pattern = re.compile(rf"^(.+?)\s+{re.escape(self.signal_key)}$")
+
+        signal_cols: list[str] = []
+        labels: list[str] = []
+
+        for col in df.columns:
+            m = pattern.match(col)
+            if m:
+                signal_cols.append(col)
+                labels.append(m.group(1).strip())
+
+        if not signal_cols:
+            raise ValueError(
+                f"Wide input without annotation: no columns match the pattern "
+                f"'<LABEL> {self.signal_key}'\"".rstrip()
+                + f". Example columns: {df.columns[:10]}"
+            )
+
+        # Parse labels as CONDITION + numeric replicate index (e.g. A_1, B_4, ...)
+        conds: list[str] = []
+        repls: list[int] = []
+        label_re = re.compile(r"^([A-Za-z]+)_(\d+)$")
+
+        for lab in labels:
+            m = label_re.match(lab)
+            if not m:
+                raise ValueError(
+                    "Wide input without annotation: cannot parse sample label "
+                    f"'{lab}' as '<CONDITION>_<number>'. "
+                    f"Example labels: {labels[:10]}"
+                )
+            conds.append(m.group(1))
+            repls.append(int(m.group(2)))
+
+        # Build small channel metadata table
+        channel_meta = pl.DataFrame(
+            {
+                "CHANNEL": signal_cols,
+                "FILENAME": labels,
+                "CONDITION": conds,
+                "REPLICATE": repls,
+            }
+        )
+                # Optionally detect spectral-count channels using the same LABEL set
+        count_cols: list[str] = []
+        if self.spectral_counts_key:
+            pattern_counts = re.compile(rf"^(.+?)\s+{re.escape(self.spectral_counts_key)}$")
+
+            count_labels: list[str] = []
+            for col in df.columns:
+                m = pattern_counts.match(col)
+                if m:
+                    count_cols.append(col)
+                    count_labels.append(m.group(1).strip())
+
+            if count_cols:
+                # Require exact match of labels between intensity and spectral counts
+                if set(count_labels) != set(labels):
+                    raise ValueError(
+                        "Wide input without annotation: intensity and spectral-count channel labels do not match.\n"
+                        f"  Intensity labels: {sorted(set(labels))}\n"
+                        f"  Spectral-count labels: {sorted(set(count_labels))}"
+                    )
+            else:
+                # Config requested spectral_counts_column, but no matching wide columns
+                raise ValueError(
+                    "Wide input without annotation: 'spectral_counts_column' was set "
+                    f"to '{self.spectral_counts_key}', but no columns match the pattern "
+                    f"'<LABEL> {self.spectral_counts_key}'."
+                )
+
+        # Identifier columns are everything except the intensity and spectral-count channels
+        id_vars = [c for c in df.columns if c not in signal_cols and c not in count_cols]
+        if not id_vars:
+            raise ValueError(
+                "Wide input without annotation: no identifier columns left after "
+                "selecting signal channels. Check your input table."
+            )
+
+        # Identifier columns are everything except the intensity channels
+        if not id_vars:
+            raise ValueError(
+                "Wide input without annotation: no identifier columns left after "
+                "selecting signal channels. Check your input table."
+            )
+
+        # Melt intensities
+        long_int = df.melt(
+            id_vars=id_vars,
+            value_vars=signal_cols,
+            variable_name="CHANNEL_INT",
+            value_name="SIGNAL",
+        ).with_columns(
+            pl.col("CHANNEL_INT").cast(pl.Utf8),
+            pl.col("SIGNAL").cast(pl.Float64, strict=False),
+        )
+
+        # Attach FILENAME, CONDITION, REPLICATE for intensities
+        long_int = long_int.join(
+            channel_meta.rename({"CHANNEL": "CHANNEL_INT"}),
+            on="CHANNEL_INT",
+            how="left",
+        ).drop("CHANNEL_INT")
+
+        # Optionally melt spectral counts and join on id_vars + FILENAME
+        if self.spectral_counts_key and count_cols:
+            channel_counts_meta = pl.DataFrame(
+                {
+                    "CHANNEL_CNT": count_cols,
+                    "FILENAME": count_labels,
+                }
+            )
+
+            long_cnt = df.melt(
+                id_vars=id_vars,
+                value_vars=count_cols,
+                variable_name="CHANNEL_CNT",
+                value_name="SPECTRAL_COUNTS",
+            ).with_columns(
+                pl.col("CHANNEL_CNT").cast(pl.Utf8),
+                pl.col("SPECTRAL_COUNTS").cast(pl.Float64, strict=False),
+            )
+
+            long_cnt = long_cnt.join(channel_counts_meta, on="CHANNEL_CNT", how="left").drop("CHANNEL_CNT")
+
+            join_keys = id_vars + ["FILENAME"]
+            long_df = long_int.join(long_cnt, on=join_keys, how="left")
+        else:
+            long_df = long_int
+
+        # Tag layout
+        long_df = long_df.with_columns(pl.lit("wide").alias("INPUT_LAYOUT"))
+
+        # Informative log (same as in 1.)
+        preview_df = (
+            long_df.select(["FILENAME", "CONDITION", "REPLICATE"])
+                   .unique()
+                   .sort(["CONDITION", "REPLICATE"])
+                   .head(10)
+        )
+        lines = []
+        for row in preview_df.iter_rows(named=True):
+            lines.append(
+                f"    FILENAME={row['FILENAME']} | "
+                f"CONDITION={row['CONDITION']} | "
+                f"REPLICATE={row['REPLICATE']}"
+            )
+
+        msg = (
+            f"Wide input without annotation: inferred {len(signal_cols)} runs "
+            f"from columns ending with ' {self.signal_key}'.\n"
+            f"  Example mappings:\n" + "\n".join(lines)
+        )
+        log_info(msg)
+
+        return long_df
+
     def _melt_wide_to_long(self, df: pl.DataFrame) -> pl.DataFrame:
+        """
+        Melt a wide matrix into the canonical long schema.
+
+        If an annotation file is provided, it is used to define channels and metadata.
+        If not, channels are inferred from columns ending with '<signal_key>'.
+        """
+        if self.annotation_file:
+            ann = self._load_annotation()
+            channels = ann.select("FILENAME").unique().to_series().to_list() #TODO change, channels to filename. tmt outdated anyway... or use both filenames/channels
+
+            # Strict two-way validation before melt
+            self._validate_wide_annotation(df, ann)
+
+            id_vars = [c for c in df.columns if c not in channels]
+            if not id_vars:
+                raise ValueError(
+                    "No identifier columns left after selecting channels; "
+                    "check your annotation and table."
+                )
+
+            long_df = df.melt(
+                id_vars=id_vars,
+                value_vars=channels,
+                variable_name="FILENAME",
+                value_name="SIGNAL",
+            ).with_columns(
+                pl.col("FILENAME").cast(pl.Utf8),
+                pl.col("SIGNAL").cast(pl.Float64, strict=False),
+            )
+
+            alias_map = {}
+            if "Spectrum Number" in long_df.columns:
+                alias_map["Spectrum Number"] = "PRECURSORS_EXP"
+            if alias_map:
+                long_df = long_df.rename(alias_map)
+
+            long_df = long_df.with_columns(pl.lit("wide").alias("INPUT_LAYOUT"))
+            return long_df
+
+        # No annotation: infer channels, FILENAME, CONDITION, REPLICATE from headers
+        return self._melt_wide_to_long_no_annotation(df)
+
+    def _melt_wide_to_long_old(self, df: pl.DataFrame) -> pl.DataFrame:
         """Use annotation to melt a wide matrix into the canonical long schema."""
         ann = self._load_annotation()
         channels = ann.select("FILENAME").unique().to_series().to_list()
@@ -227,11 +455,131 @@ class DataHarmonizer:
     def _strip_mods(self, s: str) -> str:
         if s is None:
             return None
+
+        #if self.convert_numeric_ptms:
+        #    s = self._convert_numeric_ptms(s)
+
+        out = s.strip("_")
+
+        # 1) n-terminal tags
+        out = re.sub(r"^n\[[^]]*\](?=[A-Z])", "", out)
+
+        # 2) C-terminal tags
+        out = re.sub(r"c\[[^]]*\]$", "", out)
+
+        # Generic: drop any bracketed annotation and parentheses
+        out = re.sub(r"\[.*?\]", "", out)
+        out = out.replace("(", "").replace(")", "")
+
+        return out
+
+    def _convert_numeric_ptms(self, s: str | None) -> str | None:
+        """
+        Convert numeric mass tags (e.g. C[57.0215]) to named PTMs using PTM_MAP.
+
+        Expected PTM_MAP structure (flexible):
+
+            PTM_MAP = {
+                "57.0215": "Carbamidomethyl (C)",
+                "15.9949": "Oxidation (M)",
+                ...
+            }
+
+        or
+
+            PTM_MAP = {
+                "57.0215": {"name": "Carbamidomethyl (C)", "unimod": "UNIMOD:4", ...},
+                ...
+            }
+
+        We try a few string formats of the mass to be robust (raw, 4dp, 6dp).
+        """
+        if s is None:
+            return None
+
+        if not self.convert_numeric_ptms:
+            return s
+
+        def _replace(match: re.Match) -> str:
+            token = match.group(1)  # AA letter or 'n'/'c'
+            mass_raw = match.group(2)
+
+            try:
+                mass_val = float(mass_raw)
+            except ValueError:
+                return match.group(0)
+
+            # try a few representations as keys
+            candidates = {
+                mass_raw,
+                f"{mass_val:.4f}",
+                f"{mass_val:.5f}",
+                f"{mass_val:.6f}",
+            }
+
+            name = None
+            meta = None
+            for key in candidates:
+                if key in PTM_MAP:
+                    meta = PTM_MAP[key]
+                    if isinstance(meta, dict):
+                        name = meta.get("name") or meta.get("label") or key
+                    else:
+                        name = str(meta)
+                    break
+
+            if name is None:
+                # unknown mass -> leave numeric tag as-is
+                return match.group(0)
+
+            # Example outcome: C[Carbamidomethyl (C)], M[Oxidation (M)], n[Acetyl (Protein N-term)]
+            return f"{token}[{name}]"
+
+        # matches AA[float] or n[float] / c[float]
+        return re.sub(r"([A-Znc])\[(\-?\d+\.\d+)\]", _replace, s)
+
+    def _strip_mods_old(self, s: str) -> str:
+        if s is None:
+            return None
         # Spectronaut often wraps with underscores and brackets: _ACD[Carbamidomethyl (C)]EF_
         out = s.strip("_")
         out = re.sub(r"\[.*?\]", "", out)   # drop bracketed annotations
         out = out.replace("(", "").replace(")", "")  # safety for exotic exporters
         return out
+
+    def _normalize_peptido_index_seq(self, s: str | None) -> str | None:
+        """
+        Build the peptidomics INDEX sequence from a modified sequence.
+
+        Order:
+          1) convert numeric PTMs to names via PTM_MAP
+          2) strip leading/trailing '_' and simple wrappers
+          3) strip Oxidation on Met and N-terminal acetylation
+          4) optionally collapse all remaining PTMs if collapse_all_ptms is True
+
+        By default (collapse_all_ptms = False), other PTMs remain and define
+        distinct INDEX entries for modified vs unmodified peptides.
+        """
+        if s is None:
+            return None
+
+        # 1) numeric mass -> named PTMs (for FragPipe)
+        seq = self._convert_numeric_ptms(s)
+
+        # 2) trim underscores and whitespace
+        seq = seq.strip("_").strip()
+
+        # 3) strip Oxidation on M (either numeric already converted, or native Spectronaut)
+        #     Example patterns after conversion: M[Oxidation (M)]
+        seq = re.sub(r"M\[[^]]*Oxidation[^]]*\]", "M", seq)
+
+        # 4) optional global PTM collapse: everything else gets its brackets removed
+        if self.collapse_all_ptms:
+            seq = re.sub(r"^n\[[^]]*\](?=[A-Z])", "", seq)
+            seq = re.sub(r"c\[[^]]*\]$", "", seq)
+            seq = re.sub(r"\[[^]]+\]", "", seq)
+
+        return seq
 
     def _assert_required_phospho_columns(self, df: pl.DataFrame) -> None:
         required = {"PEPTIDE_LSEQ", "PTM_POSITIONS_STR"}
@@ -265,27 +613,31 @@ class DataHarmonizer:
 
     @log_time("Building Peptide Index")
     def _build_peptido_index(self, df: pl.DataFrame) -> pl.DataFrame:
-        # choose a real sequence source (std or vendor)
-        cand_cols = [
-            "PEPTIDE_LSEQ", "PEP_SEQUENCE", "MODIFIED_SEQUENCE",  # standardized names (if mapped)
-            "PEP.StrippedSequence", "EG.ModifiedSequence", "FG.LabeledSequence"  # vendor fallbacks
-        ]
-        seq_col = self._first_existing(df, cand_cols)
-        if seq_col is None:
-            raise ValueError("[PEPTIDOMICS] No sequence column found (tried: "
-                             + ", ".join(cand_cols) + "). Map one in the config.")
+        if "PEPTIDE_LSEQ" not in df.columns:
+            raise ValueError(
+                "[PEPTIDOMICS] Missing required column 'PEPTIDE_LSEQ'. "
+                "Map 'peptide_seq_column' to the modified peptide sequence in the config."
+            )
 
         df = df.with_columns(
-            pl.col(seq_col).cast(pl.Utf8).alias("_seq_candidate")
+            pl.col("PEPTIDE_LSEQ").cast(pl.Utf8).alias("_seq_candidate")
         ).with_columns(
-            pl.col("_seq_candidate").map_elements(self._strip_mods, return_dtype=str).alias("STRIPPED_SEQ")
+            pl.col("_seq_candidate")
+              .map_elements(self._strip_mods, return_dtype=str)
+              .alias("STRIPPED_SEQ"),
+            pl.col("_seq_candidate")
+              .map_elements(self._normalize_peptido_index_seq, return_dtype=str)
+              .alias("_INDEX_SEQ"),
         ).drop(["_seq_candidate"], strict=False)
 
         df = df.with_columns(
             pl.col("STRIPPED_SEQ").alias("PARENT_PEPTIDE_ID"),
-            pl.when(pl.col("UNIPROT").is_not_null()).then(pl.col("UNIPROT")).otherwise(None).alias("PARENT_PROTEIN"),
-            pl.col("STRIPPED_SEQ").alias("INDEX"),
-        )
+            pl.when(pl.col("UNIPROT").is_not_null())
+              .then(pl.col("UNIPROT"))
+              .otherwise(None)
+              .alias("PARENT_PROTEIN"),
+            pl.col("_INDEX_SEQ").alias("INDEX"),
+        ).drop(["_INDEX_SEQ"], strict=False)
 
         if "ASSAY" not in df.columns:
             df = df.with_columns(pl.lit("PEPTIDOMICS").alias("ASSAY"))
@@ -296,16 +648,14 @@ class DataHarmonizer:
     def _build_phospho_index(self, df: pl.DataFrame) -> pl.DataFrame:
         df = self._assert_required_phospho_columns(df)
 
-        cand_cols = [
-            "PEPTIDE_LSEQ", "PEP_SEQUENCE", "MODIFIED_SEQUENCE",
-            "PEP.StrippedSequence", "EG.ModifiedSequence", "FG.LabeledSequence"
-        ]
-        seq_col = self._first_existing(df, cand_cols)
-        if seq_col is None:
-            raise ValueError("[PHOSPHO] No sequence column found (tried: " + ", ".join(cand_cols) + ").")
+        if "PEPTIDE_LSEQ" not in df.columns:
+            raise ValueError(
+                "[PHOSPHO] Missing required column 'PEPTIDE_LSEQ'. "
+                "Map 'peptide_seq_column' to the modified peptide sequence in the config."
+            )
 
         df = df.with_columns(
-            pl.col(seq_col).cast(pl.Utf8).alias("_seq_candidate")
+            pl.col("PEPTIDE_LSEQ").cast(pl.Utf8).alias("_seq_candidate")
         ).with_columns(
             pl.col("_seq_candidate").map_elements(self._strip_mods, return_dtype=str).alias("STRIPPED_SEQ")
         ).drop(["_seq_candidate"], strict=False)
@@ -326,7 +676,7 @@ class DataHarmonizer:
             pl.col("_prob_list").cast(pl.Utf8).str.strip_chars().replace("", None).cast(pl.Float64, strict=False).alias("LOC_PROB"),
         ).filter(pl.col("SITE_POS").is_not_null())
 
-        # Normalize probs and drop zero-prob candidates (keeps only truly localized sites)
+        # Normalize probs and drop zero-prob candidates
         exploded = exploded.with_columns(
             pl.when((pl.col("LOC_PROB") > 1.0) & (pl.col("LOC_PROB").is_not_null()))
               .then(pl.col("LOC_PROB") / 100.0)
@@ -344,7 +694,6 @@ class DataHarmonizer:
 
         return out
 
-
     @log_time("Data Harmonizing")
     def harmonize(self, df: pl.DataFrame) -> pl.DataFrame:
         if self.input_layout not in {"long", "wide"}:
@@ -352,11 +701,36 @@ class DataHarmonizer:
 
         if self.input_layout == "wide":
             df = self._melt_wide_to_long(df)
-            df = self._standardize_then_inject(df)
-            return df
+
+        df = self._standardize_then_inject(df)
+
+        # tag source for downstream
+        #if "SOURCE" not in df.columns and self.software:
+        #    df = df.with_columns(pl.lit(self.software).alias("SOURCE"))
+
+        if self.analysis_type == "phospho":
+            df = self._build_phospho_index(df)
+        elif self.analysis_type == "peptidomics":
+            df = self._build_peptido_index(df)
+
+        return df
+
+    @log_time("Data Harmonizing")
+    def harmonize_old(self, df: pl.DataFrame) -> pl.DataFrame:
+        if self.input_layout not in {"long", "wide"}:
+            raise ValueError("dataset.input_layout must be 'long' or 'wide'.")
+
+        if self.input_layout == "wide":
+            df = self._melt_wide_to_long(df)
+            #df = self._standardize_then_inject(df)
+            #return df
 
         # long
         df = self._standardize_then_inject(df)
+
+        # tag source for downstream
+        if "SOURCE" not in df.columns and self.software:
+            df = df.with_columns(pl.lit(self.software).alias("SOURCE"))
 
         if self.analysis_type == "phospho":
             df = self._build_phospho_index(df)

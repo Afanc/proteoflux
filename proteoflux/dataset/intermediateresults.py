@@ -19,6 +19,7 @@ class IntermediateResults:
         "filtering": {},
         "normalization": {},
         "covariate": {},
+        "quantification": {},
         "imputation": {}})
 
     # DataFrame columns post-pivot (samples)
@@ -61,7 +62,7 @@ class IntermediateResults:
 
     def add_metadata(self, step: str, key: str, value: Any):
         """Store metadata like regression type, scale, etc."""
-        if step not in ["filtering", "normalization", "imputation", "covariate"]:
+        if step not in ["filtering", "normalization", "imputation", "covariate", "quantification"]:
             raise ValueError("step must be 'normalization' or 'imputation'")
         self.metadata[step][key] = value
 

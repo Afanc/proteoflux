@@ -28,7 +28,7 @@ dataset:
   fasta_column: "PG.FastaHeaders"
   protein_weight: "PG.MolecularWeight"
   protein_descriptions: "PG.ProteinDescriptions"
-  gene_names: "PG.Genes"
+  gene_names_column: "PG.Genes"
 
   uniprot_column: "PG.ProteinGroups"
   stripped_seq_column: "PEP.StrippedSequence"

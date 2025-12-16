@@ -21,8 +21,9 @@ from proteoflux.utils.utils import polars_matrix_to_numpy, log_time, logger, log
 
 pl.Config.set_tbl_rows(100)
 
-# Supnress the ImplicitModificationWarning from AnnData
+# Suppress the ImplicitModificationWarning from AnnData
 warnings.filterwarnings("ignore", category=UserWarning, message=".*Transforming to str index.*")
+
 
 class Dataset:
     """Main entry point for loading, preprocessing, and exporting to AnnData."""
@@ -33,7 +34,7 @@ class Dataset:
         # Dataset-specific config
         dataset_cfg = kwargs.get("dataset", {})
         self.file_path = dataset_cfg.get("input_file", None)
-        self.load_method = dataset_cfg.get("load_method", 'polars')
+        self.load_method = dataset_cfg.get("load_method", "polars")
         self.input_layout = dataset_cfg.get("input_layout", "long")
         self.analysis_type = dataset_cfg.get("analysis_type", "DIA")
 
@@ -108,8 +109,10 @@ class Dataset:
             # 2) build a per-injection harmonizer config
             #    start from the original dataset section so column mappings are identical by default
             eff_cfg = deepcopy(self._dataset_cfg_original)
-            eff_cfg["input_layout"]    = inject_cfg.get("input_layout",   eff_cfg.get("input_layout", self.input_layout))
-            eff_cfg["analysis_type"]   = inject_cfg.get("analysis_type",  "DIA")
+            eff_cfg["input_layout"] = inject_cfg.get(
+                "input_layout", eff_cfg.get("input_layout", self.input_layout)
+            )
+            eff_cfg["analysis_type"] = inject_cfg.get("analysis_type", "DIA")
             eff_cfg["annotation_file"] = inject_cfg.get("annotation_file", None)
 
             # 3) harmonize with its own annot (no cross-merge!)
@@ -129,9 +132,11 @@ class Dataset:
             df_inj = df_inj.with_columns(pl.lit(is_cov).alias("IS_COVARIATE"))
 
             # logging: shape & covariate status
-            log_info(f"Injected run '{inject_name}': rows={len(df_inj)}, "
-                     f"assay='{df_inj.select(pl.col('ASSAY').first()).item()}', "
-                     f"is_covariate={is_cov}")
+            log_info(
+                f"Injected run '{inject_name}': rows={len(df_inj)}, "
+                f"assay='{df_inj.select(pl.col('ASSAY').first()).item()}', "
+                f"is_covariate={is_cov}"
+            )
 
             # normalize dtypes we care about (avoids mixed Utf8/Null later)
             df_inj = df_inj.with_columns(pl.col("ASSAY").cast(pl.Utf8))
@@ -171,9 +176,9 @@ class Dataset:
             # add missing columns with proper dtype
             missing = [c for c in ordered_cols if c not in df.columns]
             if missing:
-                df = df.with_columns([
-                    pl.lit(None).cast(target_dtype[c]).alias(c) for c in missing
-                ])
+                df = df.with_columns(
+                    [pl.lit(None).cast(target_dtype[c]).alias(c) for c in missing]
+                )
             # cast existing columns to target dtype
             casts = []
             for c in ordered_cols:
@@ -207,18 +212,30 @@ class Dataset:
                 # make sure primary has the same boolean tag columns with False
                 for inject_name in self.inject_runs_cfg.keys():
                     if inject_name not in self.rawinput.columns:
-                        self.rawinput = self.rawinput.with_columns(pl.lit(False).alias(inject_name))
+                        self.rawinput = self.rawinput.with_columns(
+                            pl.lit(False).alias(inject_name)
+                        )
 
                 # ensure IS_COVARIATE exists on the primary and is False
                 if "IS_COVARIATE" not in self.rawinput.columns:
-                    self.rawinput = self.rawinput.with_columns(pl.lit(False).alias("IS_COVARIATE"))
+                    self.rawinput = self.rawinput.with_columns(
+                        pl.lit(False).alias("IS_COVARIATE")
+                    )
                 else:
-                    self.rawinput = self.rawinput.with_columns(pl.coalesce([pl.col("IS_COVARIATE"), pl.lit(False)]).alias("IS_COVARIATE"))
+                    self.rawinput = self.rawinput.with_columns(
+                        pl.coalesce(
+                            [pl.col("IS_COVARIATE"), pl.lit(False)]
+                        ).alias("IS_COVARIATE")
+                    )
 
                 # ASSAY dtype guard on primary too (prevents Utf8/Null mismatches)
                 if "ASSAY" in self.rawinput.columns:
-                    self.rawinput = self.rawinput.with_columns(pl.col("ASSAY").cast(pl.Utf8))
-                self.rawinput = self._concat_relaxed([self.rawinput] + injected_frames)
+                    self.rawinput = self.rawinput.with_columns(
+                        pl.col("ASSAY").cast(pl.Utf8)
+                    )
+                self.rawinput = self._concat_relaxed(
+                    [self.rawinput] + injected_frames
+                )
 
         # Exclude files if any
         self.rawinput = self._apply_exclude_runs(self.rawinput)
@@ -234,7 +251,9 @@ class Dataset:
         if not self.exclude_runs:
             return df
         if "FILENAME" not in df.columns:
-            log_info("Exclude runs: 'FILENAME' not present after harmonization → skip.")
+            log_info(
+                "Exclude runs: 'FILENAME' not present after harmonization → skip."
+            )
             return df
 
         present = set(df.select("FILENAME").to_series().to_list())
@@ -244,7 +263,9 @@ class Dataset:
         if missing:
             head = ", ".join(missing[:10])
             tail = " ..." if len(missing) > 10 else ""
-            log_info(f"Exclude runs: {len(missing)} not found in data → ignored: [{head}{tail}]")
+            log_info(
+                f"Exclude runs: {len(missing)} not found in data → ignored: [{head}{tail}]"
+            )
 
         if not to_drop:
             log_info("Exclude runs: nothing to drop.")
@@ -253,32 +274,33 @@ class Dataset:
         n_before = df.height
         df2 = df.filter(~pl.col("FILENAME").is_in(to_drop))
         n_after = df2.height
-        log_info(f"Exclude runs: dropped {len(to_drop)} run(s), removed {n_before - n_after} row(s).")
+        log_info(
+            f"Exclude runs: dropped {len(to_drop)} run(s), removed {n_before - n_after} row(s)."
+        )
 
         return df2
 
     @log_time("Data Loading")
     def _load_rawdata(self, file_path: str) -> Union[pl.DataFrame, pd.DataFrame]:
-        """Load raw data from a CSV or TSV using Polars/PyArrow/Pandas backends (for testing, using polars now)."""
+        """Load raw data from a CSV or TSV using Polars/PyArrow/Pandas backends."""
         if not file_path.endswith((".csv", ".tsv")):
             raise ValueError("Only CSV or TSV files are supported.")
 
         delimiter = "\t" if file_path.endswith(".tsv") else ","
 
-        if self.load_method == 'polars':
-            # Use Polars to load the data
-            df = pl.read_csv(file_path,
+        if self.load_method == "polars":
+            df = pl.read_csv(
+                file_path,
                 separator=delimiter,
                 infer_schema_length=10000,
-                null_values=["NA", "NaN", "N/A", ""])
+                null_values=["NA", "NaN", "N/A", ""],
+            )
             return df
-        elif self.load_method == 'pyarrow':
-            # Use pyarrow, eh it's better than pandas but still slow
+        elif self.load_method == "pyarrow":
             parse_options = pv_csv.ParseOptions(delimiter=delimiter)
             arrow_table = pv_csv.read_csv(file_path, parse_options=parse_options)
             return pl.from_arrow(arrow_table)
-        elif self.load_method == 'pandas':
-            # Use pandas to load the data, why would I ever do this
+        elif self.load_method == "pandas":
             df = pd.read_csv(file_path, delimiter=delimiter)
             return pl.from_pandas(df)
         else:
@@ -289,30 +311,33 @@ class Dataset:
         """Run preprocessing (normalization, imputation, pivots) via `Preprocessor`."""
 
         preprocessed_results = self.preprocessor.fit_transform(df)
-
         return preprocessed_results
 
     @log_time("Conversion to AnnData")
     def _convert_to_anndata(self) -> None:
         """Convert preprocessed results into an AnnData object (layers + metadata)."""
 
-        # Extract matrices
-        filtered_mat = self.preprocessed_data.filtered #filtered before log
-        lognorm_mat = self.preprocessed_data.lognormalized #post log
-        normalized_mat = self.preprocessed_data.normalized # post norm
-        processed_mat = self.preprocessed_data.processed # post impu
+        # Extract matrices from PreprocessResults
+        filtered_mat = self.preprocessed_data.filtered  # filtered before log
+        lognorm_mat = self.preprocessed_data.lognormalized  # post log
+        normalized_mat = self.preprocessed_data.normalized  # post norm
+        processed_mat = self.preprocessed_data.processed  # post impu
         centered_cov_mat = getattr(self.preprocessed_data, "centered_covariate", None)
         qval_mat = self.preprocessed_data.qvalues
         pep_mat = self.preprocessed_data.pep
         locprob_mat = getattr(self.preprocessed_data, "locprob", None)
         sc_mat = self.preprocessed_data.spectral_counts
         ibaq_mat = self.preprocessed_data.ibaq
-        condition_df = self.preprocessed_data.condition_pivot.to_pandas().set_index("Sample")
+        condition_df = (
+            self.preprocessed_data.condition_pivot.to_pandas().set_index("Sample")
+        )
 
-        pep_wide_mat  = self.preprocessed_data.peptides_wide
-        pep_cent_mat  = self.preprocessed_data.peptides_centered
+        pep_wide_mat = self.preprocessed_data.peptides_wide
+        pep_cent_mat = self.preprocessed_data.peptides_centered
 
-        protein_meta_df = self.preprocessed_data.protein_meta.to_pandas().set_index("INDEX")
+        protein_meta_df = (
+            self.preprocessed_data.protein_meta.to_pandas().set_index("INDEX")
+        )
 
         parent_protein_map = None
         if "PARENT_PROTEIN" in protein_meta_df.columns:
@@ -320,15 +345,44 @@ class Dataset:
             tmp.index = tmp.index.astype(str)
             parent_protein_map = tmp
 
-
-        # Use filtered_mat to infer sample names (columns) and protein IDs (rows)
+        # Use processed_mat to infer sample names (columns) and protein IDs (rows)
         X, protein_index = polars_matrix_to_numpy(processed_mat, index_col="INDEX")
         X = np.asarray(X, dtype=np.float32)
+
+        # Access all intermediate-results dataframes once
+        dfs_ir = getattr(self.preprocessor.intermediate_results, "dfs", {})
+
+        # Attach per-condition consistent peptide/precursor counts, if available.
+        # Prefer peptide consistency (proteomics), fall back to precursor consistency (peptidomics).
+        cons_pl = dfs_ir.get("consistent_peptides_per_condition")
+        uns_consistent_key = "consistent_peptides_per_condition"
+        if cons_pl is None:
+            cons_pl = dfs_ir.get("consistent_precursors_per_condition")
+            uns_consistent_key = "consistent_precursors_per_condition"
+
+        consistent_payload = None
+        if cons_pl is not None:
+            cons_pd = cons_pl.to_pandas().set_index("INDEX")
+            cons_pd.index = cons_pd.index.astype(str)
+
+            # align to the same order as protein_index / var
+            cons_pd = cons_pd.reindex(protein_index)
+
+            # merge into var metadata as integer (nullable) columns
+            for col in cons_pd.columns:
+                protein_meta_df[col] = cons_pd[col].astype("Int64")
+
+            # compact representation for .uns
+            consistent_payload = {
+                "index": cons_pd.index.astype(str).tolist(),
+                "columns": cons_pd.columns.tolist(),
+                "values": cons_pd.to_numpy(dtype=np.int64, copy=True),
+            }
 
         # Ensure the metadata index matches the order of protein_index from X
         protein_meta_df = protein_meta_df.loc[protein_index]
 
-        # Layers
+        # Helper to convert optional matrices
         def _to_np(opt_df):
             arr, idx = polars_matrix_to_numpy(opt_df, index_col="INDEX")
             if arr is not None:
@@ -336,18 +390,17 @@ class Dataset:
             return arr, idx
 
         # protein level data
-        qval, _       = _to_np(qval_mat)
-        pep, _        = _to_np(pep_mat)
-        locprob, _    = _to_np(locprob_mat)
-        sc, _         = _to_np(sc_mat)
-        ibaq, _       = _to_np(ibaq_mat)
-        lognorm, _    = _to_np(lognorm_mat)
+        qval, _ = _to_np(qval_mat)
+        pep, _ = _to_np(pep_mat)
+        locprob, _ = _to_np(locprob_mat)
+        sc, _ = _to_np(sc_mat)
+        ibaq, _ = _to_np(ibaq_mat)
+        lognorm, _ = _to_np(lognorm_mat)
         normalized, _ = _to_np(normalized_mat)
-        raw, _        = _to_np(filtered_mat)
+        raw, _ = _to_np(filtered_mat)
 
         # Create var and obs metadata
         sample_names = [col for col in processed_mat.columns if col != "INDEX"]
-
         obs = condition_df.loc[sample_names]
 
         # Final AnnData
@@ -357,10 +410,7 @@ class Dataset:
             var=protein_meta_df,
         )
 
-        # (optional, for debugging) dataframe view of X by samples
-        #df = pd.DataFrame(self.adata.X.T, columns=self.adata.obs.index.tolist())
-
-        # Attach layers
+        # Attach protein-level layers
         self.adata.layers["raw"] = raw.T
         self.adata.layers["lognorm"] = lognorm.T
         self.adata.layers["normalized"] = normalized.T
@@ -377,14 +427,22 @@ class Dataset:
 
         # Covariate (centered, imputed) - only if present
         if centered_cov_mat is not None:
-            filtered_cov_mat    = getattr(self.preprocessed_data, "raw_covariate", None)
-            lognorm_cov_mat     = getattr(self.preprocessed_data, "lognormalized_covariate", None)
-            normalized_cov_mat  = getattr(self.preprocessed_data, "normalized_covariate", None)
-            processed_cov_mat   = getattr(self.preprocessed_data, "processed_covariate", None)
-            qval_cov_mat        = getattr(self.preprocessed_data, "qvalues_covariate", None)
-            pep_cov_mat         = getattr(self.preprocessed_data, "pep_covariate", None)
-            sc_cov_mat          = getattr(self.preprocessed_data, "spectral_counts_covariate", None)
-            ibaq_cov_mat        = getattr(self.preprocessed_data, "ibaq_covariate", None)
+            filtered_cov_mat = getattr(self.preprocessed_data, "raw_covariate", None)
+            lognorm_cov_mat = getattr(
+                self.preprocessed_data, "lognormalized_covariate", None
+            )
+            normalized_cov_mat = getattr(
+                self.preprocessed_data, "normalized_covariate", None
+            )
+            processed_cov_mat = getattr(
+                self.preprocessed_data, "processed_covariate", None
+            )
+            qval_cov_mat = getattr(self.preprocessed_data, "qvalues_covariate", None)
+            pep_cov_mat = getattr(self.preprocessed_data, "pep_covariate", None)
+            sc_cov_mat = getattr(
+                self.preprocessed_data, "spectral_counts_covariate", None
+            )
+            ibaq_cov_mat = getattr(self.preprocessed_data, "ibaq_covariate", None)
 
             filtered_cov_np, _ = _to_np(filtered_cov_mat)
             lognorm_cov_np, _ = _to_np(lognorm_cov_mat)
@@ -406,62 +464,190 @@ class Dataset:
             self.adata.layers["sc_covariate"] = sc_cov_np.T
             self.adata.layers["ibaq_covariate"] = ibaq_cov_np.T
 
+        # Preprocessing summary in .uns
         self.adata.uns["preprocessing"] = {
             "input_layout": self.input_layout,
-            "analysis_type" : self.analysis_type,
+            "analysis_type": self.analysis_type,
             "filtering": {
-                "cont":    self.preprocessed_data.meta_cont,
-                "qvalue":  self.preprocessed_data.meta_qvalue,
-                "pep":     self.preprocessed_data.meta_pep,
-                "prec":     self.preprocessed_data.meta_prec,
-                "censor":   self.preprocessed_data.meta_censor,
+                "cont": self.preprocessed_data.meta_cont,
+                "qvalue": self.preprocessed_data.meta_qvalue,
+                "pep": self.preprocessed_data.meta_pep,
+                "prec": self.preprocessed_data.meta_prec,
+                "censor": self.preprocessed_data.meta_censor,
             },
-            "quantification_method": self.preprocessor.pivot_signal_method,
+            "quantification": self.preprocessed_data.meta_quant,
             "normalization": self.preprocessor.normalization,
-            "imputation":    self.preprocessor.imputation,
+            "imputation": self.preprocessor.imputation,
         }
 
-        # Peptide tables
+        # Distribution diagnostics from IntermediateResults
+        dist_arrays = getattr(self.preprocessor.intermediate_results, "arrays", {})
+        self.adata.uns["preprocessing"]["distributions"] = {
+            "num_precursors_per_peptide": dist_arrays.get(
+                "num_precursors_per_peptide"
+            ),
+            "num_precursors_per_protein": dist_arrays.get(
+                "num_precursors_per_protein"
+            ),
+            "num_peptides_per_protein": dist_arrays.get("num_peptides_per_protein"),
+        }
+
+        # Drill-down trend tables
+        # Proteomics: peptide trends
+        # Peptidomics/phospho: precursor trends (and do not emit peptide tables)
         sample_names = [c for c in processed_mat.columns if c != "INDEX"]
 
-        # numeric sample cols that exist in peptide tables
-        use_cols_w = ["PEPTIDE_ID"] + [c for c in sample_names if c in pep_wide_mat.columns]
-        use_cols_c = ["PEPTIDE_ID"] + [c for c in sample_names if c in pep_cent_mat.columns]
+        proteomics_mode = self.analysis_type in {"dia", "dda", "proteomics"}
+        precursor_mode  = self.analysis_type in {"peptidomics", "phospho"}
 
-        pep_wide_numeric = pep_wide_mat.select(use_cols_w)
-        pep_cent_numeric = pep_cent_mat.select(use_cols_c)
+        if proteomics_mode:
+            use_cols_w = ["PEPTIDE_ID"] + [c for c in sample_names if c in pep_wide_mat.columns]
+            use_cols_c = ["PEPTIDE_ID"] + [c for c in sample_names if c in pep_cent_mat.columns]
 
-        # matrices (+ row order)
-        pep_raw, pep_idx  = polars_matrix_to_numpy(pep_wide_numeric, index_col="PEPTIDE_ID")
-        pep_cent, pep_idx2 = polars_matrix_to_numpy(pep_cent_numeric, index_col="PEPTIDE_ID")
-        assert list(pep_idx) == list(pep_idx2)
+            pep_wide_numeric = pep_wide_mat.select(use_cols_w)
+            pep_cent_numeric = pep_cent_mat.select(use_cols_c)
 
-        # row meta (INDEX, PEPTIDE_SEQ) aligned to pep_idx — keep as lists (not DataFrame)
-        rowmeta = (
-            pep_wide_mat.select(["PEPTIDE_ID","INDEX","PEPTIDE_SEQ"])
-                        .unique()
-                        .to_pandas()
-                        .set_index("PEPTIDE_ID")
-                        .loc[pep_idx]
-        )
-        pep_protein_index = rowmeta["INDEX"].astype(str).tolist()
-        peptide_seq   = rowmeta["PEPTIDE_SEQ"].astype(str).tolist()
+            pep_raw, pep_idx = polars_matrix_to_numpy(pep_wide_numeric, index_col="PEPTIDE_ID")
+            pep_cent, pep_idx2 = polars_matrix_to_numpy(pep_cent_numeric, index_col="PEPTIDE_ID")
+            assert list(pep_idx) == list(pep_idx2)
 
-        # final HDF5-friendly structure
-        self.adata.uns["peptides"] = {
-            "rows": [str(x) for x in pep_idx],                         # PEPTIDE_ID "{INDEX}|{SEQ}"
-            "protein_index": pep_protein_index,                             # one per row
-            "peptide_seq": peptide_seq,                                 # one per row
-            "cols": [c for c in sample_names if c in pep_wide_mat.columns],  # samples
-            "raw":     np.asarray(pep_raw,  dtype=np.float32),          # (n_peptides × n_samples)
-            "centered":np.asarray(pep_cent, dtype=np.float32),
-        }
+            rowmeta = (
+                pep_wide_mat.select(["PEPTIDE_ID", "INDEX", "PEPTIDE_SEQ"])
+                .unique()
+                .to_pandas()
+                .set_index("PEPTIDE_ID")
+                .loc[pep_idx]
+            )
+            pep_protein_index = rowmeta["INDEX"].astype(str).tolist()
+            peptide_seq = rowmeta["PEPTIDE_SEQ"].astype(str).tolist()
 
-        # Store the analysis parameters, for now we only do limma+ebayes
+            self.adata.uns["peptides"] = {
+                "rows": [str(x) for x in pep_idx],
+                "protein_index": pep_protein_index,
+                "peptide_seq": peptide_seq,
+                "cols": [c for c in sample_names if c in pep_wide_mat.columns],
+                "raw": np.asarray(pep_raw, dtype=np.float32),
+                "centered": np.asarray(pep_cent, dtype=np.float32),
+            }
+
+        elif precursor_mode:
+            # do not export peptide tables in peptidomics/phospho
+            pass
+
+        else:
+            raise ValueError(f"Unsupported analysis_type='{at}' for drill-down trend tables.")
+        ## Peptide-level trend tables (always, if present)
+        #sample_names = [c for c in processed_mat.columns if c != "INDEX"]
+
+        #use_cols_w = ["PEPTIDE_ID"] + [
+        #    c for c in sample_names if c in pep_wide_mat.columns
+        #]
+        #use_cols_c = ["PEPTIDE_ID"] + [
+        #    c for c in sample_names if c in pep_cent_mat.columns
+        #]
+
+        #pep_wide_numeric = pep_wide_mat.select(use_cols_w)
+        #pep_cent_numeric = pep_cent_mat.select(use_cols_c)
+
+        #pep_raw, pep_idx = polars_matrix_to_numpy(
+        #    pep_wide_numeric, index_col="PEPTIDE_ID"
+        #)
+        #pep_cent, pep_idx2 = polars_matrix_to_numpy(
+        #    pep_cent_numeric, index_col="PEPTIDE_ID"
+        #)
+        #assert list(pep_idx) == list(pep_idx2)
+
+        #rowmeta = (
+        #    pep_wide_mat.select(["PEPTIDE_ID", "INDEX", "PEPTIDE_SEQ"])
+        #    .unique()
+        #    .to_pandas()
+        #    .set_index("PEPTIDE_ID")
+        #    .loc[pep_idx]
+        #)
+        #pep_protein_index = rowmeta["INDEX"].astype(str).tolist()
+        #peptide_seq = rowmeta["PEPTIDE_SEQ"].astype(str).tolist()
+
+        #self.adata.uns["peptides"] = {
+        #    "rows": [str(x) for x in pep_idx],  # PEPTIDE_ID "{INDEX}|{SEQ}"
+        #    "protein_index": pep_protein_index,  # one per row
+        #    "peptide_seq": peptide_seq,  # one per row
+        #    "cols": [
+        #        c for c in sample_names if c in pep_wide_mat.columns
+        #    ],  # samples
+        #    "raw": np.asarray(pep_raw, dtype=np.float32),
+        #    "centered": np.asarray(pep_cent, dtype=np.float32),
+        #}
+
+        # --- Precursor trend tables (for peptidomics; optional) ---
+        prec_wide_mat = dfs_ir.get("precursors_wide")
+        prec_cent_mat = dfs_ir.get("precursors_centered")
+
+        if (prec_wide_mat is not None) and (prec_cent_mat is not None):
+            prec_cols = [c for c in sample_names if c in prec_wide_mat.columns]
+            use_cols_pw = ["PREC_ID"] + prec_cols
+            use_cols_pc = ["PREC_ID"] + prec_cols
+
+            prec_wide_numeric = prec_wide_mat.select(use_cols_pw)
+            prec_cent_numeric = prec_cent_mat.select(use_cols_pc)
+
+            prec_raw, prec_idx = polars_matrix_to_numpy(
+                prec_wide_numeric, index_col="PREC_ID"
+            )
+            prec_cent, prec_idx2 = polars_matrix_to_numpy(
+                prec_cent_numeric, index_col="PREC_ID"
+            )
+            assert list(prec_idx) == list(prec_idx2)
+
+            prec_meta = (
+                prec_wide_mat.select(["PREC_ID", "INDEX", "PEPTIDE_SEQ", "CHARGE"])
+                .unique(subset=["PREC_ID"], maintain_order=True)
+                .to_pandas()
+                .set_index("PREC_ID")
+                #.loc[prec_idx]
+                .reindex(prec_idx)
+            )
+
+            if prec_meta.isna().any().any():
+                # reindex introduces NaNs if a PREC_ID is missing; fail-fast with examples
+                miss = prec_meta.index[prec_meta["INDEX"].isna()].astype(str).tolist()[:10]
+                raise ValueError(f"Missing precursor metadata for PREC_ID (examples={miss})")
+
+            # hard shape invariants (run-or-crash)
+            if prec_raw.shape[0] != len(prec_idx) or prec_cent.shape[0] != len(prec_idx):
+                raise ValueError(
+                    f"Precursor matrix/idx mismatch: idx={len(prec_idx)} raw={prec_raw.shape} centered={prec_cent.shape}"
+                )
+            if len(prec_meta) != len(prec_idx):
+                raise ValueError(f"Precursor meta/idx mismatch: meta={len(prec_meta)} idx={len(prec_idx)}")
+
+            prec_protein_index = prec_meta["INDEX"].astype(str).tolist()
+            prec_seq = prec_meta["PEPTIDE_SEQ"].astype(str).tolist()
+            prec_charge = prec_meta["CHARGE"].astype(str).tolist()
+
+            self.adata.uns["precursors"] = {
+                "rows": [str(x) for x in prec_idx],  # PREC_ID "{INDEX}|{SEQ}/{CHARGE}"
+                "protein_index": prec_protein_index,
+                "peptide_seq": prec_seq,
+                "charge": prec_charge,
+                "cols": prec_cols,
+                "raw": np.asarray(prec_raw, dtype=np.float32),
+                "centered": np.asarray(prec_cent, dtype=np.float32),
+            }
+
+        # Analysis parameters
         self.adata.uns["analysis"] = {
-            "de_method":     "limma_ebayes",
+            "de_method": "limma_ebayes",
             "analysis_type": self.analysis_type,
         }
+
+        # Per-condition consistency payload in .uns
+        if consistent_payload is not None:
+            # Always expose the legacy key for viewers
+            self.adata.uns["consistent_peptides_per_condition"] = consistent_payload
+
+            # If we actually used precursors, also expose the more precise name
+            if uns_consistent_key == "consistent_precursors_per_condition":
+                self.adata.uns["consistent_precursors_per_condition"] = consistent_payload
 
         # check index is fine between proteins and matrix index
         assert list(protein_meta_df.index) == list(protein_index)
@@ -470,12 +656,13 @@ class Dataset:
         """Export the processed dataset as an AnnData object."""
         return self.adata
 
+
 if __name__ == "__main__":
     # for testing
     file_path = "searle_test2.tsv"
 
     # load dataset
-    dataset = Dataset(file_path)
+    dataset = Dataset(file_path=file_path)
 
     adata = dataset.get_anndata()
     print(adata)

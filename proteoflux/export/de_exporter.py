@@ -152,7 +152,7 @@ class DEExporter:
         if "PRECURSORS_EXP" in meta_df.columns:
             meta_df = meta_df.rename(columns={"PRECURSORS_EXP": "NUM_PRECURSORS", "INDEX": "PHOSPHOSITE", "PARENT_PROTEIN": "PARENT_PROTEIN_UNIPROT_AC"})
 
-        if analysis_type != "phospho":
+        if analysis_type == "DIA":
             # Placeholder column
             if "NUM_UNIQUE_PEPTIDES" not in meta_df.columns:
                 meta_df["NUM_UNIQUE_PEPTIDES"] = np.nan
@@ -193,6 +193,14 @@ class DEExporter:
             observed_df = pd.DataFrame(cols, index=ad.var_names)
             max_observed_col = observed_df.max(axis=1).rename("MAX_OBSERVED")
 
+        # Per-condition number of consistent peptides (precomputed in preprocessing, stored in .var)
+        consistent_df = None
+        cons_cols = [c for c in ad.var.columns if c.startswith("CONSISTENT_PEPTIDE_")]
+        max_consistent_col = None
+        if cons_cols:
+            consistent_df = ad.var[cons_cols].copy()
+            max_consistent_col = consistent_df.max(axis=1).rename("MAX_CONSISTENT")
+
         # Build base Summary
         has_contrasts = bool(self.contrasts) and (log2fc is not None)
 
@@ -219,8 +227,11 @@ class DEExporter:
 
         if observed_df is not None:
             blocks.append(observed_df)
-            if max_observed_col is not None:
-                blocks.append(max_observed_col)
+            blocks.append(max_observed_col)
+
+        if consistent_df is not None:
+            blocks.append(consistent_df)
+            blocks.append(max_consistent_col)
 
         if log2_int_cols is not None:
             blocks.append(log2_int_cols)
@@ -285,7 +296,7 @@ class DEExporter:
         summary_df.index.name = "PHOSPHOSITE" if is_phospho else "UNIPROT_AC"
 
         # Compute NUM_UNIQUE_PEPTIDES for proteomics by var-position
-        if analysis_type != "phospho":
+        if analysis_type == "DIA":
             pep_uns = ad.uns.get("peptides")
             assert pep_uns is not None, "uns['peptides'] is required to compute NUM_UNIQUE_PEPTIDES"
             pep_meta = pd.DataFrame({
@@ -301,6 +312,7 @@ class DEExporter:
                 summary_df["NUM_UNIQUE_PEPTIDES"] = mapped
             else:
                 summary_df.insert(0, "NUM_UNIQUE_PEPTIDES", mapped)
+
 
         # Peptide tables
         pep_wide_df, pep_centered_df = self._peptide_frames()

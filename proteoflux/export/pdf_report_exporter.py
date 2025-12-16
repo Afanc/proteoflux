@@ -219,7 +219,7 @@ class ReportPlotter:
         self._has_contrasts = bool(self.contrast_names) and (self.log2fc is not None)
 
         self.missingness = adata.uns.get("missingness", {})
-        self.fasta_headers = adata.var['FASTA_HEADERS'].to_numpy()
+        #self.fasta_headers = adata.var['FASTA_HEADERS'].to_numpy()
 
     @log_time("Preparing Pdf Report")
     def plot_all(self):
@@ -326,6 +326,7 @@ class ReportPlotter:
         # Contaminants
         cont_cfg   = filtering.get("contaminants_files", [])
         flt_meta = self.adata.uns.get("preprocessing").get("filtering")
+        quant_meta = self.adata.uns.get("preprocessing").get("quantification")
         base_names = [os.path.basename(f) for f in cont_cfg]
         removed_cont = flt_meta.get("cont").get("number_dropped", 0)
         n_cont = f"{removed_cont}".replace(",", "'")
@@ -371,7 +372,11 @@ class ReportPlotter:
             y -= line_height
 
         # Quantification method
-        fig.text(x0 + 0.02, y, f"- Quantification: {quantification_method}",
+        quant_txt = quantification_method
+        if quantification_method == "directlfq":
+            directlfq_min_nonan = quant_meta.get("directlfq_min_nonan", 1)
+            quant_txt += f", min nonan={directlfq_min_nonan}"
+        fig.text(x0 + 0.02, y, f"- Quantification: {quant_txt}",
                  ha="left", va="top", fontsize=12)
 
         y -= line_height

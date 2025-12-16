@@ -1,28 +1,36 @@
 dataset:
-  input_file: "data/searle_test2.tsv"
-  input_layout: "long"
-  analysis_type: "DIA"
-  annotation_file: "data/annotation_searle2.tsv"
+  input_file: "data/combined_ion.tsv"
+  input_layout: "wide"
+  analysis_type: "peptidomics"
+  convert_numeric_ptms: True
+
+  annotation_file: null
+  condition_column: null
+  replicate_column: null
+  filename_column: null
   exclude_runs:
-  index_column: "PG.ProteinGroups"
-  signal_column: "FG.MS2RawQuantity"
-  qvalue_column: "PG.Qvalue"
-  charge_column: "FG.Charge"
-  pep_column: "PG.PEP"
-  condition_column: "R.Condition"
-  replicate_column: "R.Replicate"
-  filename_column: "R.FileName"
-  spectral_counts_column: "PG.RunEvidenceCount"
-  precursors_exp_column: "PG.NrOfPrecursorsIdentified (Experiment-wide)"
-  ibaq_column: "PG.IBAQ"
-  fasta_column: "PG.FastaHeaders"
-  protein_weight: "PG.MolecularWeight"
-  protein_descriptions: "PG.ProteinDescriptions"
-  gene_names_column: "PG.Genes"
-  peptide_seq_column: "FG.LabeledSequence"
+
+  index_column: null
+  charge_column: "Charge"
+  signal_column: "Intensity"
+  qvalue_column: null
+  pep_column: null
+
+  peptide_seq_column: "Modified Sequence"
+  peptide_start_column: "Start"
+  uniprot_column: "Protein ID"
+  gene_names_column: "Gene"
+  protein_descriptions_column: "Protein Description"
+  spectral_counts_column: "Spectral Count"
+  precursors_exp_column: null
+  ibaq_column: null
+  fasta_column: null
+  protein_weight: null
 
 preprocessing:
-  pivot_signal_method: "sum"
+  collapse_all_ptms: false
+  peptide_rollup_method: "sum"
+  protein_rollup_method: null
   directlfq_cores: 8
   directlfq_min_nonan: 1
   filtering:
@@ -35,9 +43,8 @@ preprocessing:
   normalization:
     method:
       - "log2"
-      - "median_equalization_by_tag"
+      - "median_equalization"
     reference_tag:
-      - "HUMAN"
     loess_span: 0.9
   imputation:
     method: "lc_conmed"
@@ -53,9 +60,9 @@ analysis:
     export_plot: true
     export_table: false
     table_use_xlsx: true
-    path_plot: "data/proteoflux_report.pdf"
-    path_table: "data/proteoflux_table.xslx"
-    path_h5ad: "data/proteoflux_results.h5ad"
+    path_plot: "data/proteoflux_report_peptido.pdf"
+    path_table: "data/proteoflux_table_peptido.xslx"
+    path_h5ad: "data/proteoflux_results_peptido.h5ad"
     umap_n_neighbors: 15
     volcano_top_annotated: 20
   title: "Proteoflux Analysis Report"
