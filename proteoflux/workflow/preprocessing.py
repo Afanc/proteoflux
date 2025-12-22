@@ -688,12 +688,34 @@ class Preprocessor:
                 cmp = rep_main.join(
                     rep_cov, on="CONDITION", how="outer", suffix="_FT"
                 )
+                # Strict parity checks:
+                # 1) CONDITION levels must match between main and covariate.
+                # 2) Replicate counts per CONDITION must match.
+                # NOTE: comparisons against NULL yield NULL in Polars and would silently bypass filters;
+                # therefore we validate NULL explicitly before comparing.
+                #missing_main = cmp.filter(pl.col("N").is_null()).select("CONDITION")
+                missing_main = cmp.filter(pl.col("N").is_null()).select(pl.col("CONDITION_FT").alias("CONDITION"))
+                missing_cov = cmp.filter(pl.col("N_FT").is_null()).select("CONDITION")
+                if missing_main.height or missing_cov.height:
+                    raise ValueError(
+                        "Main/covariate CONDITION levels do not match. "
+                        f"Only-in-covariate={missing_main.get_column('CONDITION').to_list()} "
+                        f"Only-in-main={missing_cov.get_column('CONDITION').to_list()}. "
+                        "Ensure covariate uses the same CONDITION labels as the main dataset."
+                    )
+
                 bad = cmp.filter(pl.col("N") != pl.col("N_FT"))
                 if bad.height:
                     raise ValueError(
-                        "Covariate alignment: replicate counts differ per CONDITION. "
-                        f"Details:\n{bad}"
+                        "Covariate has different replicate counts per CONDITION than the main dataset. "
+                        f"Mismatch table:\n{bad}"
                     )
+                #bad = cmp.filter(pl.col("N") != pl.col("N_FT"))
+                #if bad.height:
+                #    raise ValueError(
+                #        "Covariate alignment: replicate counts differ per CONDITION. "
+                #        f"Details:\n{bad}"
+                #    )
 
         self.intermediate_results.add_df("condition_pivot", mapping_tmp)
 
@@ -1208,7 +1230,7 @@ class Preprocessor:
 
         analysis = self.analysis_type or ""
 
-        if analysis in ("peptidomics", "phospho"):
+        if analysis in ["peptidomics", "phospho"]:
             # Precursor key = INDEX/CHARGE, same INDEX as roll-up
             prec_long = (
                 df.select(
@@ -1311,7 +1333,7 @@ class Preprocessor:
                 )
 
         else:
-            # Proteomics / phospho: keep peptide-based consistency
+            # Proteomics: keep peptide-based consistency
             per_cond_pep: List[pl.DataFrame] = []
 
             for cond, runs in cond_to_runs.items():
@@ -1962,6 +1984,7 @@ class Preprocessor:
             cond_map = self.intermediate_results.dfs[
                 "condition_pivot"
             ].to_pandas()
+
             imputer = get_imputer(
                 **self.imputation,
                 condition_map=cond_map,

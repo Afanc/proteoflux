@@ -497,7 +497,7 @@ class Dataset:
         # Peptidomics/phospho: precursor trends (and do not emit peptide tables)
         sample_names = [c for c in processed_mat.columns if c != "INDEX"]
 
-        proteomics_mode = self.analysis_type in {"dia", "dda", "proteomics"}
+        proteomics_mode = self.analysis_type.lower() in {"dia", "dda", "proteomics"}
         precursor_mode  = self.analysis_type in {"peptidomics", "phospho"}
 
         if proteomics_mode:
@@ -533,9 +533,8 @@ class Dataset:
         elif precursor_mode:
             # do not export peptide tables in peptidomics/phospho
             pass
-
         else:
-            raise ValueError(f"Unsupported analysis_type='{at}' for drill-down trend tables.")
+            raise ValueError(f"Unsupported analysis_type='{self.analysis_type}' for drill-down trend tables.")
         ## Peptide-level trend tables (always, if present)
         #sample_names = [c for c in processed_mat.columns if c != "INDEX"]
 

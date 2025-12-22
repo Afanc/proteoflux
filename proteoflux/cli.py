@@ -4,7 +4,26 @@ import yaml
 from proteoflux.main import run_pipeline
 from importlib.resources import files
 from proteoflux import templates
+from proteoflux.utils.compact_repr import compact_repr
+import builtins
 
+# Keep tracebacks readable: do not dump gigantic locals tables.
+# Also cap dataframe display sizes for any explicit prints/logs.
+try:
+    import polars as pl
+    pl.Config.set_tbl_rows(10)
+    pl.Config.set_tbl_cols(20)
+    pl.Config.set_tbl_width_chars(160)
+except Exception:
+    pass
+
+try:
+    import pandas as pd
+    pd.set_option("display.max_rows", 10)
+    pd.set_option("display.max_columns", 20)
+    pd.set_option("display.width", 160)
+except Exception:
+    pass
 
 app = typer.Typer(help="ProteoFlux: Reproducible proteomics workflows")
 

@@ -1,6 +1,6 @@
 import re
 import polars as pl
-from typing import Dict
+from typing import Dict, List
 from proteoflux.utils.utils import log_time, logger, log_info, log_warning
 from proteoflux.utils.ptm_map import PTM_MAP
 
@@ -25,11 +25,11 @@ class DataHarmonizer:
         "ibaq_column": "IBAQ",
         "peptide_seq_column": "PEPTIDE_LSEQ",
         "uniprot_column": "UNIPROT", #this should be default, and then index_column is redefined as additional to that
-        "modified_seq_column": "MODIFIED_SEQUENCE",
-        "peptide_start_column": "PEPTIDE_START",
         "charge_column": "CHARGE",
-        "ptm_positions_column": "PTM_POSITIONS_STR",
+        "peptide_start_column": "PEPTIDE_START",
+        "ptm_proteinlocations_column": "PTM_PROTEINLOCATIONS",
         "ptm_probabilities_column": "PTM_PROBS_STR",
+        "ptm_positions_column": "PTM_POSITIONS_STR",
         "ptm_sites_column": "PTM_SITES_STR",
         "stripped_seq_column": "PEP_SEQUENCE",
     }
@@ -48,6 +48,14 @@ class DataHarmonizer:
         self.convert_numeric_ptms = bool(column_config.get("convert_numeric_ptms", True))
         self.collapse_all_ptms = bool(column_config.get("collapse_all_ptms", False))
 
+        raw_excl = column_config.get("exclude_runs")
+        self.exclude_runs = set()
+        if raw_excl:
+            if isinstance(raw_excl, str):
+                self.exclude_runs = {raw_excl.strip()} if raw_excl.strip() else set()
+            else:
+                self.exclude_runs = {str(x).strip() for x in raw_excl if str(x).strip()}
+
         for config_key, std_name in self.DEFAULT_COLUMN_MAP.items():
             original_col = column_config.get(config_key)
             if original_col:
@@ -60,6 +68,9 @@ class DataHarmonizer:
             )
         ann = pl.read_csv(self.annotation_file, separator="\t", ignore_errors=True)
 
+        required = {"Condition", "Replicate"}
+        missing_req = sorted(required - set(ann.columns))
+
         # Pick a single join key (first match wins), then rename only that one -> 'FILENAME'
         join_col = None
         for cand in ("FILENAME", "File Name", "File name", "filename", "Filename", "Channel"): #could be smarter
@@ -71,6 +82,12 @@ class DataHarmonizer:
             raise ValueError(
                 f"Annotation file {self.annotation_file!r} must contain a join column: "
                 "'FILENAME', 'File Name', or 'Channel'."
+            )
+
+        if missing_req:
+            raise ValueError(
+                f"Annotation file {self.annotation_file!r} missing required columns: {missing_req}. "
+                "Provide canonical columns: Condition, Replicate."
             )
 
         if join_col != "FILENAME":
@@ -94,6 +111,14 @@ class DataHarmonizer:
         ann = ann.with_columns(
             pl.col("FILENAME").map_elements(_strip_ext, return_dtype=pl.Utf8).alias("FILENAME")
         )
+
+        ann = ann.with_columns(
+            pl.col("Condition").cast(pl.Utf8).str.strip_chars(),
+            pl.col("Replicate").cast(pl.Int64, strict=False),
+        )
+        if ann.select(pl.col("Replicate").is_null().any()).item():
+            raise ValueError(f"Annotation file {self.annotation_file!r}: Replicate contains non-integer or null values.")
+
         return ann
 
     def _fmt_diff(self, missing: list[str], extra: list[str], what: str) -> None:
@@ -113,12 +138,18 @@ class DataHarmonizer:
     def _validate_long_annotation(self, df: pl.DataFrame, ann: pl.DataFrame) -> None:
         df_files  = set(df.select("FILENAME").unique().to_series().to_list())
         ann_files = set(ann.select("FILENAME").unique().to_series().to_list())
+        excl = set(getattr(self, "exclude_runs", set()) or set())
+        df_files  = df_files  - excl
+        ann_files = ann_files - excl
         missing = sorted(ann_files - df_files)
         extra   = sorted(df_files - ann_files)
         self._fmt_diff(missing, extra, "filenames")
 
     def _validate_wide_annotation(self, df: pl.DataFrame, ann: pl.DataFrame) -> None:
         ann_channels = set(ann.select("FILENAME").unique().to_series().to_list())
+        excl = set(getattr(self, "exclude_runs", set()) or set())
+        df_files  = df_files  - excl
+        ann_channels = ann_channels - excl
 
         # Infer candidate intensity columns (unchanged logic)
         float_types = {pl.Float64, pl.Float32}
@@ -163,6 +194,36 @@ class DataHarmonizer:
         """Common path: rename → strict filename check → annotation join → coalesce condition/replicate."""
         df = self._rename_columns_safely(df)
 
+        # Always enforce canonical CONDITION/REPLICATE (annotation or not).
+        condition_sources = [c for c in ["CONDITION"] if c in df.columns]
+        replicate_sources = [r for r in ["REPLICATE"] if r in df.columns]
+
+        if not condition_sources:
+            raise ValueError("Missing condition column: expected 'CONDITION'.")
+        if not replicate_sources:
+            raise ValueError("Missing replicate column: expected 'REPLICATE'.")
+
+        # Pick a single source deterministically (prefer canonical if present)
+        cond_src = condition_sources[0]
+        rep_src = replicate_sources[0]
+
+        if cond_src != "CONDITION":
+            df = df.with_columns(pl.col(cond_src).alias("CONDITION")).drop(cond_src, strict=False)
+        if rep_src != "REPLICATE":
+            df = df.with_columns(pl.col(rep_src).alias("REPLICATE")).drop(rep_src, strict=False)
+
+        # Strong typing: CONDITION must be string, REPLICATE must be integer.
+        df = df.with_columns(
+            pl.col("CONDITION").cast(pl.Utf8),
+            pl.col("REPLICATE").cast(pl.Int64),
+        )
+
+        # Hard fail on nulls (these break imputation downstream)
+        if df.select(pl.col("CONDITION").is_null().any()).item():
+            raise ValueError("CONDITION contains nulls after standardization. Fix input/annotation; refusing to proceed.")
+        if df.select(pl.col("REPLICATE").is_null().any()).item():
+            raise ValueError("REPLICATE contains nulls after standardization. Fix input/annotation; refusing to proceed.")
+
         if not self.annotation_file:
             return df  # nothing to inject
 
@@ -177,29 +238,48 @@ class DataHarmonizer:
         self._validate_long_annotation(df, ann)
 
         # Join
-        df = df.join(ann, on="FILENAME", how="left")
+        #df = df.join(ann, on="FILENAME", how="left")
+        ann_join = ann.select(
+            [
+                pl.col("FILENAME"),
+                pl.col("Condition").alias("_ANN_CONDITION"),
+                pl.col("Replicate").alias("_ANN_REPLICATE"),
+            ]
+        )
+        df = df.join(ann_join, on="FILENAME", how="left")
 
-        # Coalesce condition/replicate from common aliases
-        condition_sources = [c for c in ["R.Condition", "Condition"] if c in df.columns]
-        replicate_sources = [r for r in ["R.Replicate", "Replicate"] if r in df.columns]
+        # Hard fail if any row did not match annotation
+        if df.select(pl.col("_ANN_CONDITION").is_null().any()).item():
+            raise ValueError(
+                "Annotation join produced NULL CONDITION values. "
+                "This means some FILENAME values in the data did not match the annotation (after stripping extensions)."
+            )
+        if df.select(pl.col("_ANN_REPLICATE").is_null().any()).item():
+            raise ValueError(
+                "Annotation join produced NULL REPLICATE values. "
+                "This means some FILENAME values in the data did not match the annotation (after stripping extensions)."
+            )
 
-        if condition_sources:
-            src = condition_sources[0]
-            df = df.with_columns(
-                pl.when(pl.col(src).is_not_null())
-                  .then(pl.col(src))
-                  .otherwise(pl.col("CONDITION") if "CONDITION" in df.columns else None)
-                  .alias("CONDITION")
-            ).drop(src, strict=False)
+        # Explicit overwrite from annotation (canonical source of truth when provided)
+        df = df.with_columns(
+            pl.col("_ANN_CONDITION").alias("CONDITION"),
+            pl.col("_ANN_REPLICATE").alias("REPLICATE"),
+        ).drop(["_ANN_CONDITION", "_ANN_REPLICATE"], strict=False)
 
-        if replicate_sources:
-            src = replicate_sources[0]
-            df = df.with_columns(
-                pl.when(pl.col(src).is_not_null())
-                  .then(pl.col(src))
-                  .otherwise(pl.col("REPLICATE") if "REPLICATE" in df.columns else None)
-                  .alias("REPLICATE")
-            ).drop(src, strict=False)
+        # Handling of CONDITION/REPLICATE:
+        required = {"CONDITION", "REPLICATE"}
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(
+                f"Missing required columns after harmonization: {sorted(missing)}. "
+                "Both CONDITION and REPLICATE must be present."
+            )
+
+        # No implicit/empty conditions: fail fast.
+        if df.select(pl.col("CONDITION").is_null().any()).item():
+            raise ValueError("CONDITION contains NULL values after harmonization/injection.")
+        if df.select(pl.col("REPLICATE").is_null().any()).item():
+            raise ValueError("REPLICATE contains NULL values after harmonization/injection.")
 
         return df
 
@@ -236,10 +316,9 @@ class DataHarmonizer:
             )
 
         # Parse labels as CONDITION + numeric replicate index (e.g. A_1, B_4, ...)
-        conds: list[str] = []
-        repls: list[int] = []
         label_re = re.compile(r"^([A-Za-z]+)_(\d+)$")
 
+        parsed: list[tuple[str, int]] = []
         for lab in labels:
             m = label_re.match(lab)
             if not m:
@@ -248,8 +327,23 @@ class DataHarmonizer:
                     f"'{lab}' as '<CONDITION>_<number>'. "
                     f"Example labels: {labels[:10]}"
                 )
-            conds.append(m.group(1))
-            repls.append(int(m.group(2)))
+            parsed.append((m.group(1), int(m.group(2))))
+
+        # Renumber replicates per CONDITION: 1..N within each condition (order by original number)
+        by_cond: dict[str, list[tuple[int, int]]] = {}
+        for i, (cond, num) in enumerate(parsed):
+            by_cond.setdefault(cond, []).append((num, i))
+
+        repls = [0] * len(labels)
+        for pairs in by_cond.values():
+            pairs.sort(key=lambda x: x[0])
+            for new_r, (_, idx) in enumerate(pairs, start=1):
+                repls[idx] = new_r
+
+        if any(r <= 0 for r in repls):
+            raise RuntimeError("Replicate renumbering failed: encountered unset replicate(s).")
+
+        conds = [cond for cond, _ in parsed]
 
         # Build small channel metadata table
         channel_meta = pl.DataFrame(
@@ -260,7 +354,7 @@ class DataHarmonizer:
                 "REPLICATE": repls,
             }
         )
-                # Optionally detect spectral-count channels using the same LABEL set
+        # Optionally detect spectral-count channels using the same LABEL set
         count_cols: list[str] = []
         if self.spectral_counts_key:
             pattern_counts = re.compile(rf"^(.+?)\s+{re.escape(self.spectral_counts_key)}$")
@@ -355,7 +449,6 @@ class DataHarmonizer:
             long_df.select(["FILENAME", "CONDITION", "REPLICATE"])
                    .unique()
                    .sort(["CONDITION", "REPLICATE"])
-                   .head(10)
         )
         lines = []
         for row in preview_df.iter_rows(named=True):
@@ -368,7 +461,7 @@ class DataHarmonizer:
         msg = (
             f"Wide input without annotation: inferred {len(signal_cols)} runs "
             f"from columns ending with ' {self.signal_key}'.\n"
-            f"  Example mappings:\n" + "\n".join(lines)
+            f"  Mappings:\n" + "\n".join(lines)
         )
         log_info(msg)
 
@@ -417,41 +510,6 @@ class DataHarmonizer:
         # No annotation: infer channels, FILENAME, CONDITION, REPLICATE from headers
         return self._melt_wide_to_long_no_annotation(df)
 
-    def _melt_wide_to_long_old(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Use annotation to melt a wide matrix into the canonical long schema."""
-        ann = self._load_annotation()
-        channels = ann.select("FILENAME").unique().to_series().to_list()
-
-        # Strict two-way validation before melt
-        self._validate_wide_annotation(df, ann)
-
-        id_vars = [c for c in df.columns if c not in channels]
-        if not id_vars:
-            raise ValueError("No identifier columns left after selecting channels; check your annotation and table.")
-
-        long_df = df.melt(
-            id_vars=id_vars,
-            value_vars=channels,
-            variable_name="FILENAME",
-            value_name="SIGNAL",
-        ).with_columns(
-            pl.col("FILENAME").cast(pl.Utf8),
-            pl.col("SIGNAL").cast(pl.Float64, strict=False),
-        )
-
-        # Generic post-melt aliases (no vendor strings):
-        # - Some exporters name per-peptide spectrum count as 'Spectrum Number'
-        alias_map = {}
-        if "Spectrum Number" in long_df.columns:
-            alias_map["Spectrum Number"] = "PRECURSORS_EXP"
-        if alias_map:
-            long_df = long_df.rename(alias_map)
-
-        # Tag layout for downstream heuristics (e.g., metadata aggregation)
-        long_df = long_df.with_columns(pl.lit("wide").alias("INPUT_LAYOUT"))
-
-        return long_df
-
     def _strip_mods(self, s: str) -> str:
         if s is None:
             return None
@@ -472,6 +530,176 @@ class DataHarmonizer:
         out = out.replace("(", "").replace(")", "")
 
         return out
+
+    def _phospho_positions_from_modified_seq(self, s: str | None) -> list[int]:
+        """
+        Extract 1-based peptide-local positions of phospho sites from a modified peptide sequence.
+
+        We treat a residue as phospho if any of its bracket mods contains 'Phospho (STY)'.
+        Non-phospho bracket annotations are ignored for position counting.
+        """
+        if s is None:
+            return []
+
+        # strip outer "_" and ignore leading n[...] tags if present
+        txt = s.strip("_")
+        txt = re.sub(r"^n\[[^]]*\](?=[A-Z])", "", txt)
+
+        # match each residue and its trailing bracket mods (possibly multiple)
+        # e.g. "S[Phospho (STY)]", "C[Carbamidomethyl (C)]", "T[Phospho (STY)][Other]"
+        pat = re.compile(r"([A-Z])((?:\[[^\]]+\])*)")
+
+        pos = 0
+        out: list[int] = []
+        for m in pat.finditer(txt):
+            pos += 1
+            mods = m.group(2) or ""
+            if "Phospho (STY)" in mods:
+                out.append(pos)
+        return out
+
+    def _phospho_site_tokens_from_proteinptmlocations_with_expected(
+        self, ptm_sites_str: str | None, expected_sites: int
+    ) -> list[str]:
+        """
+        Parse EG.ProteinPTMLocations (PTM_SITES_STR) into phospho-only site tokens,
+        using the expected number of phosphosites derived from the modified peptide sequence.
+
+        This is necessary because a single parenthesis group can mean either:
+          - ambiguity for one site:     (S197,S201)   when expected_sites == 1
+          - two distinct sites:        (S576,S578)   when expected_sites == 2
+
+        Rules:
+          1) Split across protein-group members by ';' (preserve order)
+          2) If a protein member has multiple '(...)' groups concatenated, each group is one site
+             (ambiguity inside group preserved).
+          3) If a protein member has exactly one '(...)' group:
+               - if expected_sites <= 1: keep it as one (possibly ambiguous) site-group
+               - else: split comma-separated phospho entries into distinct site-groups
+          4) Filter to phospho-only entries (S/T/Y) within each site-group.
+          5) Require all protein-group members have the same number of site-groups.
+          6) Emit group-level token per site index: join per-protein group with ';'
+
+        Input examples:
+          "(S87);(S86)"           -> ["(S87);(S86)"]                (one site, two proteins)
+          "(S2,T18)"              -> ["(S2)", "(T18)"]              (two sites, one protein)
+          "(S2,T18);(S2,T18)"     -> ["(S2);(S2)", "(T18);(T18)"]   (two sites, two proteins)
+          "(C843,S856)"           -> ["(S856)"]                     (phospho-only filtering)
+          "(S197,S201)(S222,S226)"-> ["(S197,S201)", "(S222,S226)"] (two sites, ambiguous positions)
+        """
+        if ptm_sites_str is None:
+            return []
+        txt = str(ptm_sites_str).strip()
+        if not txt:
+            return []
+
+        # split across protein group members; preserve order
+        # Note: within each protein part, Spectronaut can encode multiple sites as concatenated "(...) (...)"
+        prot_parts = [p.strip() for p in txt.split(";") if p.strip()]
+        if not prot_parts:
+            return []
+
+        def _filter_group(group_txt: str) -> str | None:
+            """
+            Filter a single '(...)' group to phospho-only entries (S/T/Y), preserving ambiguity.
+            Returns '(S197,S201)' style string (ambiguity preserved) or None if nothing phospho remains.
+            """
+            g = group_txt.strip()
+            if g.startswith("(") and g.endswith(")"):
+                g = g[1:-1].strip()
+            if not g:
+                return None
+            elems = [e.strip() for e in g.split(",") if e.strip()]
+            elems = [e for e in elems if e and e[0] in {"S", "T", "Y"}]
+            if not elems:
+                return None
+            return "(" + ",".join(elems) + ")"
+
+        def _flatten_groups_as_single_site(groups: list[str]) -> list[str]:
+            """
+            For expected_sites == 1, ProteinPTMLocations may encode ambiguity as multiple '(...)' groups,
+            e.g. '(S1026)(S1051)'. In that case we collapse to one ambiguity group '(S1026,S1051)'.
+            """
+            elems_all: list[str] = []
+            seen: set[str] = set()
+            for g in groups:
+                fg = _filter_group(g)
+                if fg is None:
+                    continue
+                inner = fg[1:-1].strip()
+                if not inner:
+                    continue
+                for e in [x.strip() for x in inner.split(",") if x.strip()]:
+                    if e not in seen:
+                        seen.add(e)
+                        elems_all.append(e)
+            if not elems_all:
+                return []
+            return ["(" + ",".join(elems_all) + ")"]
+
+        def _split_single_group_if_multisite(group_txt: str, expected: int) -> list[str]:
+            """
+            If we have exactly one '(...)' group for a protein member, decide whether to:
+              - keep as one ambiguous site (expected <= 1), or
+              - split into multiple site-groups (expected > 1)
+            """
+            fg = _filter_group(group_txt)
+            if fg is None:
+                return []
+            inner = fg[1:-1].strip()
+            if not inner:
+                return []
+            elems = [e.strip() for e in inner.split(",") if e.strip()]
+            # expected > 1 => treat comma-separated entries as multiple sites
+            if expected > 1 and len(elems) > 1:
+                return ["(" + e + ")" for e in elems]
+            # else keep ambiguity as one group
+            return [fg]
+
+        per_prot_groups: list[list[str]] = []
+        for p in prot_parts:
+            p2 = p.strip()
+
+            # Primary: extract all '(...)' groups in order.
+            # This correctly parses '(S197,S201)(S222,S226)' as two site groups.
+            groups = re.findall(r"\([^)]*\)", p2)
+            if groups:
+                if expected_sites <= 1:
+                    # Single-site phospho: multiple groups can encode ambiguity (e.g. '(S1026)(S1051)').
+                    # Collapse to one ambiguity group to enforce 1:1 with the peptide phospho count.
+                    per_prot_groups.append(_flatten_groups_as_single_site(groups))
+                else:
+                    if len(groups) == 1:
+                        # single group: ambiguity vs multisite depends on expected_sites
+                        per_prot_groups.append(_split_single_group_if_multisite(groups[0], expected_sites))
+                    else:
+                        # multiple groups: each group is one site; preserve ambiguity within each group
+                        kept: list[str] = []
+                        for g in groups:
+                            fg = _filter_group(g)
+                            if fg is not None:
+                                kept.append(fg)
+                        per_prot_groups.append(kept)
+                continue
+
+        # all proteins must carry the same number of phospho sites after filtering
+        lengths = {len(x) for x in per_prot_groups}
+        if len(lengths) != 1:
+            raise ValueError(
+                "[PHOSPHO] EG.ProteinPTMLocations parsing produced inconsistent phospho-site counts "
+                f"across protein-group members: parts={prot_parts} parsed={per_prot_groups}"
+            )
+
+        n = len(per_prot_groups[0])
+        if n == 0:
+            return []
+
+        # assemble group-level token per site: "(S87);(S86)" etc.
+        tokens: list[str] = []
+        for i in range(n):
+            toks_i = [per_prot_groups[j][i] for j in range(len(per_prot_groups))]
+            tokens.append(";".join(toks_i))
+        return tokens
 
     def _convert_numeric_ptms(self, s: str | None) -> str | None:
         """
@@ -538,15 +766,6 @@ class DataHarmonizer:
         # matches AA[float] or n[float] / c[float]
         return re.sub(r"([A-Znc])\[(\-?\d+\.\d+)\]", _replace, s)
 
-    def _strip_mods_old(self, s: str) -> str:
-        if s is None:
-            return None
-        # Spectronaut often wraps with underscores and brackets: _ACD[Carbamidomethyl (C)]EF_
-        out = s.strip("_")
-        out = re.sub(r"\[.*?\]", "", out)   # drop bracketed annotations
-        out = out.replace("(", "").replace(")", "")  # safety for exotic exporters
-        return out
-
     def _normalize_peptido_index_seq(self, s: str | None) -> str | None:
         """
         Build the peptidomics INDEX sequence from a modified sequence.
@@ -581,15 +800,27 @@ class DataHarmonizer:
 
         return seq
 
-    def _assert_required_phospho_columns(self, df: pl.DataFrame) -> None:
-        required = {"PEPTIDE_LSEQ", "PTM_POSITIONS_STR"}
+    def _assert_required_phospho_columns(self, df: pl.DataFrame) -> pl.DataFrame:
+        # For phospho indexing we need both:
+        # - peptide-local PTM positions (Spectronaut: "EG.PTMPositions [Phospho (STY)]")
+        # - absolute protein PTM locations (Spectronaut: "EG.ProteinPTMLocations")
+        required = {
+            "PEPTIDE_START",
+            "PEPTIDE_LSEQ",
+            "PTM_SITES_STR",
+            "PTM_POSITIONS_STR",
+            "PTM_PROTEINLOCATIONS",
+        }
         missing = sorted(required - set(df.columns))
         if missing:
             raise ValueError(
                 "[PHOSPHO] Missing required columns after harmonization: "
                 f"{missing}. Ensure your config maps:\n"
-                "  peptide_seq_column -> PEPTIDE_LSEQ (e.g. 'PEP.StrippedSequence')\n"
-                "  ptm_positions_column -> PTM_POSITIONS_STR (e.g. 'EG.PTMPositions [Phospho (STY)]')"
+                "  peptide_start_column -> PEPTIDE_START (e.g. 'PEP.PeptidePosition')\n"
+                "  peptide_seq_column -> PEPTIDE_LSEQ (e.g. 'EG.ModifiedSequence')\n"
+                "  ptm_positions_str -> PTM_POSITIONS_STR (e.g. 'EG.PTMPositions [Phospho (STY)]')\n"
+                "  ptm_proteinlocations_column -> PTM_PROTEINLOCATIONS (e.g. 'EG.ProteinPTMLocations')\n"
+                "  ptm_sites_column -> PTM_SITES_STR (e.g. 'EG.PTMSites [Phospho (STY)]')\n"
             )
 
         # Prefer vendor-specific per-site probs; fall back to the generic localization probs if present
@@ -648,51 +879,291 @@ class DataHarmonizer:
     def _build_phospho_index(self, df: pl.DataFrame) -> pl.DataFrame:
         df = self._assert_required_phospho_columns(df)
 
-        if "PEPTIDE_LSEQ" not in df.columns:
-            raise ValueError(
-                "[PHOSPHO] Missing required column 'PEPTIDE_LSEQ'. "
-                "Map 'peptide_seq_column' to the modified peptide sequence in the config."
-            )
+        # ------------------------------------------------------------------
+        # 1) Gate phospho rows
+        #    Trust Spectronaut: PTMSites [Phospho (STY)] is the declaration of phospho
+        # ------------------------------------------------------------------
+        n0 = df.height
+        df = df.filter(
+            pl.col("PTM_SITES_STR").is_not_null()
+            & (pl.col("PTM_SITES_STR").cast(pl.Utf8).str.strip_chars() != "")
+        )
+        n1 = df.height
+        log_info(f"Filtering non-phospho precursors: kept={n1} dropped={n0-n1} of {n0}")
 
+        # ------------------------------------------------------------------
+        # 2) Parse peptide-local candidate positions + probabilities
+        # ------------------------------------------------------------------
         df = df.with_columns(
-            pl.col("PEPTIDE_LSEQ").cast(pl.Utf8).alias("_seq_candidate")
-        ).with_columns(
-            pl.col("_seq_candidate").map_elements(self._strip_mods, return_dtype=str).alias("STRIPPED_SEQ")
-        ).drop(["_seq_candidate"], strict=False)
-
-        # Split lists
-        with_lists = df.with_columns(
-            pl.when(pl.col("PTM_POSITIONS_STR").is_not_null())
-              .then(pl.col("PTM_POSITIONS_STR").cast(pl.Utf8).str.split(";"))
-              .otherwise(pl.lit([])).alias("_pos_list"),
-            pl.when(pl.col("PTM_PROBS_STR").is_not_null())
-              .then(pl.col("PTM_PROBS_STR").cast(pl.Utf8).str.split(";"))
-              .otherwise(pl.lit([])).alias("_prob_list"),
+            pl.col("PTM_POSITIONS_STR")
+              .cast(pl.Utf8)
+              .str.strip_chars()
+              .str.split(";")
+              .list.eval(pl.element().cast(pl.Int64, strict=False))
+              .alias("_ptmpos_list")
         )
 
-        # Explode in lockstep
-        exploded = with_lists.explode(["_pos_list", "_prob_list"]).with_columns(
-            pl.col("_pos_list").cast(pl.Utf8).str.strip_chars().replace("", None).cast(pl.Int64, strict=False).alias("SITE_POS"),
-            pl.col("_prob_list").cast(pl.Utf8).str.strip_chars().replace("", None).cast(pl.Float64, strict=False).alias("LOC_PROB"),
-        ).filter(pl.col("SITE_POS").is_not_null())
+        df = df.with_columns(
+            pl.when(
+                pl.col("PTM_PROBS_STR").is_not_null()
+                & (pl.col("PTM_PROBS_STR").cast(pl.Utf8).str.strip_chars() != "")
+            )
+            .then(
+                pl.col("PTM_PROBS_STR")
+                  .cast(pl.Utf8)
+                  .str.split(";")
+                  .list.eval(pl.element().cast(pl.Float64, strict=False))
+            )
+            .otherwise(pl.lit([]))
+            .alias("_prob_list")
+        )
 
-        # Normalize probs and drop zero-prob candidates
-        exploded = exploded.with_columns(
-            pl.when((pl.col("LOC_PROB") > 1.0) & (pl.col("LOC_PROB").is_not_null()))
+        # Align probabilities to positions (or nulls if vendor gave nonsense)
+        df = df.with_columns(
+            pl.when(pl.col("_prob_list").list.len() == pl.col("_ptmpos_list").list.len())
+              .then(pl.col("_prob_list"))
+              .otherwise(pl.col("_ptmpos_list").list.eval(pl.lit(None, dtype=pl.Float64)))
+              .alias("_prob_list_aligned")
+        )
+
+        # Explode peptide-local candidates
+        df2 = (
+            df.with_columns(
+                pl.int_ranges(pl.lit(0), pl.col("_ptmpos_list").list.len()).alias("_idx")
+            )
+            .explode("_idx")
+            .with_columns(
+                pl.col("_ptmpos_list").list.get(pl.col("_idx")).alias("SITE_POS"),
+                pl.col("_prob_list_aligned").list.get(pl.col("_idx")).alias("LOC_PROB"),
+            )
+            .drop("_idx")
+        )
+
+        # Normalize probabilities (0–100 → 0–1) and drop explicit zeros
+        df2 = df2.with_columns(
+            pl.when((pl.col("LOC_PROB") > 1.0) & pl.col("LOC_PROB").is_not_null())
               .then(pl.col("LOC_PROB") / 100.0)
               .otherwise(pl.col("LOC_PROB"))
               .alias("LOC_PROB")
-        ).filter((pl.col("LOC_PROB").is_null()) | (pl.col("LOC_PROB") > 0.0))
+        ).filter(
+            pl.col("LOC_PROB").is_null() | (pl.col("LOC_PROB") > 0.0)
+        )
 
-        # Build final keys and parents from STRIPPED_SEQ
-        out = exploded.with_columns(
-            (pl.col("STRIPPED_SEQ").cast(pl.Utf8) + pl.lit("|p") + pl.col("SITE_POS").cast(pl.Utf8)).alias("INDEX"),
-            pl.col("STRIPPED_SEQ").alias("PARENT_PEPTIDE_ID"),
-            pl.when(pl.col("UNIPROT").is_not_null()).then(pl.col("UNIPROT")).otherwise(None).alias("PARENT_PROTEIN"),
+        # ------------------------------------------------------------------
+        # 3) Parse ProteinPTMLocations → phospho-only biological sites
+        # ------------------------------------------------------------------
+        df2 = df2.with_columns(
+            pl.col("PTM_PROTEINLOCATIONS")
+              .cast(pl.Utf8)
+              .str.extract_all(r"[STY]\d+")
+              .alias("_prot_sites")
+        ).explode("_prot_sites")
+
+        log_info(
+            f"[PHOSPHO] Parsed protein sites: rows={df2.height}, unique_protein_sites={df2.select('_prot_sites').n_unique()}"
+        )
+        log_info(
+            "[PHOSPHO] Parsed protein-location tokens: "
+            f"rows={df2.height}, "
+            f"unique _prot_sites={df2.select('_prot_sites').n_unique()} (token-only, no protein context)"
+        )
+        df2 = df2.with_columns(
+            pl.col("_prot_sites").str.slice(0, 1).alias("_AA"),
+            pl.col("_prot_sites").str.extract(r"(\d+)").cast(pl.Int64).alias("_ABS_POS"),
+        )
+
+        # ------------------------------------------------------------------
+        # 4) Map protein position → peptide-local position
+        # ------------------------------------------------------------------
+        df2 = df2.with_columns(
+            (
+                pl.col("_ABS_POS")
+                - pl.col("PEPTIDE_START").cast(pl.Int64, strict=False)
+                + 1
+            ).alias("SITE_POS")
+        )
+
+        # Keep only real phospho sites:
+        #  - valid peptide-local position
+        #  - present in PTMPositions [Phospho]
+        df2 = df2.filter(
+            pl.col("SITE_POS").is_not_null()
+            & (pl.col("SITE_POS") >= 1)
+            & pl.col("_ptmpos_list").list.contains(pl.col("SITE_POS"))
+        )
+
+        # ------------------------------------------------------------------
+        # 5) Build indices
+        # ------------------------------------------------------------------
+        df2 = df2.with_columns(
+            (pl.col("PEP_SEQUENCE") + pl.lit("|p") + pl.col("SITE_POS").cast(pl.Utf8))
+                .alias("PEPTIDE_INDEX"),
+            (
+                pl.col("UNIPROT")
+                + pl.lit("|")
+                + pl.col("_prot_sites").str.replace_all(r"[()]", "")
+                #+ pl.col("_AA")
+                #+ pl.col("_ABS_POS").cast(pl.Utf8)
+            ).alias("INDEX"),
+            pl.col("UNIPROT").alias("PARENT_PROTEIN"),
+            pl.col("PEP_SEQUENCE").alias("PARENT_PEPTIDE_ID"),
             pl.lit("PHOSPHO").alias("ASSAY"),
-        ).drop(["_pos_list", "_prob_list"], strict=False)
+        )
 
-        return out
+        # ------------------------------------------------------------------
+        # 6) Diagnostics
+        # ------------------------------------------------------------------
+        log_info(
+            f"[PHOSPHO] After explode: rows={df2.height}, "
+            f"unique INDEX={df2.select('INDEX').n_unique()}, "
+            f"unique PEPTIDE_INDEX={df2.select('PEPTIDE_INDEX').n_unique()}"
+        )
+
+        offenders = (
+            df2.group_by("INDEX")
+               .agg([
+                   pl.len().alias("N_ROWS"),
+                   pl.col("PEPTIDE_INDEX").n_unique().alias("N_PEPTIDES"),
+               ])
+               .sort(["N_PEPTIDES", "N_ROWS"], descending=True)
+               .head(10)
+        )
+        log_info(f"[PHOSPHO] Top sites by #peptides (missed-cleavage variants):\n{offenders}")
+
+        # ------------------------------------------------------------------
+        # 7) Hard invariant: INDEX must never be null
+        # ------------------------------------------------------------------
+        null_idx = df2.filter(pl.col("INDEX").is_null())
+        if null_idx.height > 0:
+            log_info("[PHOSPHO] Null INDEX examples:")
+            log_info(
+                null_idx.select(
+                    "UNIPROT",
+                    "PEP_SEQUENCE",
+                    "PEPTIDE_START",
+                    "PTM_POSITIONS_STR",
+                    "PTM_PROTEINLOCATIONS",
+                    "SITE_POS",
+                    "_AA",
+                    "_ABS_POS",
+                    "LOC_PROB",
+                ).head(20)
+            )
+            raise ValueError("[PHOSPHO] Null INDEX produced — phospho indexing is broken.")
+
+        return df2
+
+    def _build_phospho_index_no(self, df: pl.DataFrame) -> pl.DataFrame:
+        df = self._assert_required_phospho_columns(df)
+
+        n0 = df.height
+        # 1) Gate phospho rows from vendor PTMPositions [Phospho] (fast, vectorized)
+        df = df.filter(
+            pl.col("PTM_POSITIONS_STR").is_not_null()
+            & (pl.col("PTM_POSITIONS_STR").cast(pl.Utf8).str.strip_chars() != "")
+        )
+        n1 = df.height
+        log_info(f"Filtering non-phospho precursors: kept={n1} dropped={n0-n1} of {n0}")
+
+        # 2) Parse PTMPositions (peptide-local) + Probabilities into aligned lists
+        df = df.with_columns(
+            pl.col("PTM_POSITIONS_STR")
+              .cast(pl.Utf8)
+              .str.strip_chars()
+              .str.split(";")
+              .list.eval(pl.element().cast(pl.Int64, strict=False))
+              .alias("_ptmpos_list")
+        )
+
+        df = df.with_columns(
+            pl.when(pl.col("PTM_PROBS_STR").is_not_null() & (pl.col("PTM_PROBS_STR").cast(pl.Utf8).str.strip_chars() != ""))
+              .then(pl.col("PTM_PROBS_STR").cast(pl.Utf8).str.split(";").list.eval(pl.element().cast(pl.Float64, strict=False)))
+              .otherwise(pl.lit([]))
+              .alias("_prob_list")
+        )
+
+        # 3) Work only from PTMPositions [Phospho] (peptide-local positions).
+        #    Zip PTM positions with their probabilities to avoid list.index_of (older Polars).
+        df = df.with_columns(
+            pl.when(pl.col("_prob_list").list.len() == pl.col("_ptmpos_list").list.len())
+              .then(pl.col("_prob_list"))
+              .otherwise(pl.col("_ptmpos_list").list.eval(pl.lit(None, dtype=pl.Float64)))
+              .alias("_prob_list_aligned")
+              )
+
+        df2 = (
+            df.with_columns(
+                pl.int_ranges(
+                    pl.lit(0),
+                    pl.col("_ptmpos_list").list.len()
+                ).alias("_ptm_idx")
+            )
+            .explode("_ptm_idx")
+            .with_columns(
+                pl.col("_ptmpos_list").list.get(pl.col("_ptm_idx")).cast(pl.Int64, strict=False).alias("SITE_POS"),
+                pl.col("_prob_list_aligned").list.get(pl.col("_ptm_idx")).cast(pl.Float64, strict=False).alias("LOC_PROB"),
+            )
+            .with_columns(
+                (
+                    pl.col("PEPTIDE_START").cast(pl.Int64, strict=False)
+                    + pl.col("SITE_POS").cast(pl.Int64, strict=False)
+                    - pl.lit(1)
+                ).alias("_ABS_POS"),
+                pl.col("PEP_SEQUENCE")
+                  .cast(pl.Utf8)
+                  .str.slice(
+                      pl.col("SITE_POS").cast(pl.Int64, strict=False) - pl.lit(1),
+                      1
+                  )
+                  .alias("_AA"),
+            )
+            .drop(["_ptm_idx", "_prob_list_aligned"], strict=False)
+        )
+        # Normalize probs if needed (0..100 -> 0..1) and remove explicit zero candidates
+        df2 = df2.with_columns(
+            pl.when((pl.col("LOC_PROB") > 1.0) & pl.col("LOC_PROB").is_not_null())
+              .then(pl.col("LOC_PROB") / 100.0)
+              .otherwise(pl.col("LOC_PROB"))
+              .alias("LOC_PROB")
+        ).filter(
+            pl.col("LOC_PROB").is_null() | (pl.col("LOC_PROB") > 0.0)
+        )
+
+        # 5) Build stable site INDEX and keep peptide-local display index
+        #    INDEX := UNIPROT|S421
+        #    PEPTIDE_INDEX := stripped|p13
+        df2 = df2.with_columns(
+            (pl.col("PEP_SEQUENCE").cast(pl.Utf8) + pl.lit("|p") + pl.col("SITE_POS").cast(pl.Utf8)).alias("PEPTIDE_INDEX"),
+            (
+                pl.col("UNIPROT").cast(pl.Utf8)
+                + pl.lit("|")
+                + pl.col("_AA")
+                + pl.col("_ABS_POS").cast(pl.Utf8)
+            ).alias("INDEX"),
+            pl.col("PEP_SEQUENCE").alias("PARENT_PEPTIDE_ID"),
+            pl.col("UNIPROT").alias("PARENT_PROTEIN"),
+            pl.lit("PHOSPHO").alias("ASSAY"),
+        ).drop(
+            ["_AA", "_ABS_POS", "_pep_pos_list", "_ptmpos_list", "_prob_list", "_posprob_list"],
+            strict=False,
+        )
+
+        df2.select("INDEX").head(10)
+
+        # 6) Diagnostics: unique counts + top “many peptides per site” offenders
+        log_info(
+            f"[PHOSPHO] After explode: rows={df2.height}, unique INDEX={df2.select('INDEX').n_unique()}, "
+            f"unique PEPTIDE_INDEX={df2.select('PEPTIDE_INDEX').n_unique()}"
+        )
+        offenders = (
+            df2.group_by("INDEX")
+               .agg([pl.len().alias("N_ROWS"), pl.col("PEPTIDE_INDEX").n_unique().alias("N_PEPTIDES")])
+               .sort(["N_PEPTIDES", "N_ROWS"], descending=True)
+               .head(10)
+        )
+        log_info(f"[PHOSPHO] Top sites by #peptides (missed-cleavage variants):\n{offenders}")
+
+        return df2
 
     @log_time("Data Harmonizing")
     def harmonize(self, df: pl.DataFrame) -> pl.DataFrame:
@@ -703,34 +1174,6 @@ class DataHarmonizer:
             df = self._melt_wide_to_long(df)
 
         df = self._standardize_then_inject(df)
-
-        # tag source for downstream
-        #if "SOURCE" not in df.columns and self.software:
-        #    df = df.with_columns(pl.lit(self.software).alias("SOURCE"))
-
-        if self.analysis_type == "phospho":
-            df = self._build_phospho_index(df)
-        elif self.analysis_type == "peptidomics":
-            df = self._build_peptido_index(df)
-
-        return df
-
-    @log_time("Data Harmonizing")
-    def harmonize_old(self, df: pl.DataFrame) -> pl.DataFrame:
-        if self.input_layout not in {"long", "wide"}:
-            raise ValueError("dataset.input_layout must be 'long' or 'wide'.")
-
-        if self.input_layout == "wide":
-            df = self._melt_wide_to_long(df)
-            #df = self._standardize_then_inject(df)
-            #return df
-
-        # long
-        df = self._standardize_then_inject(df)
-
-        # tag source for downstream
-        if "SOURCE" not in df.columns and self.software:
-            df = df.with_columns(pl.lit(self.software).alias("SOURCE"))
 
         if self.analysis_type == "phospho":
             df = self._build_phospho_index(df)

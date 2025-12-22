@@ -2,7 +2,7 @@ dataset:
   input_file: "data/data_phospho.tsv"
   input_layout: "long"
   analysis_type: "phospho"
-  annotation_file: null
+  annotation_file: "data/annot_phospho.tsv"
   exclude_runs: null
 
   inject_runs:
@@ -32,9 +32,11 @@ dataset:
 
   uniprot_column: "PG.ProteinGroups"
   stripped_seq_column: "PEP.StrippedSequence"
-  peptide_seq_column: "FG.LabeledSequence"
-  ptm_sites_column: "EG.PTMSites [Phospho (STY)]"
+  peptide_seq_column: "EG.ModifiedSequence"
+  peptide_start_column: "PEP.PeptidePosition"
+  ptm_proteinlocations_column: "EG.ProteinPTMLocations"
   ptm_positions_column: "EG.PTMPositions [Phospho (STY)]"
+  ptm_sites_column: "EG.PTMSites [Phospho (STY)]"
   ptm_probabilities_column: "EG.PTMProbabilities [Phospho (STY)]"
 
 preprocessing:
@@ -44,7 +46,7 @@ preprocessing:
     stochio_correction_level: "protein"
     multisite_collapse_policy: "duplicate"
     localization_mode: "filter_soft"
-    localization_threshold: 0.75
+    localization_threshold: 0.0
     covariate_pivot_method: "sum"
   filtering:
     qvalue: 0.01
