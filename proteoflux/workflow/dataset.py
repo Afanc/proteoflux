@@ -597,14 +597,26 @@ class Dataset:
             )
             assert list(prec_idx) == list(prec_idx2)
 
+            if self.analysis_type == "phospho":
+                meta_cols = ["PREC_ID", "SITE_ID", "PEPTIDE_INDEX", "CHARGE"]
+            else:
+                meta_cols = ["PREC_ID", "INDEX", "PEPTIDE_SEQ", "CHARGE"]
+
             prec_meta = (
-                prec_wide_mat.select(["PREC_ID", "INDEX", "PEPTIDE_SEQ", "CHARGE"])
+                prec_wide_mat.select(meta_cols)
                 .unique(subset=["PREC_ID"], maintain_order=True)
                 .to_pandas()
                 .set_index("PREC_ID")
-                #.loc[prec_idx]
                 .reindex(prec_idx)
             )
+ #           prec_meta = (
+ #               prec_wide_mat.select(["PREC_ID", "INDEX", "PEPTIDE_SEQ", "CHARGE"])
+ #               .unique(subset=["PREC_ID"], maintain_order=True)
+ #               .to_pandas()
+ #               .set_index("PREC_ID")
+ #               #.loc[prec_idx]
+ #               .reindex(prec_idx)
+ #           )
 
             if prec_meta.isna().any().any():
                 # reindex introduces NaNs if a PREC_ID is missing; fail-fast with examples
@@ -619,8 +631,14 @@ class Dataset:
             if len(prec_meta) != len(prec_idx):
                 raise ValueError(f"Precursor meta/idx mismatch: meta={len(prec_meta)} idx={len(prec_idx)}")
 
-            prec_protein_index = prec_meta["INDEX"].astype(str).tolist()
-            prec_seq = prec_meta["PEPTIDE_SEQ"].astype(str).tolist()
+            #prec_protein_index = prec_meta["INDEX"].astype(str).tolist()
+            #prec_seq = prec_meta["PEPTIDE_SEQ"].astype(str).tolist()
+            if self.analysis_type == "phospho":
+                prec_protein_index = prec_meta["SITE_ID"].astype(str).tolist()
+                prec_seq = prec_meta["PEPTIDE_INDEX"].astype(str).tolist()
+            else:
+                prec_protein_index = prec_meta["INDEX"].astype(str).tolist()
+                prec_seq = prec_meta["PEPTIDE_SEQ"].astype(str).tolist()
             prec_charge = prec_meta["CHARGE"].astype(str).tolist()
 
             self.adata.uns["precursors"] = {

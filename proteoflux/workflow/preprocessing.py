@@ -478,6 +478,8 @@ class Preprocessor:
         }
         if self.analysis_type == "phospho":
             keep_cols.update({"PARENT_PEPTIDE_ID", "PARENT_PROTEIN"})
+        if self.analysis_type =! "DIA":
+            keep_cols.update({"UNIPROT"})
 
         existing = [c for c in df_full.columns if c in keep_cols]
 
@@ -1005,7 +1007,9 @@ class Preprocessor:
         if not needed.issubset(df.columns):
             return None
 
-        # 1) Clean peptide sequence
+        analysis = (self.analysis_type or "").strip().lower()
+        precursor_only = analysis in {"peptidomics", "phospho"}
+
         seq_clean = (
             pl.col("PEPTIDE_LSEQ")
             .str.replace_all(r"(?i)\[Oxidation[^\]]*\]", "")
@@ -1013,49 +1017,55 @@ class Preprocessor:
             .alias("PEPTIDE_SEQ")
         )
 
-        base = (
-            df.select(
-                pl.col("INDEX"),
-                pl.col("FILENAME"),
-                pl.col("SIGNAL"),
-                seq_clean,
-            ).with_columns(
-                (
-                    pl.col("INDEX").cast(pl.Utf8)
-                    + pl.lit("|")
-                    + pl.col("PEPTIDE_SEQ")
-                ).alias("PEPTIDE_ID")
+        # 1) Clean peptide sequence
+        pep_wide = None
+        pep_centered = None
+        if not precursor_only:
+            base = (
+                df.select(
+                    pl.col("INDEX"),
+                    pl.col("FILENAME"),
+                    pl.col("SIGNAL"),
+                    seq_clean,
+                ).with_columns(
+                    (
+                        pl.col("INDEX").cast(pl.Utf8)
+                        + pl.lit("|")
+                        + pl.col("PEPTIDE_SEQ")
+                    ).alias("PEPTIDE_ID")
+                )
             )
-        )
 
         # 2) Distributions: precursors per peptide / per protein, peptides per protein
-        prec_stats = (
-            df.select(
-                pl.col("INDEX"),
-                seq_clean,
-                pl.col("CHARGE"),
-            ).with_columns(
-                (
-                    pl.col("INDEX").cast(pl.Utf8)
-                    + pl.lit("|")
-                    + pl.col("PEPTIDE_SEQ")
-                ).alias("PEPTIDE_ID")
+        if not precursor_only:
+            prec_stats = (
+                df.select(
+                    pl.col("INDEX"),
+                    seq_clean,
+                    pl.col("CHARGE"),
+                ).with_columns(
+                    (
+                        pl.col("INDEX").cast(pl.Utf8)
+                        + pl.lit("|")
+                        + pl.col("PEPTIDE_SEQ")
+                    ).alias("PEPTIDE_ID")
+                )
             )
-        )
 
-        prec_per_pep = (
-            prec_stats.select(["PEPTIDE_ID", "CHARGE"])
-            .drop_nulls(["PEPTIDE_ID", "CHARGE"])
-            .unique()
-            .group_by("PEPTIDE_ID", maintain_order=True)
-            .agg(pl.len().alias("N_PREC_PER_PEP"))
-        )
-        self.intermediate_results.add_array(
-            "num_precursors_per_peptide",
-            prec_per_pep["N_PREC_PER_PEP"].to_numpy(),
-        )
+            prec_per_pep = (
+                prec_stats.select(["PEPTIDE_ID", "CHARGE"])
+                .drop_nulls(["PEPTIDE_ID", "CHARGE"])
+                .unique()
+                .group_by("PEPTIDE_ID", maintain_order=True)
+                .agg(pl.len().alias("N_PREC_PER_PEP"))
+            )
+            self.intermediate_results.add_array(
+                "num_precursors_per_peptide",
+                prec_per_pep["N_PREC_PER_PEP"].to_numpy(),
+            )
 
-        if self.analysis_type != "phospho":
+        #if self.analysis_type != "phospho":
+        if (not precursor_only) and (self.analysis_type != "phospho"):
             pep_per_prot = (
                 base.select(["INDEX", "PEPTIDE_ID"])
                 .drop_nulls(["INDEX", "PEPTIDE_ID"])
@@ -1081,42 +1091,43 @@ class Preprocessor:
             )
 
         # 3) Peptide-wide matrices (sum duplicates)
-        pep_pivot = self._pivot_df(
-            df=base.select(["PEPTIDE_ID", "FILENAME", "SIGNAL"]),
-            sample_col="FILENAME",
-            protein_col="PEPTIDE_ID",
-            values_col="SIGNAL",
-            aggregate_fn="sum",
-        )
+        if not precursor_only:
+            pep_pivot = self._pivot_df(
+                df=base.select(["PEPTIDE_ID", "FILENAME", "SIGNAL"]),
+                sample_col="FILENAME",
+                protein_col="PEPTIDE_ID",
+                values_col="SIGNAL",
+                aggregate_fn="sum",
+            )
 
-        id_map = base.select(["PEPTIDE_ID", "INDEX", "PEPTIDE_SEQ"]).unique()
-        pep_wide = pep_pivot.join(id_map, on="PEPTIDE_ID", how="left")
+            id_map = base.select(["PEPTIDE_ID", "INDEX", "PEPTIDE_SEQ"]).unique()
+            pep_wide = pep_pivot.join(id_map, on="PEPTIDE_ID", how="left")
 
-        sample_cols = [
-            c
-            for c in pep_wide.columns
-            if c not in ("PEPTIDE_ID", "INDEX", "PEPTIDE_SEQ")
-        ]
+            sample_cols = [
+                c
+                for c in pep_wide.columns
+                if c not in ("PEPTIDE_ID", "INDEX", "PEPTIDE_SEQ")
+            ]
 
-        pep_centered = (
-            pep_wide.with_columns(
-                pl.mean_horizontal(
+            pep_centered = (
+                pep_wide.with_columns(
+                    pl.mean_horizontal(
+                        [
+                            pl.when(pl.col(c).is_nan())
+                            .then(None)
+                            .otherwise(pl.col(c))
+                            for c in sample_cols
+                        ]
+                    ).alias("__rowmean__")
+                )
+                .with_columns(
                     [
-                        pl.when(pl.col(c).is_nan())
-                        .then(None)
-                        .otherwise(pl.col(c))
+                        (pl.col(c) / pl.col("__rowmean__")).alias(c)
                         for c in sample_cols
                     ]
-                ).alias("__rowmean__")
+                )
+                .drop("__rowmean__")
             )
-            .with_columns(
-                [
-                    (pl.col(c) / pl.col("__rowmean__")).alias(c)
-                    for c in sample_cols
-                ]
-            )
-            .drop("__rowmean__")
-        )
 
         # 4) Precursor-wide matrices (peptidomics/phospho: same feature + charge)
         # IMPORTANT:
@@ -1124,32 +1135,85 @@ class Preprocessor:
         # - A precursor is therefore INDEX + CHARGE (not a different sequence).
         # - Some upstream steps may have already produced INDEX values containing '|...'.
         #   We make the feature id explicit and stable by taking the part before '|'.
-        index_clean = (
-            pl.col("INDEX")
-            .cast(pl.Utf8)
-            .str.split("|")
-            .list.get(0)
-            .alias("_INDEX_FEATURE")
-        )
 
-        prec_base = (
-            df.select(
-                index_clean,
-                pl.col("FILENAME"),
-                pl.col("SIGNAL"),
-                pl.col("CHARGE"),
+        if analysis == "phospho":
+            if "PEPTIDE_INDEX" not in df.columns:
+                raise ValueError("[PHOSPHO] Missing required column 'PEPTIDE_INDEX' for precursor tables.")
+
+            prec_base = (
+                df.select(
+                    pl.col("INDEX").cast(pl.Utf8).alias("SITE_ID"),
+                    pl.col("PEPTIDE_INDEX").cast(pl.Utf8).alias("PEPTIDE_INDEX"),
+                    pl.col("FILENAME"),
+                    pl.col("SIGNAL"),
+                    pl.col("CHARGE"),
+                )
+                .drop_nulls(["SITE_ID", "PEPTIDE_INDEX", "CHARGE"])
+                .with_columns(
+                    (
+                        pl.col("PEPTIDE_INDEX")
+                        + pl.lit("/+")
+                        + pl.col("CHARGE").cast(pl.Utf8)
+                    ).alias("PREC_ID")
+                )
             )
-            .drop_nulls(["_INDEX_FEATURE", "CHARGE"])
-            .with_columns(
-                (
-                    pl.col("_INDEX_FEATURE")
-                    + pl.lit("/+")
-                    + pl.col("CHARGE").cast(pl.Utf8)
-                ).alias("PREC_ID")
+        else:
+            index_clean = (
+                pl.col("INDEX")
+                .cast(pl.Utf8)
+                .str.split("|")
+                .list.get(0)
+                .alias("_INDEX_FEATURE")
             )
-            .rename({"_INDEX_FEATURE": "INDEX"})
-            .with_columns(pl.col("INDEX").alias("PEPTIDE_SEQ"))
-        )
+            prec_base = (
+                df.select(
+                    index_clean,
+                    pl.col("FILENAME"),
+                    pl.col("SIGNAL"),
+                    pl.col("CHARGE"),
+                )
+                .drop_nulls(["_INDEX_FEATURE", "CHARGE"])
+                .with_columns(
+                    (
+                        pl.col("_INDEX_FEATURE")
+                        + pl.lit("/+")
+                        + pl.col("CHARGE").cast(pl.Utf8)
+                    ).alias("PREC_ID")
+                )
+                .rename({"_INDEX_FEATURE": "INDEX"})
+                .with_columns(pl.col("INDEX").alias("PEPTIDE_SEQ"))
+            )
+#        if analysis == "phospho":
+#            if "PEPTIDE_INDEX" not in df.columns:
+#                raise ValueError("[PHOSPHO] Missing required column 'PEPTIDE_INDEX' for precursor tables.")
+#            index_clean = pl.col("PEPTIDE_INDEX").cast(pl.Utf8).alias("_INDEX_FEATURE")
+#        else:
+#            index_clean = (
+#                pl.col("INDEX")
+#                .cast(pl.Utf8)
+#                .str.split("|")
+#                .list.get(0)
+#                .alias("_INDEX_FEATURE")
+#            )
+#
+#        prec_base = (
+#            df.select(
+#                index_clean,
+#                pl.col("FILENAME"),
+#                pl.col("SIGNAL"),
+#                pl.col("CHARGE"),
+#            )
+#            .drop_nulls(["_INDEX_FEATURE", "CHARGE"])
+#            .with_columns(
+#                (
+#                    pl.col("_INDEX_FEATURE")
+#                    + pl.lit("/+")
+#                    + pl.col("CHARGE").cast(pl.Utf8)
+#                ).alias("PREC_ID")
+#            )
+#            .rename({"_INDEX_FEATURE": "INDEX"})
+#            .with_columns(pl.col("INDEX").alias("PEPTIDE_SEQ"))
+#        )
 
         prec_pivot = self._pivot_df(
             df=prec_base.select(["PREC_ID", "FILENAME", "SIGNAL"]),
@@ -1159,19 +1223,37 @@ class Preprocessor:
             aggregate_fn="sum",
         )
 
-        prec_id_map = (
-            prec_base
-            .select(["PREC_ID", "INDEX", "PEPTIDE_SEQ", "CHARGE"])
-            .unique(subset=["PREC_ID"], maintain_order=True)
-        )
+        if analysis == "phospho":
+            prec_id_map = (
+                prec_base
+                .select(["PREC_ID", "SITE_ID", "PEPTIDE_INDEX", "CHARGE"])
+                .unique(subset=["PREC_ID"], maintain_order=True)
+            )
+        else:
+            prec_id_map = (
+                prec_base
+                .select(["PREC_ID", "INDEX", "PEPTIDE_SEQ", "CHARGE"])
+                .unique(subset=["PREC_ID"], maintain_order=True)
+            )
+#        prec_id_map = (
+#            prec_base
+#            .select(["PREC_ID", "INDEX", "PEPTIDE_SEQ", "CHARGE"])
+#            .unique(subset=["PREC_ID"], maintain_order=True)
+#        )
 
         prec_wide = prec_pivot.join(prec_id_map, on="PREC_ID", how="left")
 
+        id_cols = {"PREC_ID", "INDEX", "PEPTIDE_SEQ", "CHARGE", "SITE_ID", "PEPTIDE_INDEX"}
         prec_sample_cols = [
             c
-            for c in prec_wide.columns
-            if c not in ("PREC_ID", "INDEX", "PEPTIDE_SEQ", "CHARGE")
+            for c, dt in zip(prec_wide.columns, prec_wide.dtypes)
+            if (c not in id_cols) and (dt in pl.NUMERIC_DTYPES)
         ]
+#        prec_sample_cols = [
+#            c
+#            for c in prec_wide.columns
+#            if c not in ("PREC_ID", "INDEX", "PEPTIDE_SEQ", "CHARGE")
+#        ]
         prec_centered = (
             prec_wide.with_columns(
                 pl.mean_horizontal(
@@ -1377,6 +1459,7 @@ class Preprocessor:
                 )
 
         return pep_wide, pep_centered
+        return (pep_wide, pep_centered) if not precursor_only else None
 
     # -------------------------------------------------------------------------
     # Main pivot (proteins) + covariates
@@ -1575,7 +1658,7 @@ class Preprocessor:
                 dropped = total_n - kept_n
                 log_info(
                     f"Phospho localization filter ({self.phospho_loc_mode}, thr={self.phospho_loc_thr}): "
-                    f"kept={kept_n} dropped={dropped} of {total_n}."
+                    f"kept={kept_n}/{total_n}."
                 )
 
                 def _row_filter(

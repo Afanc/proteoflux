@@ -531,175 +531,174 @@ class DataHarmonizer:
 
         return out
 
-    def _phospho_positions_from_modified_seq(self, s: str | None) -> list[int]:
-        """
-        Extract 1-based peptide-local positions of phospho sites from a modified peptide sequence.
-
-        We treat a residue as phospho if any of its bracket mods contains 'Phospho (STY)'.
-        Non-phospho bracket annotations are ignored for position counting.
-        """
-        if s is None:
-            return []
-
-        # strip outer "_" and ignore leading n[...] tags if present
-        txt = s.strip("_")
-        txt = re.sub(r"^n\[[^]]*\](?=[A-Z])", "", txt)
-
-        # match each residue and its trailing bracket mods (possibly multiple)
-        # e.g. "S[Phospho (STY)]", "C[Carbamidomethyl (C)]", "T[Phospho (STY)][Other]"
-        pat = re.compile(r"([A-Z])((?:\[[^\]]+\])*)")
-
-        pos = 0
-        out: list[int] = []
-        for m in pat.finditer(txt):
-            pos += 1
-            mods = m.group(2) or ""
-            if "Phospho (STY)" in mods:
-                out.append(pos)
-        return out
-
-    def _phospho_site_tokens_from_proteinptmlocations_with_expected(
-        self, ptm_sites_str: str | None, expected_sites: int
-    ) -> list[str]:
-        """
-        Parse EG.ProteinPTMLocations (PTM_SITES_STR) into phospho-only site tokens,
-        using the expected number of phosphosites derived from the modified peptide sequence.
-
-        This is necessary because a single parenthesis group can mean either:
-          - ambiguity for one site:     (S197,S201)   when expected_sites == 1
-          - two distinct sites:        (S576,S578)   when expected_sites == 2
-
-        Rules:
-          1) Split across protein-group members by ';' (preserve order)
-          2) If a protein member has multiple '(...)' groups concatenated, each group is one site
-             (ambiguity inside group preserved).
-          3) If a protein member has exactly one '(...)' group:
-               - if expected_sites <= 1: keep it as one (possibly ambiguous) site-group
-               - else: split comma-separated phospho entries into distinct site-groups
-          4) Filter to phospho-only entries (S/T/Y) within each site-group.
-          5) Require all protein-group members have the same number of site-groups.
-          6) Emit group-level token per site index: join per-protein group with ';'
-
-        Input examples:
-          "(S87);(S86)"           -> ["(S87);(S86)"]                (one site, two proteins)
-          "(S2,T18)"              -> ["(S2)", "(T18)"]              (two sites, one protein)
-          "(S2,T18);(S2,T18)"     -> ["(S2);(S2)", "(T18);(T18)"]   (two sites, two proteins)
-          "(C843,S856)"           -> ["(S856)"]                     (phospho-only filtering)
-          "(S197,S201)(S222,S226)"-> ["(S197,S201)", "(S222,S226)"] (two sites, ambiguous positions)
-        """
-        if ptm_sites_str is None:
-            return []
-        txt = str(ptm_sites_str).strip()
-        if not txt:
-            return []
-
-        # split across protein group members; preserve order
-        # Note: within each protein part, Spectronaut can encode multiple sites as concatenated "(...) (...)"
-        prot_parts = [p.strip() for p in txt.split(";") if p.strip()]
-        if not prot_parts:
-            return []
-
-        def _filter_group(group_txt: str) -> str | None:
-            """
-            Filter a single '(...)' group to phospho-only entries (S/T/Y), preserving ambiguity.
-            Returns '(S197,S201)' style string (ambiguity preserved) or None if nothing phospho remains.
-            """
-            g = group_txt.strip()
-            if g.startswith("(") and g.endswith(")"):
-                g = g[1:-1].strip()
-            if not g:
-                return None
-            elems = [e.strip() for e in g.split(",") if e.strip()]
-            elems = [e for e in elems if e and e[0] in {"S", "T", "Y"}]
-            if not elems:
-                return None
-            return "(" + ",".join(elems) + ")"
-
-        def _flatten_groups_as_single_site(groups: list[str]) -> list[str]:
-            """
-            For expected_sites == 1, ProteinPTMLocations may encode ambiguity as multiple '(...)' groups,
-            e.g. '(S1026)(S1051)'. In that case we collapse to one ambiguity group '(S1026,S1051)'.
-            """
-            elems_all: list[str] = []
-            seen: set[str] = set()
-            for g in groups:
-                fg = _filter_group(g)
-                if fg is None:
-                    continue
-                inner = fg[1:-1].strip()
-                if not inner:
-                    continue
-                for e in [x.strip() for x in inner.split(",") if x.strip()]:
-                    if e not in seen:
-                        seen.add(e)
-                        elems_all.append(e)
-            if not elems_all:
-                return []
-            return ["(" + ",".join(elems_all) + ")"]
-
-        def _split_single_group_if_multisite(group_txt: str, expected: int) -> list[str]:
-            """
-            If we have exactly one '(...)' group for a protein member, decide whether to:
-              - keep as one ambiguous site (expected <= 1), or
-              - split into multiple site-groups (expected > 1)
-            """
-            fg = _filter_group(group_txt)
-            if fg is None:
-                return []
-            inner = fg[1:-1].strip()
-            if not inner:
-                return []
-            elems = [e.strip() for e in inner.split(",") if e.strip()]
-            # expected > 1 => treat comma-separated entries as multiple sites
-            if expected > 1 and len(elems) > 1:
-                return ["(" + e + ")" for e in elems]
-            # else keep ambiguity as one group
-            return [fg]
-
-        per_prot_groups: list[list[str]] = []
-        for p in prot_parts:
-            p2 = p.strip()
-
-            # Primary: extract all '(...)' groups in order.
-            # This correctly parses '(S197,S201)(S222,S226)' as two site groups.
-            groups = re.findall(r"\([^)]*\)", p2)
-            if groups:
-                if expected_sites <= 1:
-                    # Single-site phospho: multiple groups can encode ambiguity (e.g. '(S1026)(S1051)').
-                    # Collapse to one ambiguity group to enforce 1:1 with the peptide phospho count.
-                    per_prot_groups.append(_flatten_groups_as_single_site(groups))
-                else:
-                    if len(groups) == 1:
-                        # single group: ambiguity vs multisite depends on expected_sites
-                        per_prot_groups.append(_split_single_group_if_multisite(groups[0], expected_sites))
-                    else:
-                        # multiple groups: each group is one site; preserve ambiguity within each group
-                        kept: list[str] = []
-                        for g in groups:
-                            fg = _filter_group(g)
-                            if fg is not None:
-                                kept.append(fg)
-                        per_prot_groups.append(kept)
-                continue
-
-        # all proteins must carry the same number of phospho sites after filtering
-        lengths = {len(x) for x in per_prot_groups}
-        if len(lengths) != 1:
-            raise ValueError(
-                "[PHOSPHO] EG.ProteinPTMLocations parsing produced inconsistent phospho-site counts "
-                f"across protein-group members: parts={prot_parts} parsed={per_prot_groups}"
-            )
-
-        n = len(per_prot_groups[0])
-        if n == 0:
-            return []
-
-        # assemble group-level token per site: "(S87);(S86)" etc.
-        tokens: list[str] = []
-        for i in range(n):
-            toks_i = [per_prot_groups[j][i] for j in range(len(per_prot_groups))]
-            tokens.append(";".join(toks_i))
-        return tokens
+#    def _phospho_positions_from_modified_seq(self, s: str | None) -> list[int]:
+#        """
+#        Extract 1-based peptide-local positions of phospho sites from a modified peptide sequence.
+#
+#        We treat a residue as phospho if any of its bracket mods contains 'Phospho (STY)'.
+#        Non-phospho bracket annotations are ignored for position counting.
+#        """
+#        if s is None:
+#            return []
+#
+#        # strip outer "_" and ignore leading n[...] tags if present
+#        txt = s.strip("_")
+#        txt = re.sub(r"^n\[[^]]*\](?=[A-Z])", "", txt)
+#
+#        # match each residue and its trailing bracket mods (possibly multiple)
+#        # e.g. "S[Phospho (STY)]", "C[Carbamidomethyl (C)]", "T[Phospho (STY)][Other]"
+#        pat = re.compile(r"([A-Z])((?:\[[^\]]+\])*)")
+#
+#        pos = 0
+#        out: list[int] = []
+#        for m in pat.finditer(txt):
+#            pos += 1
+#            mods = m.group(2) or ""
+#            if "Phospho (STY)" in mods:
+#                out.append(pos)
+#        return out
+#
+#        self, ptm_sites_str: str | None, expected_sites: int
+#    ) -> list[str]:
+#        """
+#        Parse EG.ProteinPTMLocations (PTM_SITES_STR) into phospho-only site tokens,
+#        using the expected number of phosphosites derived from the modified peptide sequence.
+#
+#        This is necessary because a single parenthesis group can mean either:
+#          - ambiguity for one site:     (S197,S201)   when expected_sites == 1
+#          - two distinct sites:        (S576,S578)   when expected_sites == 2
+#
+#        Rules:
+#          1) Split across protein-group members by ';' (preserve order)
+#          2) If a protein member has multiple '(...)' groups concatenated, each group is one site
+#             (ambiguity inside group preserved).
+#          3) If a protein member has exactly one '(...)' group:
+#               - if expected_sites <= 1: keep it as one (possibly ambiguous) site-group
+#               - else: split comma-separated phospho entries into distinct site-groups
+#          4) Filter to phospho-only entries (S/T/Y) within each site-group.
+#          5) Require all protein-group members have the same number of site-groups.
+#          6) Emit group-level token per site index: join per-protein group with ';'
+#
+#        Input examples:
+#          "(S87);(S86)"           -> ["(S87);(S86)"]                (one site, two proteins)
+#          "(S2,T18)"              -> ["(S2)", "(T18)"]              (two sites, one protein)
+#          "(S2,T18);(S2,T18)"     -> ["(S2);(S2)", "(T18);(T18)"]   (two sites, two proteins)
+#          "(C843,S856)"           -> ["(S856)"]                     (phospho-only filtering)
+#          "(S197,S201)(S222,S226)"-> ["(S197,S201)", "(S222,S226)"] (two sites, ambiguous positions)
+#        """
+#        if ptm_sites_str is None:
+#            return []
+#        txt = str(ptm_sites_str).strip()
+#        if not txt:
+#            return []
+#
+#        # split across protein group members; preserve order
+#        # Note: within each protein part, Spectronaut can encode multiple sites as concatenated "(...) (...)"
+#        prot_parts = [p.strip() for p in txt.split(";") if p.strip()]
+#        if not prot_parts:
+#            return []
+#
+#        def _filter_group(group_txt: str) -> str | None:
+#            """
+#            Filter a single '(...)' group to phospho-only entries (S/T/Y), preserving ambiguity.
+#            Returns '(S197,S201)' style string (ambiguity preserved) or None if nothing phospho remains.
+#            """
+#            g = group_txt.strip()
+#            if g.startswith("(") and g.endswith(")"):
+#                g = g[1:-1].strip()
+#            if not g:
+#                return None
+#            elems = [e.strip() for e in g.split(",") if e.strip()]
+#            elems = [e for e in elems if e and e[0] in {"S", "T", "Y"}]
+#            if not elems:
+#                return None
+#            return "(" + ",".join(elems) + ")"
+#
+#        def _flatten_groups_as_single_site(groups: list[str]) -> list[str]:
+#            """
+#            For expected_sites == 1, ProteinPTMLocations may encode ambiguity as multiple '(...)' groups,
+#            e.g. '(S1026)(S1051)'. In that case we collapse to one ambiguity group '(S1026,S1051)'.
+#            """
+#            elems_all: list[str] = []
+#            seen: set[str] = set()
+#            for g in groups:
+#                fg = _filter_group(g)
+#                if fg is None:
+#                    continue
+#                inner = fg[1:-1].strip()
+#                if not inner:
+#                    continue
+#                for e in [x.strip() for x in inner.split(",") if x.strip()]:
+#                    if e not in seen:
+#                        seen.add(e)
+#                        elems_all.append(e)
+#            if not elems_all:
+#                return []
+#            return ["(" + ",".join(elems_all) + ")"]
+#
+#        def _split_single_group_if_multisite(group_txt: str, expected: int) -> list[str]:
+#            """
+#            If we have exactly one '(...)' group for a protein member, decide whether to:
+#              - keep as one ambiguous site (expected <= 1), or
+#              - split into multiple site-groups (expected > 1)
+#            """
+#            fg = _filter_group(group_txt)
+#            if fg is None:
+#                return []
+#            inner = fg[1:-1].strip()
+#            if not inner:
+#                return []
+#            elems = [e.strip() for e in inner.split(",") if e.strip()]
+#            # expected > 1 => treat comma-separated entries as multiple sites
+#            if expected > 1 and len(elems) > 1:
+#                return ["(" + e + ")" for e in elems]
+#            # else keep ambiguity as one group
+#            return [fg]
+#
+#        per_prot_groups: list[list[str]] = []
+#        for p in prot_parts:
+#            p2 = p.strip()
+#
+#            # Primary: extract all '(...)' groups in order.
+#            # This correctly parses '(S197,S201)(S222,S226)' as two site groups.
+#            groups = re.findall(r"\([^)]*\)", p2)
+#            if groups:
+#                if expected_sites <= 1:
+#                    # Single-site phospho: multiple groups can encode ambiguity (e.g. '(S1026)(S1051)').
+#                    # Collapse to one ambiguity group to enforce 1:1 with the peptide phospho count.
+#                    per_prot_groups.append(_flatten_groups_as_single_site(groups))
+#                else:
+#                    if len(groups) == 1:
+#                        # single group: ambiguity vs multisite depends on expected_sites
+#                        per_prot_groups.append(_split_single_group_if_multisite(groups[0], expected_sites))
+#                    else:
+#                        # multiple groups: each group is one site; preserve ambiguity within each group
+#                        kept: list[str] = []
+#                        for g in groups:
+#                            fg = _filter_group(g)
+#                            if fg is not None:
+#                                kept.append(fg)
+#                        per_prot_groups.append(kept)
+#                continue
+#
+#        # all proteins must carry the same number of phospho sites after filtering
+#        lengths = {len(x) for x in per_prot_groups}
+#        if len(lengths) != 1:
+#            raise ValueError(
+#                "[PHOSPHO] EG.ProteinPTMLocations parsing produced inconsistent phospho-site counts "
+#                f"across protein-group members: parts={prot_parts} parsed={per_prot_groups}"
+#            )
+#
+#        n = len(per_prot_groups[0])
+#        if n == 0:
+#            return []
+#
+#        # assemble group-level token per site: "(S87);(S86)" etc.
+#        tokens: list[str] = []
+#        for i in range(n):
+#            toks_i = [per_prot_groups[j][i] for j in range(len(per_prot_groups))]
+#            tokens.append(";".join(toks_i))
+#        return tokens
 
     def _convert_numeric_ptms(self, s: str | None) -> str | None:
         """
@@ -871,7 +870,7 @@ class DataHarmonizer:
         ).drop(["_INDEX_SEQ"], strict=False)
 
         if "ASSAY" not in df.columns:
-            df = df.with_columns(pl.lit("PEPTIDOMICS").alias("ASSAY"))
+            df = df.with_columns(pl.lit("FLOWTHROUGH").alias("ASSAY"))
 
         return df
 
@@ -889,7 +888,7 @@ class DataHarmonizer:
             & (pl.col("PTM_SITES_STR").cast(pl.Utf8).str.strip_chars() != "")
         )
         n1 = df.height
-        log_info(f"Filtering non-phospho precursors: kept={n1} dropped={n0-n1} of {n0}")
+        log_info(f"Removing non-phospho PSMs, kept: {n1}/{n0}")
 
         # ------------------------------------------------------------------
         # 2) Parse peptide-local candidate positions + probabilities
@@ -959,14 +958,14 @@ class DataHarmonizer:
               .alias("_prot_sites")
         ).explode("_prot_sites")
 
-        log_info(
-            f"[PHOSPHO] Parsed protein sites: rows={df2.height}, unique_protein_sites={df2.select('_prot_sites').n_unique()}"
-        )
-        log_info(
-            "[PHOSPHO] Parsed protein-location tokens: "
-            f"rows={df2.height}, "
-            f"unique _prot_sites={df2.select('_prot_sites').n_unique()} (token-only, no protein context)"
-        )
+        #log_info(
+        #    f"[PHOSPHO] Parsed protein sites: rows={df2.height}, unique_protein_sites={df2.select('_prot_sites').n_unique()}"
+        #)
+        #log_info(
+        #    "[PHOSPHO] Parsed protein-location tokens: "
+        #    f"rows={df2.height}, "
+        #    f"unique _prot_sites={df2.select('_prot_sites').n_unique()} (token-only, no protein context)"
+        #)
         df2 = df2.with_columns(
             pl.col("_prot_sites").str.slice(0, 1).alias("_AA"),
             pl.col("_prot_sites").str.extract(r"(\d+)").cast(pl.Int64).alias("_ABS_POS"),
@@ -1014,21 +1013,19 @@ class DataHarmonizer:
         # 6) Diagnostics
         # ------------------------------------------------------------------
         log_info(
-            f"[PHOSPHO] After explode: rows={df2.height}, "
-            f"unique INDEX={df2.select('INDEX').n_unique()}, "
-            f"unique PEPTIDE_INDEX={df2.select('PEPTIDE_INDEX').n_unique()}"
+            f"Unique phosphosites: {df2.select('INDEX').n_unique()}"
         )
 
-        offenders = (
-            df2.group_by("INDEX")
-               .agg([
-                   pl.len().alias("N_ROWS"),
-                   pl.col("PEPTIDE_INDEX").n_unique().alias("N_PEPTIDES"),
-               ])
-               .sort(["N_PEPTIDES", "N_ROWS"], descending=True)
-               .head(10)
-        )
-        log_info(f"[PHOSPHO] Top sites by #peptides (missed-cleavage variants):\n{offenders}")
+        #offenders = (
+        #    df2.group_by("INDEX")
+        #       .agg([
+        #           pl.len().alias("N_ROWS"),
+        #           pl.col("PEPTIDE_INDEX").n_unique().alias("N_PEPTIDES"),
+        #       ])
+        #       .sort(["N_PEPTIDES", "N_ROWS"], descending=True)
+        #       .head(10)
+        #)
+        #log_info(f"[PHOSPHO] Top sites by #peptides (missed-cleavage variants):\n{offenders}")
 
         # ------------------------------------------------------------------
         # 7) Hard invariant: INDEX must never be null
@@ -1050,118 +1047,6 @@ class DataHarmonizer:
                 ).head(20)
             )
             raise ValueError("[PHOSPHO] Null INDEX produced — phospho indexing is broken.")
-
-        return df2
-
-    def _build_phospho_index_no(self, df: pl.DataFrame) -> pl.DataFrame:
-        df = self._assert_required_phospho_columns(df)
-
-        n0 = df.height
-        # 1) Gate phospho rows from vendor PTMPositions [Phospho] (fast, vectorized)
-        df = df.filter(
-            pl.col("PTM_POSITIONS_STR").is_not_null()
-            & (pl.col("PTM_POSITIONS_STR").cast(pl.Utf8).str.strip_chars() != "")
-        )
-        n1 = df.height
-        log_info(f"Filtering non-phospho precursors: kept={n1} dropped={n0-n1} of {n0}")
-
-        # 2) Parse PTMPositions (peptide-local) + Probabilities into aligned lists
-        df = df.with_columns(
-            pl.col("PTM_POSITIONS_STR")
-              .cast(pl.Utf8)
-              .str.strip_chars()
-              .str.split(";")
-              .list.eval(pl.element().cast(pl.Int64, strict=False))
-              .alias("_ptmpos_list")
-        )
-
-        df = df.with_columns(
-            pl.when(pl.col("PTM_PROBS_STR").is_not_null() & (pl.col("PTM_PROBS_STR").cast(pl.Utf8).str.strip_chars() != ""))
-              .then(pl.col("PTM_PROBS_STR").cast(pl.Utf8).str.split(";").list.eval(pl.element().cast(pl.Float64, strict=False)))
-              .otherwise(pl.lit([]))
-              .alias("_prob_list")
-        )
-
-        # 3) Work only from PTMPositions [Phospho] (peptide-local positions).
-        #    Zip PTM positions with their probabilities to avoid list.index_of (older Polars).
-        df = df.with_columns(
-            pl.when(pl.col("_prob_list").list.len() == pl.col("_ptmpos_list").list.len())
-              .then(pl.col("_prob_list"))
-              .otherwise(pl.col("_ptmpos_list").list.eval(pl.lit(None, dtype=pl.Float64)))
-              .alias("_prob_list_aligned")
-              )
-
-        df2 = (
-            df.with_columns(
-                pl.int_ranges(
-                    pl.lit(0),
-                    pl.col("_ptmpos_list").list.len()
-                ).alias("_ptm_idx")
-            )
-            .explode("_ptm_idx")
-            .with_columns(
-                pl.col("_ptmpos_list").list.get(pl.col("_ptm_idx")).cast(pl.Int64, strict=False).alias("SITE_POS"),
-                pl.col("_prob_list_aligned").list.get(pl.col("_ptm_idx")).cast(pl.Float64, strict=False).alias("LOC_PROB"),
-            )
-            .with_columns(
-                (
-                    pl.col("PEPTIDE_START").cast(pl.Int64, strict=False)
-                    + pl.col("SITE_POS").cast(pl.Int64, strict=False)
-                    - pl.lit(1)
-                ).alias("_ABS_POS"),
-                pl.col("PEP_SEQUENCE")
-                  .cast(pl.Utf8)
-                  .str.slice(
-                      pl.col("SITE_POS").cast(pl.Int64, strict=False) - pl.lit(1),
-                      1
-                  )
-                  .alias("_AA"),
-            )
-            .drop(["_ptm_idx", "_prob_list_aligned"], strict=False)
-        )
-        # Normalize probs if needed (0..100 -> 0..1) and remove explicit zero candidates
-        df2 = df2.with_columns(
-            pl.when((pl.col("LOC_PROB") > 1.0) & pl.col("LOC_PROB").is_not_null())
-              .then(pl.col("LOC_PROB") / 100.0)
-              .otherwise(pl.col("LOC_PROB"))
-              .alias("LOC_PROB")
-        ).filter(
-            pl.col("LOC_PROB").is_null() | (pl.col("LOC_PROB") > 0.0)
-        )
-
-        # 5) Build stable site INDEX and keep peptide-local display index
-        #    INDEX := UNIPROT|S421
-        #    PEPTIDE_INDEX := stripped|p13
-        df2 = df2.with_columns(
-            (pl.col("PEP_SEQUENCE").cast(pl.Utf8) + pl.lit("|p") + pl.col("SITE_POS").cast(pl.Utf8)).alias("PEPTIDE_INDEX"),
-            (
-                pl.col("UNIPROT").cast(pl.Utf8)
-                + pl.lit("|")
-                + pl.col("_AA")
-                + pl.col("_ABS_POS").cast(pl.Utf8)
-            ).alias("INDEX"),
-            pl.col("PEP_SEQUENCE").alias("PARENT_PEPTIDE_ID"),
-            pl.col("UNIPROT").alias("PARENT_PROTEIN"),
-            pl.lit("PHOSPHO").alias("ASSAY"),
-        ).drop(
-            ["_AA", "_ABS_POS", "_pep_pos_list", "_ptmpos_list", "_prob_list", "_posprob_list"],
-            strict=False,
-        )
-
-        df2.select("INDEX").head(10)
-
-        # 6) Diagnostics: unique counts + top “many peptides per site” offenders
-        log_info(
-            f"[PHOSPHO] After explode: rows={df2.height}, unique INDEX={df2.select('INDEX').n_unique()}, "
-            f"unique PEPTIDE_INDEX={df2.select('PEPTIDE_INDEX').n_unique()}"
-        )
-        offenders = (
-            df2.group_by("INDEX")
-               .agg([pl.len().alias("N_ROWS"), pl.col("PEPTIDE_INDEX").n_unique().alias("N_PEPTIDES")])
-               .sort(["N_PEPTIDES", "N_ROWS"], descending=True)
-               .head(10)
-        )
-        log_info(f"[PHOSPHO] Top sites by #peptides (missed-cleavage variants):\n{offenders}")
 
         return df2
 

@@ -42,6 +42,7 @@ dataset:
 preprocessing:
   pivot_signal_method: "sum"
   directlfq_cores: 8
+  directlfq_min_nonan: 2
   phospho:
     stochio_correction_level: "protein"
     multisite_collapse_policy: "duplicate"

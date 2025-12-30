@@ -10,7 +10,7 @@ import anndata as ad
 import pandas as pd
 import numpy as np
 import patsy
-from typing import Tuple
+from typing import Tuple, Optional
 from itertools import combinations
 import inmoose.limma as imo
 from scipy.stats import t as t_dist
@@ -20,6 +20,54 @@ from itertools import combinations
 from proteoflux.utils.utils import log_time, log_warning, log_info
 from proteoflux.analysis.statisticaltester import StatisticalTester
 from proteoflux.analysis.clustering import run_clustering, run_clustering_missingness
+
+def _fully_imputed_mask_from_layer(
+    adata: ad.AnnData,
+    layer_name: str,
+    conditions: np.ndarray,
+    contrast_names: list[str],
+) -> np.ndarray:
+    """Return (n_vars × n_contrasts) mask: True where BOTH sides are fully missing in raw."""
+    if layer_name not in adata.layers:
+        raise ValueError(
+            f"Cannot detect fully-imputed contrasts: missing adata.layers[{layer_name!r}] "
+            "(pre-imputation matrix required, with NAs)."
+        )
+    raw = np.asarray(adata.layers[layer_name])
+    if raw.shape != (adata.n_obs, adata.n_vars):
+        raise ValueError(f"Unexpected {layer_name!r} layer shape {raw.shape}, expected {(adata.n_obs, adata.n_vars)}")
+    raw_T = raw.T  # (n_vars × n_obs)
+
+    fully = np.zeros((adata.n_vars, len(contrast_names)), dtype=bool)
+    for j, cname in enumerate(contrast_names):
+        if "_vs_" not in cname:
+            raise ValueError(f"Contrast name {cname!r} does not match expected '<A>_vs_<B>'")
+        A, B = cname.split("_vs_", 1)
+        maskA = conditions == A
+        maskB = conditions == B
+        if not maskA.any() or not maskB.any():
+            raise ValueError(f"Contrast {cname!r}: missing samples for A={A!r} or B={B!r}")
+        fully[:, j] = np.all(np.isnan(raw_T[:, maskA]), axis=1) & np.all(np.isnan(raw_T[:, maskB]), axis=1)
+    return fully
+
+def _neutralize_fully_imputed_contrasts(out: ad.AnnData, fully: np.ndarray) -> None:
+    """Overwrite outputs for fully-imputed (feature × contrast) cells (post-fit, explicit)."""
+    if fully.shape != out.varm["log2fc"].shape:
+        raise ValueError(
+            f"Fully-imputed mask shape {fully.shape} does not match log2fc shape {out.varm['log2fc'].shape}"
+        )
+    if not np.any(fully):
+        return
+    out.varm["log2fc"][fully] = 1.0
+    for key in ("p_raw", "q_raw", "p_ebayes", "q_ebayes"):
+        if key in out.varm:
+            out.varm[key][fully] = 1.0
+    for key in ("t_raw", "t_ebayes"):
+        if key in out.varm:
+            out.varm[key][fully] = 0.0
+    for key in ("se_raw", "se_ebayes"):
+        if key in out.varm:
+            out.varm[key][fully] = np.inf
 
 @log_time("Analysis pipeline")
 def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
@@ -143,6 +191,7 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     fit_imo = imo.contrasts_fit(fit_imo, contrasts=contrast_df)
 
     # Raw (pre-eBayes) statistics
+    contrast_names = list(contrast_df.columns)
     coefs  = fit_imo.coefficients.values          # (n_genes × n_contrasts)
     stdu   = fit_imo.stdev_unscaled.values        # same shape
     sigma  = fit_imo.sigma.to_numpy()             # (n_genes,)
@@ -151,6 +200,13 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     se_raw = stdu * sigma[:, np.newaxis]
     t_raw  = coefs / se_raw
     p_raw  = 2 * t_dist.sf(np.abs(t_raw), df=df_res[:, None])
+
+    # Fully-imputed detection (contrast-local) — apply BEFORE BH to keep q-values clean.
+    cond_arr = adata.obs["CONDITION"].astype(str).to_numpy()
+    fully = _fully_imputed_mask_from_layer(adata=adata, layer_name="raw", conditions=cond_arr, contrast_names=contrast_names)
+
+    if np.any(fully):
+        p_raw[fully] = 1.0
     q_raw  = np.vstack([
         multipletests(p_raw[:, j], method="fdr_bh")[1]
         for j in range(p_raw.shape[1])
@@ -165,6 +221,10 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         se_ebayes  = stdu * np.sqrt(s2post[:, np.newaxis])
         t_ebayes   = fit_imo.t.values
         p_ebayes   = fit_imo.p_value.values
+
+        if np.any(fully):
+            p_ebayes[fully] = 1.0
+
         q_ebayes   = np.vstack([
             multipletests(p_ebayes[:, j], method="fdr_bh")[1]
             for j in range(p_ebayes.shape[1])
@@ -193,8 +253,13 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         out.varm["q_ebayes"]   = q_ebayes
 
     # metadata
-    out.uns["contrast_names"] = list(contrast_df.columns)
+    out.uns["contrast_names"] = contrast_names
     out.uns["pilot_study_mode"] = bool(pilot_mode)
+
+    if not pilot_mode:
+        _neutralize_fully_imputed_contrasts(out=out, fully=fully)
+        out.uns["n_fully_imputed_cells"] = int(np.count_nonzero(fully))
+
 
     # Missingness
     if "qvalue" in adata.layers:
@@ -505,13 +570,22 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     # Fully imputed FT rows were already flagged; combine with low-info unless fixed1
     if beta_mode != "fixed1":
         # Treat 'no/too-little FT information' as 'no adjustment' to avoid beta explosions
-        low_or_all = low_info | imputed_all_cov
-        if np.any(low_or_all):
-            beta1[low_or_all] = 0.0
+        #low_or_all = low_info | imputed_all_cov
+        #if np.any(low_or_all):
+        #    beta1[low_or_all] = 0.0
             # neutralize Stage-1 test for those rows (diagnostics only)
-            cov_t[low_or_all] = 0.0
-            cov_p[low_or_all] = 1.0
-            cov_q[low_or_all] = 1.0
+            # Zero beta per contrast when FT has zero information in at least one condition
+            #cov_t[low_or_all] = 0.0
+            #cov_p[low_or_all] = 1.0
+            #cov_q[low_or_all] = 1.0
+        # Per-contrast: if one condition has zero non-imputed FT samples, do not adjust.
+        no_adjust = contrast_noft | imputed_all_cov[:, None]
+        if np.any(no_adjust):
+            beta1[no_adjust] = 0.0
+            cov_t[no_adjust] = 0.0
+            cov_p[no_adjust] = 1.0
+            cov_q[no_adjust] = 1.0
+
 
     # Recompute residuals with possibly modified betas
     Y_np  = Y_df.to_numpy(dtype=float)
@@ -552,9 +626,20 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         with np.errstate(divide='ignore', invalid='ignore'):
             limma_raw = imo.eBayes(limma_raw)
             raw_p     = limma_raw.p_value.values
+
+            # Apply fully-imputed mask BEFORE BH for raw model q-values.
+            cond_arr = obs["CONDITION"].astype(str).to_numpy()
+            fully = _fully_imputed_mask_from_layer(adata=adata,
+                                                   layer_name = "raw",
+                                                   conditions=cond_arr,
+                                                   contrast_names=contrast_names)
+            if np.any(fully):
+                raw_p[fully] = 1.0
+
             raw_q     = np.vstack([multipletests(raw_p[:, j], method="fdr_bh")[1] for j in range(raw_p.shape[1])]).T
     else:
         raw_p = raw_q = None
+        fully = None
 
     raw_coefs = limma_raw.coefficients.values
 
@@ -639,8 +724,33 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
 
     out.uns["has_covariate"] = True
     out.uns["pilot_study_mode"] = bool(pilot_mode)
+    if (not pilot_mode) and (fully is not None):
+        _neutralize_fully_imputed_contrasts(out=out, fully=fully)
+        out.uns["n_fully_imputed_cells"] = int(np.count_nonzero(fully))
+
 
     # stash covariate (FT) limma results for the viewer
+    # Neutralize FT results where FT is fully imputed in both conditions (per contrast).
+    # Use raw_covariate as the authority (NaN == missing).
+    if not pilot_mode:
+        cond_arr = out.obs["CONDITION"].astype(str).to_numpy()
+        fully_ft = _fully_imputed_mask_from_layer(
+            adata=adata,
+            layer_name="raw_covariate",
+            conditions=cond_arr,
+            contrast_names=contrast_names,
+        )
+        if np.any(fully_ft):
+            # Clean q-values by forcing p=1 before BH.
+            cov_p = np.asarray(cov_p, dtype=float)
+            cov_p[fully_ft] = 1.0
+            cov_q = np.vstack([
+                multipletests(cov_p[:, j], method="fdr_bh")[1]
+                for j in range(cov_p.shape[1])
+            ]).T
+            cov_coefs = np.asarray(cov_coefs, dtype=float)
+            cov_coefs[fully_ft] = 1.0
+
     out.varm["ft_log2fc"]     = cov_coefs
     out.varm["ft_q_ebayes"]   = cov_q
     # (optional) p-values too:
