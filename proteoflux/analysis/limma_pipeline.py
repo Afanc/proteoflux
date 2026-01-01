@@ -650,7 +650,8 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
             limma_resid["p_ebayes"][contrast_noft] = raw_p[contrast_noft]
             limma_resid["q_ebayes"][contrast_noft] = raw_q[contrast_noft]
         else:
-            limma_resid["coefs"] = limma_resid["p_ebayes"] = limma_resid["q_ebayes"] = None
+            limma_resid["p_ebayes"] = limma_resid["q_ebayes"] = None
+            limma_resid["coefs"][contrast_noft] = raw_coefs[contrast_noft]
 
     # limma on the covariate (FT) matrix itself (same design/contrasts)
     limma_cov = imo.lmFit(C_df, design=design2)
@@ -751,10 +752,12 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
             cov_coefs = np.asarray(cov_coefs, dtype=float)
             cov_coefs[fully_ft] = 1.0
 
-    out.varm["ft_log2fc"]     = cov_coefs
-    out.varm["ft_q_ebayes"]   = cov_q
     # (optional) p-values too:
-    out.varm["ft_p_ebayes"]   = cov_p
+    out.varm["ft_log2fc"] = cov_coefs
+    if not pilot_mode:
+        out.varm["ft_q_ebayes"] = cov_q
+        # (optional) p-values too:
+        out.varm["ft_p_ebayes"] = cov_p
 
     # Describe decomposition rule once for the viewer
     out.uns["decomposition_rule"] = "raw_log2fc ≈ log2fc (adjusted) + cov_part"

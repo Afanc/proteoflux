@@ -494,7 +494,6 @@ class Dataset:
 
         # Drill-down trend tables
         # Proteomics: peptide trends
-        # Peptidomics/phospho: precursor trends (and do not emit peptide tables)
         sample_names = [c for c in processed_mat.columns if c != "INDEX"]
 
         proteomics_mode = self.analysis_type.lower() in {"dia", "dda", "proteomics"}
@@ -535,47 +534,6 @@ class Dataset:
             pass
         else:
             raise ValueError(f"Unsupported analysis_type='{self.analysis_type}' for drill-down trend tables.")
-        ## Peptide-level trend tables (always, if present)
-        #sample_names = [c for c in processed_mat.columns if c != "INDEX"]
-
-        #use_cols_w = ["PEPTIDE_ID"] + [
-        #    c for c in sample_names if c in pep_wide_mat.columns
-        #]
-        #use_cols_c = ["PEPTIDE_ID"] + [
-        #    c for c in sample_names if c in pep_cent_mat.columns
-        #]
-
-        #pep_wide_numeric = pep_wide_mat.select(use_cols_w)
-        #pep_cent_numeric = pep_cent_mat.select(use_cols_c)
-
-        #pep_raw, pep_idx = polars_matrix_to_numpy(
-        #    pep_wide_numeric, index_col="PEPTIDE_ID"
-        #)
-        #pep_cent, pep_idx2 = polars_matrix_to_numpy(
-        #    pep_cent_numeric, index_col="PEPTIDE_ID"
-        #)
-        #assert list(pep_idx) == list(pep_idx2)
-
-        #rowmeta = (
-        #    pep_wide_mat.select(["PEPTIDE_ID", "INDEX", "PEPTIDE_SEQ"])
-        #    .unique()
-        #    .to_pandas()
-        #    .set_index("PEPTIDE_ID")
-        #    .loc[pep_idx]
-        #)
-        #pep_protein_index = rowmeta["INDEX"].astype(str).tolist()
-        #peptide_seq = rowmeta["PEPTIDE_SEQ"].astype(str).tolist()
-
-        #self.adata.uns["peptides"] = {
-        #    "rows": [str(x) for x in pep_idx],  # PEPTIDE_ID "{INDEX}|{SEQ}"
-        #    "protein_index": pep_protein_index,  # one per row
-        #    "peptide_seq": peptide_seq,  # one per row
-        #    "cols": [
-        #        c for c in sample_names if c in pep_wide_mat.columns
-        #    ],  # samples
-        #    "raw": np.asarray(pep_raw, dtype=np.float32),
-        #    "centered": np.asarray(pep_cent, dtype=np.float32),
-        #}
 
         # --- Precursor trend tables (for peptidomics; optional) ---
         prec_wide_mat = dfs_ir.get("precursors_wide")
@@ -609,14 +567,6 @@ class Dataset:
                 .set_index("PREC_ID")
                 .reindex(prec_idx)
             )
- #           prec_meta = (
- #               prec_wide_mat.select(["PREC_ID", "INDEX", "PEPTIDE_SEQ", "CHARGE"])
- #               .unique(subset=["PREC_ID"], maintain_order=True)
- #               .to_pandas()
- #               .set_index("PREC_ID")
- #               #.loc[prec_idx]
- #               .reindex(prec_idx)
- #           )
 
             if prec_meta.isna().any().any():
                 # reindex introduces NaNs if a PREC_ID is missing; fail-fast with examples
@@ -631,8 +581,6 @@ class Dataset:
             if len(prec_meta) != len(prec_idx):
                 raise ValueError(f"Precursor meta/idx mismatch: meta={len(prec_meta)} idx={len(prec_idx)}")
 
-            #prec_protein_index = prec_meta["INDEX"].astype(str).tolist()
-            #prec_seq = prec_meta["PEPTIDE_SEQ"].astype(str).tolist()
             if self.analysis_type == "phospho":
                 prec_protein_index = prec_meta["SITE_ID"].astype(str).tolist()
                 prec_seq = prec_meta["PEPTIDE_INDEX"].astype(str).tolist()
