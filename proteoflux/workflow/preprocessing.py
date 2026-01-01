@@ -478,7 +478,7 @@ class Preprocessor:
         }
         if self.analysis_type == "phospho":
             keep_cols.update({"PARENT_PEPTIDE_ID", "PARENT_PROTEIN"})
-        if self.analysis_type =! "DIA":
+        if self.analysis_type != "DIA":
             keep_cols.update({"UNIPROT"})
 
         existing = [c for c in df_full.columns if c in keep_cols]
