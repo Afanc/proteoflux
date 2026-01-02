@@ -1038,6 +1038,7 @@ class Preprocessor:
 
         # 2) Distributions: precursors per peptide / per protein, peptides per protein
         if not precursor_only:
+            # Proteomics: peptide_id = INDEX|PEPTIDE_SEQ; precursor = peptide_id + charge
             prec_stats = (
                 df.select(
                     pl.col("INDEX"),
@@ -1064,8 +1065,6 @@ class Preprocessor:
                 prec_per_pep["N_PREC_PER_PEP"].to_numpy(),
             )
 
-        #if self.analysis_type != "phospho":
-        if (not precursor_only) and (self.analysis_type != "phospho"):
             pep_per_prot = (
                 base.select(["INDEX", "PEPTIDE_ID"])
                 .drop_nulls(["INDEX", "PEPTIDE_ID"])
@@ -1083,6 +1082,92 @@ class Preprocessor:
                 .drop_nulls(["PEPTIDE_ID", "CHARGE"])
                 .unique()
                 .group_by("INDEX", maintain_order=True)
+                .agg(pl.len().alias("N_PREC_PER_PROT"))
+            )
+            self.intermediate_results.add_array(
+                "num_precursors_per_protein",
+                prec_per_prot["N_PREC_PER_PROT"].to_numpy(),
+            )
+        else:
+            # peptidomics/phospho: precursor = peptide_key + charge
+            analysis_lc = (self.analysis_type or "").strip().lower()
+
+            _require_cols = {"FILENAME", "SIGNAL", "CHARGE"}
+            missing = _require_cols - set(df.columns)
+            if missing:
+                raise ValueError(
+                    f"Missing required columns for precursor distributions: {sorted(missing)!r}"
+                )
+
+            if analysis_lc == "phospho":
+                # peptide key is PEPTIDE_INDEX; protein key is PARENT_PROTEIN
+                req = {"PEPTIDE_INDEX", "PARENT_PROTEIN"}
+                missing = req - set(df.columns)
+                if missing:
+                    raise ValueError(
+                        f"[PHOSPHO] Missing required columns for distributions: {sorted(missing)!r}"
+                    )
+
+                base_prec = (
+                    df.select(
+                        pl.col("PEPTIDE_INDEX").cast(pl.Utf8).alias("PEP_KEY"),
+                        pl.col("PARENT_PROTEIN").cast(pl.Utf8).alias("PROT_KEY"),
+                        pl.col("CHARGE"),
+                    )
+                    .drop_nulls(["PEP_KEY", "PROT_KEY", "CHARGE"])
+                    .unique()
+                )
+            else:
+                # peptidomics: peptide key is INDEX (strip anything after '|'); protein key is PARENT_PROTEIN
+                req = {"INDEX", "PARENT_PROTEIN"}
+                missing = req - set(df.columns)
+                if missing:
+                    raise ValueError(
+                        f"[PEPTIDO] Missing required columns for distributions: {sorted(missing)!r}"
+                    )
+
+                pep_key = (
+                    pl.col("INDEX")
+                    .cast(pl.Utf8)
+                    .str.split("|")
+                    .list.get(0)
+                    .alias("PEP_KEY")
+                )
+                base_prec = (
+                    df.select(
+                        pep_key,
+                        pl.col("PARENT_PROTEIN").cast(pl.Utf8).alias("PROT_KEY"),
+                        pl.col("CHARGE"),
+                    )
+                    .drop_nulls(["PEP_KEY", "PROT_KEY", "CHARGE"])
+                    .unique()
+                )
+
+            # a) Precursors per peptide: count unique charge per peptide key
+            prec_per_pep = (
+                base_prec.group_by("PEP_KEY", maintain_order=True)
+                .agg(pl.len().alias("N_PREC_PER_PEP"))
+            )
+            self.intermediate_results.add_array(
+                "num_precursors_per_peptide",
+                prec_per_pep["N_PREC_PER_PEP"].to_numpy(),
+            )
+
+            # b) Peptides per protein: count unique peptide keys per protein
+            pep_per_prot = (
+                base_prec.select(["PROT_KEY", "PEP_KEY"])
+                .unique()
+                .group_by("PROT_KEY", maintain_order=True)
+                .agg(pl.len().alias("N_PEP_PER_PROT"))
+            )
+            self.intermediate_results.add_array(
+                "num_peptides_per_protein",
+                pep_per_prot["N_PEP_PER_PROT"].to_numpy(),
+            )
+
+            # c) Precursors per protein: count unique (peptide,charge) per protein
+            prec_per_prot = (
+                base_prec.group_by("PROT_KEY", maintain_order=True)
                 .agg(pl.len().alias("N_PREC_PER_PROT"))
             )
             self.intermediate_results.add_array(
