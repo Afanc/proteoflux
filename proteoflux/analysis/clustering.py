@@ -14,6 +14,16 @@ import scanpy as sc
 from typing import Optional, Dict, Any, Sequence
 from proteoflux.utils.utils import log_time
 
+def _colmean_impute(M: np.ndarray) -> np.ndarray:
+    """Return a copy where NaNs are replaced by per-column means (finite if any finite exists)."""
+    M = np.asarray(M)
+    if not np.isnan(M).any():
+        return M
+    col_mean = np.nanmean(M, axis=0)
+    # if a column is all-NaN, nanmean gives NaN -> replace with 0 so linkage/PCA stay finite
+    col_mean = np.where(np.isfinite(col_mean), col_mean, 0.0).astype(M.dtype, copy=False)
+    return np.where(np.isnan(M), col_mean, M)
+
 def _pick_feature_indices(adata: AnnData, layer: Optional[str], max_features: Optional[int],
                           strategy: str = "variance", random_seed: int = 0) -> np.ndarray:
     """
@@ -81,8 +91,16 @@ def run_clustering(
     samples = A.obs_names
     features = A.var_names
 
-    # Select data matrix for centering step later (samples × features)
-    data = A.layers[layer] if layer is not None else A.X  # samples × features
+    # Select data matrix (samples × features)
+    data = A.layers[layer] if layer is not None else A.X
+
+    # If a layer is requested, ensure PCA/UMAP use that layer (not A.X).
+    # Scanpy pca/neighbors/umap operate on .X by default.
+    if layer is not None:
+        X_for_embed = _colmean_impute(data).astype(np.float32, copy=False)
+        A.X = X_for_embed
+    else:
+        X_for_embed = A.X  # already finite in your processed .X
 
     # PCA
     # cap n_pcs for tiny sample counts
@@ -109,8 +127,10 @@ def run_clustering(
     sample_leaves = sch.leaves_list(sample_linkage)
 
     # Prepare data for hierarchical clustering on intensity & centered
-    mats = {"intensity": data}
-    Xc = data - np.nanmean(data, axis=0, keepdims=True)
+    # Linkage must be finite: impute for linkage only.
+    data_link = _colmean_impute(data).astype(np.float32, copy=False)
+    mats = {"intensity": data_link}
+    Xc = data_link - np.mean(data_link, axis=0, keepdims=True)
     A.layers["centered"] = Xc
     mats["centered"] = Xc
 

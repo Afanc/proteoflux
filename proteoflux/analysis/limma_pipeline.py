@@ -290,7 +290,10 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
 @log_time("Clustering")
 def clustering_pipeline(adata: ad.AnnData, max_features: int) -> ad.AnnData:
     """Run feature clustering and missingness clustering (unchanged behavior)."""
-    adata = run_clustering(adata, n_pcs=adata.X.shape[0]-1, max_features=max_features)
+    adata = run_clustering(adata,
+                           n_pcs=adata.X.shape[0]-1,
+                           max_features=max_features,
+                           layer="normalized")
     adata = run_clustering_missingness(adata, max_features=max_features)
 
     return adata
