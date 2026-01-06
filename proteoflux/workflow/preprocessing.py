@@ -1003,6 +1003,114 @@ class Preprocessor:
 
         df = self.intermediate_results.dfs["filtered_final_censored"]
 
+        def _compute_missed_cleavages_per_sample(
+            df_in: pl.DataFrame,
+            *,
+            analysis_type: str,
+        ) -> pl.DataFrame:
+            """
+            Returns a table:
+              Sample | MISSED_CLEAVAGE_FRACTION
+
+            Missed cleavage definition:
+              any K/R not followed by P, anywhere except the C-terminal residue.
+            """
+            at = analysis_type.strip().lower()
+
+            # Determine which column holds the peptide sequence to evaluate.
+            # - proteomics/phospho: PEPTIDE_LSEQ is available and includes '_' and PTM brackets
+            # - peptido: INDEX is peptide (and may include gene after '|', keep only peptide)
+            if at in {"dia", "dda", "proteomics"}:
+                seq_expr = (
+                    pl.col("PEPTIDE_LSEQ")
+                    .str.replace_all(r"\[[^\]]*\]", "")
+                    .str.replace_all(r"^_+|_+$", "")
+                    .alias("SEQ")
+                )
+            elif at in {"phospho"}:
+                # phospho also has PEPTIDE_LSEQ; remove PTM annotations
+                seq_expr = (
+                    pl.col("PEPTIDE_LSEQ")
+                    .str.replace_all(r"\[[^\]]*\]", "")
+                    .str.replace_all(r"^_+|_+$", "")
+                    .alias("SEQ")
+                )
+            elif at in {"peptido", "peptidomics"}:
+                seq_expr = pl.col("PEPTIDE_LSEQ").cast(pl.Utf8).alias("SEQ")
+            else:
+                raise ValueError(f"Unknown analysis_type for missed cleavages: {analysis_type!r}")
+
+            needed = {"FILENAME"}
+            if not needed.issubset(df_in.columns):
+                raise ValueError(
+                    "Cannot compute missed cleavages: missing required columns. "
+                    f"Required={sorted(needed)!r}, present={sorted(df_in.columns)!r}"
+                )
+
+            tbl = (
+                df_in.select(
+                    pl.col("FILENAME").cast(pl.Utf8).alias("Sample"),
+                    seq_expr,
+                    pl.col("SIGNAL").cast(pl.Float64, strict=False).alias("_signal"),
+                )
+                .drop_nulls(["Sample", "SEQ"])
+                .filter(
+                    pl.col("_signal").is_not_null()
+                    & ~pl.col("_signal").is_nan()
+                    & (pl.col("_signal") > 0)
+                )
+                # normalize sequences aggressively: keep letters only (handles peptido mods like n[42.0106], c[-0.9840], etc.)
+                .with_columns(
+                    pl.col("SEQ")
+                    .cast(pl.Utf8, strict=False)
+                    .str.to_uppercase()
+                    .str.replace_all(r"[^A-Z]", "")
+                    .alias("SEQ")
+                )
+                .filter(pl.col("SEQ").str.len_chars() >= 2)
+                .unique(subset=["Sample", "SEQ"])
+                .with_columns(
+                    (
+                        # Proper adjacent-pair test (no lookahead needed):
+                        # missed cleavage if ∃ position i (excluding last) s.t. SEQ[i] in {K,R} and SEQ[i+1] != 'P'
+                        pl.col("SEQ").str.split("").list.slice(1).alias("_chars")
+                    )
+                )
+                .with_columns(
+                    pl.col("_chars").list.slice(0, pl.col("_chars").list.len() - 1).alias("_cur"),
+                    pl.col("_chars").list.slice(1).alias("_nxt"),
+                )
+                .with_columns(
+                    pl.struct(["_cur", "_nxt"])
+                    .map_elements(
+                        lambda s: any(
+                            (c in ("K", "R")) and (n != "P")
+                            for c, n in zip(s["_cur"], s["_nxt"])
+                        ),
+                        return_dtype=pl.Boolean,
+                    )
+                    .alias("MISSED_CLEAVAGE")
+                )
+                .drop(["_signal", "_chars", "_cur", "_nxt"], strict=False)
+                .group_by("Sample")
+                .agg(
+                    pl.col("MISSED_CLEAVAGE").cast(pl.Float64).mean().alias(
+                        "MISSED_CLEAVAGE_FRACTION"
+                    )
+                )
+                .sort("Sample")
+            )
+            return tbl
+
+        # Compute once and persist for the viewer (no viewer-side computation).
+        df_mc = df
+        if "IS_COVARIATE" in df_mc.columns:
+            # Do not export covariate/flowthrough samples to the viewer.
+            df_mc = df_mc.filter(~pl.col("IS_COVARIATE").cast(pl.Boolean, strict=False).fill_null(False))
+
+        mc_tbl = _compute_missed_cleavages_per_sample(df_mc, analysis_type=self.analysis_type)
+        self.intermediate_results.dfs["missed_cleavages_per_sample"] = mc_tbl
+
         needed = {"INDEX", "FILENAME", "SIGNAL", "PEPTIDE_LSEQ"}
         if not needed.issubset(df.columns):
             return None

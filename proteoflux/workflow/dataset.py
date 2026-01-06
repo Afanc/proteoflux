@@ -492,6 +492,21 @@ class Dataset:
             "num_peptides_per_protein": dist_arrays.get("num_peptides_per_protein"),
         }
 
+        # Missed cleavages per sample (computed in ProteoFlux; viewer only consumes).
+        dfs_ir = getattr(self.preprocessor.intermediate_results, "dfs", {})
+        mc = dfs_ir.get("missed_cleavages_per_sample")
+        if mc is not None:
+            mc_pd = mc.to_pandas()
+            if not {"Sample", "MISSED_CLEAVAGE_FRACTION"}.issubset(mc_pd.columns):
+                raise ValueError(
+                    "Invalid missed_cleavages_per_sample table. "
+                    f"Expected columns={{'Sample','MISSED_CLEAVAGE_FRACTION'}}, got={list(mc_pd.columns)!r}"
+                )
+            self.adata.uns["preprocessing"]["distributions"]["missed_cleavages_per_sample"] = {
+                "samples": mc_pd["Sample"].astype(str).tolist(),
+                "fraction": mc_pd["MISSED_CLEAVAGE_FRACTION"].astype(float).to_numpy(copy=True),
+            }
+
         # Drill-down trend tables
         # Proteomics: peptide trends
         sample_names = [c for c in processed_mat.columns if c != "INDEX"]

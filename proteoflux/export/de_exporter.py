@@ -152,6 +152,10 @@ class DEExporter:
         if "PRECURSORS_EXP" in meta_df.columns:
             meta_df = meta_df.rename(columns={"PRECURSORS_EXP": "NUM_PRECURSORS", "INDEX": "PHOSPHOSITE", "PARENT_PROTEIN": "PARENT_PROTEIN_UNIPROT_AC"})
 
+        # Phospho export : drop precursor counts column.
+        if is_phospho and "NUM_PRECURSORS" in meta_df.columns:
+            meta_df = meta_df.drop(columns=["NUM_PRECURSORS"])
+
         if analysis_type == "DIA":
             # Placeholder column
             if "NUM_UNIQUE_PEPTIDES" not in meta_df.columns:
@@ -204,12 +208,53 @@ class DEExporter:
         # Build base Summary
         has_contrasts = bool(self.contrasts) and (log2fc is not None)
 
-        log2fc_pref = log2fc.add_prefix("log2FC_") if has_contrasts else None
+        # Contrast-specific statistics
+        log2fc_pref = pval_pref = qval_pref = None
+        if has_contrasts:
+            if is_phospho:
+                # Phospho: expose BOTH raw and adjusted statistics with explicit prefixes.
+                # Adjusted = standard limma outputs.
+                assert log2fc is not None, "Missing varm['log2fc']"
+                assert q_ebayes is not None, "Missing varm['q_ebayes']"
+                assert p_ebayes is not None, "Missing varm['p_ebayes']"
 
-        pval_pref = qval_pref = None
-        if has_contrasts and (q_ebayes is not None) and (p_ebayes is not None):
-            qval_pref = q_ebayes.add_prefix("QVALUE_")
-            pval_pref = p_ebayes.add_prefix("PVALUE_")
+                raw_log2fc = self._get_dataframe("raw_log2fc")
+                raw_log2fc = log2fc if raw_log2fc is None else raw_log2fc
+
+                raw_q = self._get_dataframe("raw_q_ebayes")
+                raw_q = q_ebayes if raw_q is None else raw_q
+
+                raw_p = self._get_dataframe("raw_p_ebayes")
+                raw_p = p_ebayes if raw_p is None else raw_p
+
+                log2fc_pref = pd.concat(
+                    [
+                        raw_log2fc.add_prefix("RAW_log2FC_"),
+                        log2fc.add_prefix("ADJUSTED_log2FC_"),
+                    ],
+                    axis=1,
+                )
+                qval_pref = pd.concat(
+                    [
+                        raw_q.add_prefix("RAW_QVALUE_"),
+                        q_ebayes.add_prefix("ADJUSTED_QVALUE_"),
+                    ],
+                    axis=1,
+                )
+                pval_pref = pd.concat(
+                    [
+                        raw_p.add_prefix("RAW_PVALUE_"),
+                        p_ebayes.add_prefix("ADJUSTED_PVALUE_"),
+                    ],
+                    axis=1,
+                )
+            else:
+                # Non-phospho: keep legacy column names
+                if log2fc is not None:
+                    log2fc_pref = log2fc.add_prefix("log2FC_")
+                if (q_ebayes is not None) and (p_ebayes is not None):
+                    qval_pref = q_ebayes.add_prefix("QVALUE_")
+                    pval_pref = p_ebayes.add_prefix("PVALUE_")
 
         # Processed & Raw intensities integrated
         log2_int_cols = X.add_prefix("Processed_log2_Intensities") if X is not None else None
@@ -291,6 +336,57 @@ class DEExporter:
             order = [c for c in ["PARENT_PEPTIDE_ID", "PARENT_PROTEIN", "GENE_NAMES", "FASTA_HEADERS", "PROTEIN_DESCRIPTIONS"] if c in summary_df.columns]
             other = [c for c in summary_df.columns if c not in order]
             summary_df = summary_df[order + other]
+
+            # Reorder phospho Summary columns for readability:
+            # RAW stats -> ADJUSTED stats -> covariate part -> observed/consistency -> intensities -> locscore -> FT
+            cols = list(summary_df.columns)
+
+            meta = [c for c in ["PARENT_PEPTIDE_ID", "PARENT_PROTEIN", "GENE_NAMES", "FASTA_HEADERS", "PROTEIN_DESCRIPTIONS", "PARENT_PROTEIN_UNIPROT_AC"] if c in cols]
+
+            raw_fc = [c for c in cols if c.startswith("RAW_log2FC_")]
+            raw_p  = [c for c in cols if c.startswith("RAW_PVALUE_")]
+            raw_q  = [c for c in cols if c.startswith("RAW_QVALUE_")]
+
+            adj_fc = [c for c in cols if c.startswith("ADJUSTED_log2FC_")]
+            adj_p  = [c for c in cols if c.startswith("ADJUSTED_PVALUE_")]
+            adj_q  = [c for c in cols if c.startswith("ADJUSTED_QVALUE_")]
+
+            cov_part = [c for c in cols if c.startswith("COVARIATE_PART_")]
+
+            observed = [c for c in cols if c.startswith("Observed_")]
+            max_obs = ["MAX_OBSERVED"] if "MAX_OBSERVED" in cols else []
+
+            consistent = [c for c in cols if c.startswith("CONSISTENT_")]
+            max_cons = ["MAX_CONSISTENT"] if "MAX_CONSISTENT" in cols else []
+
+            proc_int = [c for c in cols if c.startswith("Processed_log2_Intensities")]
+            raw_int  = [c for c in cols if c.startswith("Raw_Intensities")]
+
+            loc = [c for c in cols if c.startswith("LOCSCORE_")]
+
+            ft_fc = [c for c in cols if c.startswith("FT_log2FC_")]
+            ft_p  = [c for c in cols if c.startswith("FT_PVALUE_")]
+            ft_q  = [c for c in cols if c.startswith("FT_QVALUE_")]
+            ft_proc = [c for c in cols if c.startswith("FT_processed_log2_")]
+            ft_raw  = [c for c in cols if c.startswith("FT_Raw_")]
+
+            preferred = (
+                meta
+                + raw_fc + raw_q + raw_p
+                + adj_fc + adj_q + adj_p
+                + cov_part
+                + observed + max_obs
+                + consistent + max_cons
+                + proc_int + raw_int
+                + loc
+                + ft_fc + ft_q + ft_p
+                + ft_proc + ft_raw
+            )
+
+            seen = set()
+            preferred = [c for c in preferred if (c in cols) and (c not in seen) and not seen.add(c)]
+            remaining = [c for c in cols if c not in set(preferred)]
+            summary_df = summary_df[preferred + remaining]
 
         # Index header A1
         summary_df.index.name = "PHOSPHOSITE" if is_phospho else "UNIPROT_AC"

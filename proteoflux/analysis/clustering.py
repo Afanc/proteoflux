@@ -7,6 +7,7 @@ Provides:
   - run_clustering_missingness: hierarchical clustering on binary missingness masks.
 """
 
+import warnings
 import numpy as np
 import scipy.cluster.hierarchy as sch
 from anndata import AnnData
@@ -19,7 +20,8 @@ def _colmean_impute(M: np.ndarray) -> np.ndarray:
     M = np.asarray(M)
     if not np.isnan(M).any():
         return M
-    col_mean = np.nanmean(M, axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        col_mean = np.nanmean(M, axis=0)
     # if a column is all-NaN, nanmean gives NaN -> replace with 0 so linkage/PCA stay finite
     col_mean = np.where(np.isfinite(col_mean), col_mean, 0.0).astype(M.dtype, copy=False)
     return np.where(np.isnan(M), col_mean, M)
@@ -42,7 +44,15 @@ def _pick_feature_indices(adata: AnnData, layer: Optional[str], max_features: Op
 
     if strategy == "variance":
         # nanvar over samples axis, higher variance -> more informative
-        var = np.nanvar(M, axis=0)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"Degrees of freedom <= 0 for slice\.",
+                category=RuntimeWarning,
+            )
+            with np.errstate(invalid="ignore", divide="ignore"):
+                var = np.nanvar(M, axis=0)
+        var = np.where(np.isfinite(var), var, -np.inf)
         idx = np.argsort(var)[::-1][:max_features]
         return np.sort(idx)  # keep ascending index order for stable slicing
     elif strategy == "random":
