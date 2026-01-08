@@ -603,8 +603,8 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
 
     limma_resid = _fit_limma_with_contrasts(R_df, design2, contr)
     contrast_names = list(contr.columns)
-    # Per-contrast mask: True where a contrast lacks FT info on at least one side
 
+    # Per-contrast mask: True where a contrast lacks FT info on at least one side
     # Align raw_covariate to the same sample order, then make a (G x N) non-imputed mask
     raw_cov_df = pd.DataFrame(adata.layers["raw_covariate"], index=adata.obs_names, columns=adata.var_names)
     raw_cov_df = raw_cov_df.loc[sample_names, :].T            # (G x N) to align with Y_df/C_df
@@ -699,6 +699,11 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         out.varm["t_ebayes"]   = limma_resid["t_ebayes"]
         out.varm["p_ebayes"]   = limma_resid["p_ebayes"]
         out.varm["q_ebayes"]   = limma_resid["q_ebayes"]
+
+        # Residual variance from stage-2 limma (adjusted model)
+        fit_resid = imo.lmFit(R_df, design=design2)
+        resid_var = np.asarray(fit_resid.sigma, dtype=np.float32) ** 2
+        out.uns["residual_variance"] = resid_var
 
     # Raw model (same contrasts) - for decomposition display
     out.varm["raw_log2fc"]   = raw_coefs
