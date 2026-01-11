@@ -12,8 +12,54 @@ import numpy as np
 import scipy.cluster.hierarchy as sch
 from anndata import AnnData
 import scanpy as sc
+from sklearn.metrics import pairwise_distances
+from sklearn.manifold import MDS
 from typing import Optional, Dict, Any, Sequence
 from proteoflux.utils.utils import log_time
+
+def _lc_mindet_impute(
+    M: np.ndarray,
+    *,
+    lod_k: Optional[int] = None,
+    lod_shift: float = 0.20,
+    lod_sd_width: float = 0.05,
+    random_seed: int = 0,
+) -> np.ndarray:
+    """Left-censor (MinDet-like) imputation for clustering/QC only.
+
+    - Global LoD is median of the lowest K observed intensities.
+    - Missing values are filled with (LoD - lod_shift) + Normal(0, lod_sd_width),
+      clipped to <= LoD.
+    - No condition-aware centering. No mean imputation.
+    """
+    M = np.asarray(M, dtype=np.float64)
+    if not np.isnan(M).any():
+        return M.astype(np.float32, copy=False)
+
+    obs = M[~np.isnan(M)]
+    if obs.size == 0:
+        # Degenerate: keep finite zeros so downstream does not crash.
+        return np.zeros_like(M, dtype=np.float32)
+
+    if lod_k is None:
+        K_adapt = int(np.ceil(0.01 * obs.size))
+        K = max(10, min(50, K_adapt))
+    else:
+        K = int(lod_k)
+    K = min(K, obs.size)
+    smallest = np.partition(obs, K - 1)[:K]
+    lod = float(np.median(smallest))
+
+    rng = np.random.default_rng(int(random_seed))
+    base = lod - float(lod_shift)
+    sd = max(float(lod_sd_width), 1e-8)
+
+    out = M.copy()
+    nan_mask = np.isnan(out)
+    draws = base + rng.normal(0.0, sd, size=int(nan_mask.sum()))
+    draws = np.minimum(draws, lod)
+    out[nan_mask] = draws
+    return out.astype(np.float32, copy=False)
 
 def _colmean_impute(M: np.ndarray) -> np.ndarray:
     """Return a copy where NaNs are replaced by per-column means (finite if any finite exists)."""
@@ -104,49 +150,71 @@ def run_clustering(
     # Select data matrix (samples × features)
     data = A.layers[layer] if layer is not None else A.X
 
-    # If a layer is requested, ensure PCA/UMAP use that layer (not A.X).
-    # Scanpy pca/neighbors/umap operate on .X by default.
+    # If 'layer' is provided, we use LC-only MinDet imputation
     if layer is not None:
-        X_for_embed = _colmean_impute(data).astype(np.float32, copy=False)
-        A.X = X_for_embed
+        X_for_embed = _lc_mindet_impute(
+            data,
+            random_seed=random_seed,
+        )
     else:
-        X_for_embed = A.X  # already finite in your processed .X
+        # Caller explicitly wants embeddings on adata.X (already fully imputed upstream)
+        X_for_embed = np.asarray(A.X, dtype=np.float32)
 
-    # PCA
-    # cap n_pcs for tiny sample counts
-    n_comps = max(1, min(n_pcs, A.n_obs - 1))
-    sc.tl.pca(A, n_comps=n_comps)
+    # Embeddings are computed on a scratch AnnData to guarantee we never overwrite A.X.
+    E = AnnData(X=X_for_embed, obs=A.obs.copy())
 
-    adata.uns['pca'] = A.uns.get('pca', {})
+    # PCA (cap PCs for tiny sample counts)
+    n_comps = max(1, min(int(n_pcs), E.n_obs - 1))
+    sc.tl.pca(E, n_comps=n_comps)
+    adata.uns["pca"] = E.uns.get("pca", {})
 
-    # UMAP
-    if 'neighbors' not in A.uns:
-        # choose a sensible n_neighbors for small n; scanpy will clamp internally, but be explicit
-        nn = max(2, min(15, A.n_obs - 1))
-        sc.pp.neighbors(A, n_pcs=n_comps, n_neighbors=nn)
-    # skip UMAP for tiny cohorts; otherwise standard call
+    # Neighbors on PCA space
+    if "neighbors" not in E.uns:
+        nn = int(round(E.n_obs ** 0.5))
+        nn = max(10, min(30, nn))
+        nn = min(nn, E.n_obs - 1)
+        sc.pp.neighbors(E, n_neighbors=nn, use_rep="X_pca")
+
+    # Keep UMAP codepath in the module, in case I change my mind
+    # but we compute MDS instead 
     if not small_n:
-        sc.tl.umap(A, **(umap_kwargs or {}))
+        Xp = np.asarray(E.obsm["X_pca"][:, :n_comps], dtype=np.float64)
+
+        # Correlation distance between samples
+        # corr_ij = corr(Xp[i], Xp[j]); distance = 1 - corr_ij
+        C = np.corrcoef(Xp)  # shape (n_obs, n_obs)
+
+        # numerical safety
+        C = np.clip(C, -1.0, 1.0)
+        D = 1.0 - C
+        np.fill_diagonal(D, 0.0)
+        mds = MDS(
+            n_components=2,
+            dissimilarity="precomputed",
+            random_state=int(random_seed),
+            normalized_stress="auto",
+        )
+        E.obsm["X_mds"] = mds.fit_transform(D).astype(np.float32, copy=False)
+        E.uns["mds"] = {"stress": float(getattr(mds, "stress_", np.nan)), "metric": "correlation_pca"}
     else:
-        # annotate why we skipped, so it shows up in logs/uns for provenance
-        A.uns['umap'] = {"skipped_reason": "n_obs<=3"}
+        E.uns["mds"] = {"skipped_reason": "n_obs<=3"}
 
     # Hierarchical clustering on samples (using PCA space)
-    pca_matrix = A.obsm['X_pca'][:, :n_pcs]  # shape: n_samples × n_pcs
+    pca_matrix = E.obsm["X_pca"][:, :n_comps]  # shape: n_samples × n_pcs
     sample_linkage = sch.linkage(pca_matrix, method=hierarchical_method, metric=hierarchical_metric)
     sample_leaves = sch.leaves_list(sample_linkage)
 
     # Prepare data for hierarchical clustering on intensity & centered
     # Linkage must be finite: impute for linkage only.
-    data_link = _colmean_impute(data).astype(np.float32, copy=False)
+    data_link = X_for_embed.astype(np.float32, copy=False)
     mats = {"intensity": data_link}
     Xc = data_link - np.mean(data_link, axis=0, keepdims=True)
     A.layers["centered"] = Xc
     mats["centered"] = Xc
 
-    # Keep AnnData invariant: all layers are (n_obs × n_vars).
     # We NaN-pad non-selected features so downstream code can always read adata.layers["centered"].
     centered_full = np.full((adata.n_obs, adata.n_vars), np.nan, dtype=Xc.dtype)
+
     # 'feat_idx' indexes columns on the original adata; Xc matches A = adata[:, feat_idx]
     centered_full[:, feat_idx] = Xc
     adata.layers["centered"] = centered_full
@@ -172,15 +240,18 @@ def run_clustering(
 
     # IMPORTANT: write back *sample-level* results to the original adata, and mirror uns keys.
     # This keeps downstream code (that expects full-length feature arrays) unchanged. Headaches.
-    adata.obsm['X_pca']  = A.obsm['X_pca']
-    if 'X_umap' in A.obsm:
-        adata.obsm['X_umap'] = A.obsm['X_umap']
-    # neighbors graph lives in .uns/.obsp; copy if present
-    if 'neighbors' in A.uns:
-        adata.uns['neighbors'] = A.uns['neighbors']
-        for k in ('distances', 'connectivities'):
-            if k in A.obsp:
-                adata.obsp[k] = A.obsp[k]
+    adata.obsm["X_pca"] = E.obsm["X_pca"]
+    if "X_mds" in E.obsm:
+        adata.obsm["X_mds"] = E.obsm["X_mds"]
+
+    if "neighbors" in E.uns:
+        adata.uns["neighbors"] = E.uns["neighbors"]
+        for k in ("distances", "connectivities"):
+            if k in E.obsp:
+                adata.obsp[k] = E.obsp[k]
+
+    if "mds" in E.uns:
+        adata.uns["mds"] = E.uns["mds"]
 
     # Mirror clustering results into adata.uns under the same keys
     for key in list(A.uns.keys()):

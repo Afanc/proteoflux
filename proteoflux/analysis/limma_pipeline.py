@@ -137,10 +137,6 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     # Expression: genes × samples
     df_X = pd.DataFrame(adata.X, index=adata.obs_names, columns=adata.var_names).T
 
-    # debug
-    #df_X.loc["P0AB71", "195_KaForAll_DIA_B22"] = 15.618
-    #print(df_X.shape)
-
     # Fit
     fit_imo = imo.lmFit(df_X, design=design_dm)
     resid_var = np.asarray(fit_imo.sigma, dtype=np.float32) ** 2
