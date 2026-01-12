@@ -137,6 +137,7 @@ class DEExporter:
         preproc = ad.uns.get("preprocessing", {})
         analysis_type = str(preproc.get("analysis_type", "DIA")).lower()
         is_phospho = analysis_type == "phospho"
+        pilot_mode = bool(ad.uns.get("pilot_study_mode", False))
 
         # Core statistics
         log2fc = self._get_dataframe("log2fc")
@@ -215,17 +216,12 @@ class DEExporter:
                 # Phospho: expose BOTH raw and adjusted statistics with explicit prefixes.
                 # Adjusted = standard limma outputs.
                 assert log2fc is not None, "Missing varm['log2fc']"
-                assert q_ebayes is not None, "Missing varm['q_ebayes']"
-                assert p_ebayes is not None, "Missing varm['p_ebayes']"
+                if not pilot_mode:
+                    assert q_ebayes is not None, "Missing varm['q_ebayes']"
+                    assert p_ebayes is not None, "Missing varm['p_ebayes']"
 
                 raw_log2fc = self._get_dataframe("raw_log2fc")
                 raw_log2fc = log2fc if raw_log2fc is None else raw_log2fc
-
-                raw_q = self._get_dataframe("raw_q_ebayes")
-                raw_q = q_ebayes if raw_q is None else raw_q
-
-                raw_p = self._get_dataframe("raw_p_ebayes")
-                raw_p = p_ebayes if raw_p is None else raw_p
 
                 log2fc_pref = pd.concat(
                     [
@@ -234,20 +230,28 @@ class DEExporter:
                     ],
                     axis=1,
                 )
-                qval_pref = pd.concat(
-                    [
-                        raw_q.add_prefix("RAW_QVALUE_"),
-                        q_ebayes.add_prefix("ADJUSTED_QVALUE_"),
-                    ],
-                    axis=1,
-                )
-                pval_pref = pd.concat(
-                    [
-                        raw_p.add_prefix("RAW_PVALUE_"),
-                        p_ebayes.add_prefix("ADJUSTED_PVALUE_"),
-                    ],
-                    axis=1,
-                )
+
+                if not pilot_mode:
+                    raw_q = self._get_dataframe("raw_q_ebayes")
+                    raw_q = q_ebayes if raw_q is None else raw_q
+
+                    raw_p = self._get_dataframe("raw_p_ebayes")
+                    raw_p = p_ebayes if raw_p is None else raw_p
+
+                    qval_pref = pd.concat(
+                        [
+                            raw_q.add_prefix("RAW_QVALUE_"),
+                            q_ebayes.add_prefix("ADJUSTED_QVALUE_"),
+                        ],
+                        axis=1,
+                    )
+                    pval_pref = pd.concat(
+                        [
+                            raw_p.add_prefix("RAW_PVALUE_"),
+                            p_ebayes.add_prefix("ADJUSTED_PVALUE_"),
+                        ],
+                        axis=1,
+                    )
             else:
                 # Non-phospho: keep legacy column names
                 if log2fc is not None:
