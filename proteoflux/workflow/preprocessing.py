@@ -212,6 +212,18 @@ class Preprocessor:
                 "Cannot compute missed cleavages: missing required column 'SIGNAL'."
             )
 
+        # In peptidomics wide inputs (e.g. FragPipe), missing values are often encoded as 0.0
+        # after melting to long format. If we don't drop those rows, every sample can end up
+        # with the same peptide set -> identical missed-cleavage fractions.
+        # For DIA-style proteomics/phospho we keep the workflow-like behavior (no SIGNAL gating).
+        signal_present_filter = pl.lit(True)
+        if at in {"peptido", "peptidomics"}:
+            signal_present_filter = (
+                pl.col("SIGNAL").is_not_null()
+                & ~pl.col("SIGNAL").is_nan()
+                & (pl.col("SIGNAL") > 0)
+            )
+
         pep_id_expr = (
             pl.col("PEPTIDE_LSEQ")
             .cast(pl.Utf8, strict=False)
@@ -234,6 +246,7 @@ class Preprocessor:
                 pl.col("SIGNAL").cast(pl.Float64, strict=False).alias("SIGNAL"),
             )
             .drop_nulls(["Sample", "PEP_ID"])
+            .filter(signal_present_filter)
             # normalize sequence for cleavage test: keep letters only
             .with_columns(
                 pl.col("SEQ_RAW")
