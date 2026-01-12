@@ -502,10 +502,6 @@ class Dataset:
                     "Invalid missed_cleavages_per_sample table. "
                     f"Expected columns={{'Sample','MISSED_CLEAVAGE_FRACTION'}}, got={list(mc_pd.columns)!r}"
                 )
-            #self.adata.uns["preprocessing"]["distributions"]["missed_cleavages_per_sample"] = {
-            #    "samples": mc_pd["Sample"].astype(str).tolist(),
-            #    "fraction": mc_pd["MISSED_CLEAVAGE_FRACTION"].astype(float).to_numpy(copy=True),
-            #}
             payload = {
                 "samples": mc_pd["Sample"].astype(str).tolist(),
                 "fraction": mc_pd["MISSED_CLEAVAGE_FRACTION"].astype(float).to_numpy(copy=True),

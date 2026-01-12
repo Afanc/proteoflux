@@ -1,7 +1,7 @@
 """Clustering utilities for PCA/UMAP and missingness patterns.
 
 Provides:
-  - run_clustering: PCA -> neighbors -> UMAP; hierarchical clustering on samples/features.
+  - run_clustering: PCA -> neighbors -> UMAP + MDS; hierarchical clustering on samples/features.
                    Supports optional feature capping via variance- or random-based selection,
                    while writing back sample-level results to the original AnnData.
   - run_clustering_missingness: hierarchical clustering on binary missingness masks.
@@ -127,7 +127,7 @@ def run_clustering(
     feature_selection: str = "variance", # or "random"
     random_seed: int = 0,
 ) -> AnnData:
-    """PCA/UMAP + hierarchical clustering (samples & features), with optional feature capping.
+    """PCA/UMAP+MDS + hierarchical clustering (samples & features), with optional feature capping.
 
     If `max_features` < `adata.n_vars`, computations run on a temporary subset chosen by
     `feature_selection`. Sample-level results are written back to the original `adata`.
@@ -175,8 +175,21 @@ def run_clustering(
         nn = min(nn, E.n_obs - 1)
         sc.pp.neighbors(E, n_neighbors=nn, use_rep="X_pca")
 
-    # Keep UMAP codepath in the module, in case I change my mind
-    # but we compute MDS instead 
+    # UMAP (exported for the viewer toggle)
+    if umap_kwargs is None:
+        umap_kwargs = {}
+    if not small_n:
+        try:
+            sc.tl.umap(E, **umap_kwargs)
+        except Exception:
+            # fail-soft: keep pipeline alive; viewer will show "(not available)"
+            pass
+        if "umap" not in E.uns:
+            E.uns["umap"] = {}
+    else:
+        E.uns["umap"] = {"skipped_reason": "n_obs<=3"}
+
+    # MDS (default embedding)
     if not small_n:
         Xp = np.asarray(E.obsm["X_pca"][:, :n_comps], dtype=np.float64)
 
@@ -244,6 +257,9 @@ def run_clustering(
     if "X_mds" in E.obsm:
         adata.obsm["X_mds"] = E.obsm["X_mds"]
 
+    if "X_umap" in E.obsm:
+        adata.obsm["X_umap"] = E.obsm["X_umap"]
+
     if "neighbors" in E.uns:
         adata.uns["neighbors"] = E.uns["neighbors"]
         for k in ("distances", "connectivities"):
@@ -252,6 +268,9 @@ def run_clustering(
 
     if "mds" in E.uns:
         adata.uns["mds"] = E.uns["mds"]
+
+    if "umap" in E.uns:
+        adata.uns["umap"] = E.uns["umap"]
 
     # Mirror clustering results into adata.uns under the same keys
     for key in list(A.uns.keys()):

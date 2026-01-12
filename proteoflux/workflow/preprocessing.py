@@ -177,6 +177,7 @@ class Preprocessor:
     # Filtering
     # -------------------------------------------------------------------------
 
+    @log_time("Computing Missed Cleavage rates")
     def _compute_missed_cleavages_per_sample(
         self,
         df_in: pl.DataFrame,
