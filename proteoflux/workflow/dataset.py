@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import pyarrow.csv as pv_csv
+import csv
 
 from proteoflux.workflow.preprocessing import Preprocessor
 from proteoflux.utils.harmonizer import DataHarmonizer
@@ -289,11 +290,21 @@ class Dataset:
         delimiter = "\t" if file_path.endswith(".tsv") else ","
 
         if self.load_method == "polars":
+            # Force known statistical columns to float to avoid inference bugs
+            # (e.g. many zeros early -> inferred as int -> later fails on decimals).
+            with open(file_path, "r", newline="") as fh:
+                header = next(csv.reader(fh, delimiter=delimiter))
+            schema_overrides = {
+                col: pl.Float64
+                for col in header
+                if ("Qvalue" in col) or ("Pvalue" in col) or col.endswith(".PEP") or col == "PEP"
+            }
             df = pl.read_csv(
                 file_path,
                 separator=delimiter,
                 infer_schema_length=10000,
                 null_values=["NA", "NaN", "N/A", ""],
+                schema_overrides=schema_overrides or None,
             )
             return df
         elif self.load_method == "pyarrow":
