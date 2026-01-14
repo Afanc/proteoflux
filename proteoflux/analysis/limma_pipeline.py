@@ -58,7 +58,7 @@ def _neutralize_fully_imputed_contrasts(out: ad.AnnData, fully: np.ndarray) -> N
         )
     if not np.any(fully):
         return
-    out.varm["log2fc"][fully] = 1.0
+    out.varm["log2fc"][fully] = 0.0
     for key in ("p_raw", "q_raw", "p_ebayes", "q_ebayes"):
         if key in out.varm:
             out.varm[key][fully] = 1.0
