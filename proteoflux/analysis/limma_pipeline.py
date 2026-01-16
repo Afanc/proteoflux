@@ -21,6 +21,71 @@ from proteoflux.utils.utils import log_time, log_warning, log_info
 from proteoflux.analysis.statisticaltester import StatisticalTester
 from proteoflux.analysis.clustering import run_clustering, run_clustering_missingness
 
+def _contrast_defs_from_cfg(levels: list[str], cfg: dict) -> list[str]:
+    """Return list of limma contrast definitions like ['A - B', ...] (mechanical extraction)."""
+    analysis_cfg = (cfg or {}).get("analysis", {}) or {}
+    only_list = analysis_cfg.get("only_contrasts") or []
+    base = analysis_cfg.get("only_against", None)
+
+    if isinstance(only_list, str):
+        only_list = [only_list]
+
+    def _parse_only_list(items: list[str], valid_levels: list[str]) -> list[str]:
+        out: list[str] = []
+        for it in items:
+            s = str(it)
+            if "_vs_" in s:
+                A, B = s.split("_vs_", 1)
+            elif "_v_" in s:
+                A, B = s.split("_v_", 1)
+            else:
+                raise ValueError(f"only_contrasts item '{s}' must use _v_ or _vs_ as separator")
+            A, B = A.strip(), B.strip()
+            if A not in valid_levels or B not in valid_levels:
+                raise ValueError(f"only_contrasts '{s}': conditions must be in {valid_levels}")
+            out.append(f"{A} - {B}")
+        return out
+
+    if len(only_list) > 0:
+        log_info("Analysis only on selected contrasts")
+        return _parse_only_list(only_list, levels)
+    if base is not None:
+        if base not in levels:
+            raise ValueError(f"only_against='{base}' not found in Condition levels {levels}")
+        log_info("Analysis only on against selected condition")
+        return [f"{c} - {base}" for c in levels if c != base]
+
+    return [f"{a} - {b}" for a, b in combinations(levels, 2)]
+
+
+def _make_contrasts(levels: list[str], design_dm, cfg: dict) -> pd.DataFrame:
+    """Build limma contrasts matrix (mechanical extraction)."""
+    defs = _contrast_defs_from_cfg(levels, cfg)
+    contrast_df = imo.makeContrasts(defs, levels=design_dm)
+    contrast_df.columns = [c.replace(" - ", "_vs_") for c in contrast_df.columns]
+    return contrast_df
+
+
+def _compute_missingness_payload(adata_in: ad.AnnData) -> tuple[pd.DataFrame, str]:
+    """Compute missingness payload exactly like current behavior (mechanical extraction)."""
+    if "qvalue" in adata_in.layers:
+        miss_mat = adata_in.layers["qvalue"].T
+        miss_source = "qvalue"
+    elif "raw" in adata_in.layers:
+        miss_mat = adata_in.layers["raw"].T
+        miss_source = "raw"
+    else:
+        miss_mat = adata_in.X.T
+        miss_source = "X"
+
+    missing_df = StatisticalTester.compute_missingness(
+        intensity_matrix=miss_mat,
+        conditions=adata_in.obs["CONDITION"].tolist(),
+        feature_ids=adata_in.var_names.tolist(),
+    )
+    return missing_df, miss_source
+
+
 def _fully_imputed_mask_from_layer(
     adata: ad.AnnData,
     layer_name: str,
@@ -142,47 +207,8 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     resid_var = np.asarray(fit_imo.sigma, dtype=np.float32) ** 2
     adata.uns["residual_variance"] = resid_var
 
-    # Contrasts: support either 'only_contrasts' (A_v_B / A_vs_B) or 'only_against'
-    analysis_cfg   = (config or {}).get("analysis", {}) or {}
-    only_list      = analysis_cfg.get("only_contrasts") or []
-    base           = analysis_cfg.get("only_against", None)
-
-    if isinstance(only_list, str):
-        only_list = [only_list]
-
-    def _parse_only_list(items, valid_levels):
-        """Return list of 'A - B' strings from ['A_v_B', 'A_vs_B', ...]."""
-        out = []
-        for it in items:
-            s = str(it)
-            if "_vs_" in s:
-                A, B = s.split("_vs_", 1)
-            elif "_v_" in s:
-                A, B = s.split("_v_", 1)
-            else:
-                raise ValueError(f"only_contrasts item '{s}' must use _v_ or _vs_ as separator")
-            A, B = A.strip(), B.strip()
-            if A not in valid_levels or B not in valid_levels:
-                raise ValueError(f"only_contrasts '{s}': conditions must be in {valid_levels}")
-            out.append(f"{A} - {B}")
-        return out
-
-    if len(only_list) > 0:
-        # only_contrasts takes precedence if provided
-        contrast_defs = _parse_only_list(only_list, levels)
-        log_info("Analysis only on selected contrasts")
-    elif base is not None:
-        if base not in levels:
-            raise ValueError(f"only_against='{base}' not found in Condition levels {levels}")
-        contrast_defs = [f"{c} - {base}" for c in levels if c != base]
-        log_info("Analysis only on against selected condition")
-    else:
-        contrast_defs = [f"{a} - {b}" for a, b in combinations(levels, 2)]
-
-    contrast_df = imo.makeContrasts(contrast_defs, levels=design_dm)
-
-    # Pretty names for downstream labeling
-    contrast_df.columns = [c.replace(" - ", "_vs_") for c in contrast_df.columns]
+    # Contrasts
+    contrast_df = _make_contrasts(levels, design_dm, config)
 
     fit_imo = imo.contrasts_fit(fit_imo, contrasts=contrast_df)
 
@@ -258,23 +284,8 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
 
 
     # Missingness
-    if "qvalue" in adata.layers:
-        miss_mat = adata.layers["qvalue"].T
-        miss_source = "qvalue"
-    elif "raw" in adata.layers:
-        # Use pre-imputation raw intensities; NaN means missing
-        miss_mat = adata.layers["raw"].T
-        miss_source = "raw"
-    else:
-        # Last resort: use X (may be imputed). Still better than crashing?
-        miss_mat = adata.X.T
-        miss_source = "X"
+    missing_df, miss_source = _compute_missingness_payload(adata)
 
-    missing_df = StatisticalTester.compute_missingness(
-        intensity_matrix = miss_mat,
-        conditions       = adata.obs['CONDITION'].tolist(),
-        feature_ids      = adata.var_names.tolist(),
-    )
     out.uns["missingness"] = missing_df
     out.uns["missingness_source"] = miss_source
     out.uns["missingness_rule"] = "nan-is-missing"
@@ -339,42 +350,6 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         for lvl in levels:
             tmp[lvl] = (tmp["CONDITION"] == lvl).astype(int)
         return patsy.dmatrix("0 + " + " + ".join(levels), tmp)
-
-    def _make_contrasts(levels: list, design_dm, cfg: dict) -> pd.DataFrame:
-        analysis_cfg = (cfg or {}).get("analysis", {}) or {}
-        only_list    = analysis_cfg.get("only_contrasts") or []
-        base         = analysis_cfg.get("only_against", None)
-
-        if isinstance(only_list, str):
-            only_list = [only_list]
-
-        def _parse_only_list(items, valid_levels):
-            out = []
-            for it in items:
-                s = str(it)
-                if "_vs_" in s:
-                    A, B = s.split("_vs_", 1)
-                elif "_v_" in s:
-                    A, B = s.split("_v_", 1)
-                else:
-                    raise ValueError(f"only_contrasts item '{s}' must use _v_ or _vs_ as separator")
-                A, B = A.strip(), B.strip()
-                if A not in valid_levels or B not in valid_levels:
-                    raise ValueError(f"only_contrasts '{s}': conditions must be in {valid_levels}")
-                out.append(f"{A} - {B}")
-            return out
-
-        if isinstance(only_list, (list, tuple)) and len(only_list) > 0:
-            defs = _parse_only_list(only_list, levels)
-        elif base is not None:
-            if base not in levels:
-                raise ValueError(f"only_against='{base}' not found in Condition levels {levels}")
-            defs = [f"{c} - {base}" for c in levels if c != base]
-        else:
-            defs = [f"{a} - {b}" for a, b in combinations(levels, 2)]
-        contr = imo.makeContrasts(defs, levels=design_dm)
-        contr.columns = [c.replace(" - ", "_vs_") for c in contr.columns]
-        return contr
 
     def _stage1_ols_y_on_1_plus_c(Y: np.ndarray, C: np.ndarray, ridge_lambda: float = 1e-6) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -495,24 +470,6 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
             cov_part[:, j] = beta1 * delta_c
 
         return cov_part
-
-    def _compute_missingness_like_before(adata_in: ad.AnnData) -> Tuple[pd.DataFrame, str]:
-        if "qvalue" in adata_in.layers:
-            miss_mat = adata_in.layers["qvalue"].T
-            miss_source = "qvalue"
-        elif "raw" in adata_in.layers:
-            miss_mat = adata_in.layers["raw"].T
-            miss_source = "raw"
-        else:
-            miss_mat = adata_in.X.T
-            miss_source = "X"
-
-        missing_df = StatisticalTester.compute_missingness(
-            intensity_matrix = miss_mat,
-            conditions       = adata_in.obs['CONDITION'].tolist(),
-            feature_ids      = adata_in.var_names.tolist(),
-        )
-        return missing_df, miss_source
 
     # === ANCOVA options ===
     ancova_cfg        = (config or {}).get("ancova", {})
@@ -679,7 +636,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
 
 
     # Missingness
-    missing_df, miss_source = _compute_missingness_like_before(adata)
+    missing_df, miss_source = _compute_missingness_payload(adata)
 
     # Assemble outputs centrally
     out = adata.copy()
@@ -767,167 +724,3 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     out.uns["decomposition_rule"] = "raw_log2fc ≈ log2fc (adjusted) + cov_part"
 
     return out
-
-def _quick_print_two(adata, ids=("RRPESAPAESSPSK|p5","RRPESAPAESSPSK|p11")):
-    """Debug printer: compact per-feature diagnostics (kept unchanged; optional)."""
-
-    obs_names = list(adata.obs_names)
-    var_names = list(adata.var.index)
-    cond = adata.obs["CONDITION"].astype(str)
-    groups = list(pd.Categorical(cond).categories)
-
-    def _as_feature_df(arr_like):
-        if arr_like is None:
-            return None
-        A = np.asarray(arr_like)
-        # expect (features x samples)
-        if A.shape == (len(obs_names), len(var_names)):
-            A = A.T
-        elif A.shape != (len(var_names), len(obs_names)):
-            raise ValueError(f"Unexpected shape {A.shape}; expected "
-                             f"({len(var_names)}, {len(obs_names)}) or "
-                             f"({len(obs_names)}, {len(var_names)}).")
-        return pd.DataFrame(A, index=var_names, columns=obs_names)
-
-    Y = _as_feature_df(adata.X)
-    R = _as_feature_df(adata.layers.get("residuals_covariate")) if ("residuals_covariate" in adata.layers) else None
-
-    # pick whichever covariate layer exists
-    C = None
-    for k in ("centered_covariate","imputed_covariate","cov","ft"):
-        if k in adata.layers:
-            C = _as_feature_df(adata.layers[k])
-            break
-
-    # limma outputs (stage 2)
-    contrast_names = adata.uns.get("contrast_names", [])
-    lfc_arr = adata.varm.get("log2fc", None)
-    if lfc_arr is None:
-        LFC = pd.DataFrame(index=var_names, columns=contrast_names, dtype=float)
-    else:
-        LFC = pd.DataFrame(np.asarray(lfc_arr), index=var_names, columns=contrast_names)
-
-    qE_arr = adata.varm.get("q_ebayes", None)
-    if qE_arr is None:
-        qE = pd.DataFrame(index=var_names, columns=contrast_names, dtype=float)
-    else:
-        qE = pd.DataFrame(np.asarray(qE_arr), index=var_names, columns=contrast_names)
-
-    # stage 1 covariate stats (optional)
-    cov_beta = np.ravel(adata.varm["covariate_beta"]) if "covariate_beta" in adata.varm else None
-    cov_se   = np.ravel(adata.varm["covariate_se"])   if "covariate_se"   in adata.varm else None
-    cov_p    = np.ravel(adata.varm["covariate_p"])    if "covariate_p"    in adata.varm else None
-    cov_q    = np.ravel(adata.varm["covariate_q"])    if "covariate_q"    in adata.varm else None
-
-    def _means_by_group(M, rid):
-        if M is None: return {}
-        out = {}
-        for g in groups:
-            mask = (cond == g).values
-            out[g] = float(np.nanmean(M.loc[rid, mask]))
-        return out
-
-    print("\n=== QUICK CHECK (ANCOVA residualization; no interaction) ===")
-    for rid in ids:
-        if rid not in var_names:
-            print(f"\n--- {rid} : NOT FOUND ---")
-            continue
-
-        print("\n" + "="*80)
-        print(f"Feature: {rid}")
-
-        print("\nPost-imputation Y means by condition:")
-        print(_means_by_group(Y, rid))
-
-        if C is not None:
-            print("Covariate (globally centered) means by condition:")
-            print(_means_by_group(C, rid))
-
-        if cov_beta is not None:
-            i = adata.var.index.get_loc(rid)
-            b  = float(cov_beta[i])
-            se = float(cov_se[i]) if cov_se is not None else np.nan
-            p  = float(cov_p[i])  if cov_p  is not None else np.nan
-            q  = float(cov_q[i])  if cov_q  is not None else np.nan
-            print("\nStage-1 (phospho ~ 1 + covariate) per-gene slope:")
-            print(f"  beta_c = {b:.4g}   SE = {se:.4g}   p = {p:.3g}   q = {q:.3g}")
-
-        if R is not None:
-            print("Residual means by condition (should be near 0 if well adjusted):")
-            print(_means_by_group(R, rid))
-
-        if not LFC.empty:
-            print("\nAdjusted phospho contrasts (log2FC on residuals):")
-            row = LFC.loc[rid]
-            for cn in contrast_names:
-                qe = (qE.loc[rid, cn] if (cn in qE.columns) else np.nan)
-                print(f"  {cn:<12}  log2FC={row[cn]:>8.4f}   q={qe:>6.3g}")
-
-    # also show raw and cov_part if present
-    raw = adata.varm.get("raw_log2fc", None)
-    covp = adata.varm.get("cov_part", None)
-    if raw is not None or covp is not None:
-        rawDF = (pd.DataFrame(np.asarray(raw), index=var_names, columns=contrast_names)
-                 if raw is not None else None)
-        covDF = (pd.DataFrame(np.asarray(covp), index=var_names, columns=contrast_names)
-                 if covp is not None else None)
-
-        print("\nDecomposition per contrast:")
-        print("  Raw ≈ Adjusted + CovariatePart")
-        for cn in contrast_names:
-            l_adj = float(LFC.loc[rid, cn]) if cn in LFC.columns else np.nan
-            l_raw = float(rawDF.loc[rid, cn]) if (rawDF is not None and cn in rawDF.columns) else np.nan
-            l_cov = float(covDF.loc[rid, cn]) if (covDF is not None and cn in covDF.columns) else np.nan
-            print(f"  {cn:<12}  Raw={l_raw:>8.4f}  Adj={l_adj:>8.4f}  CovPart={l_cov:>8.4f}")
-
-def check_ft_consistency(adata, protein_id="Q8NEN9"):
-    # Extract mapping
-    var = adata.var
-    if "PARENT_PROTEIN" not in var:
-        raise ValueError("No PARENT_PROTEIN column in adata.var")
-
-    sites = var.index[var["PARENT_PROTEIN"] == protein_id]
-    print(f"Protein {protein_id} — {len(sites)} sites")
-
-    # Extract the flowthrough (FT) data
-    ft = pd.DataFrame(
-        adata.layers["centered_covariate"],
-        index=adata.obs_names,
-        columns=adata.var_names
-    ).T
-
-    ft2 = pd.DataFrame(
-        adata.layers["processed_covariate"],
-        index=adata.obs_names,
-        columns=adata.var_names
-    ).T
-
-
-    # Extract the limma results (raw flowthrough fit)
-    ft_logfc = pd.DataFrame(
-        np.asarray(adata.varm["ft_log2fc"]),
-        index=adata.var_names,
-        columns=adata.uns["contrast_names"]
-    )
-    ft_q = pd.DataFrame(
-        np.asarray(adata.varm["ft_q_ebayes"]),
-        index=adata.var_names,
-        columns=adata.uns["contrast_names"]
-    )
-
-    # Print raw differences
-    for c in adata.uns["contrast_names"]:
-        vals = ft_logfc.loc[sites, c]
-        qs = ft_q.loc[sites, c]
-        print(f"\nContrast: {c}")
-        print(vals)
-        print(qs)
-        print(f"Δ logFC range: {vals.max()-vals.min():.4g}")
-        print(f"Δ q range: {qs.max()-qs.min():.4g}")
-
-    # Also check the actual FT intensities for equality
-    ft_equal = np.allclose(ft.loc[sites].to_numpy(), ft.loc[sites[0]].to_numpy())
-    print(ft.loc[sites])
-    print(ft2.loc[sites])
-    print("\nFT values identical across sites:", ft_equal)
-

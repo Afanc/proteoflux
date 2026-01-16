@@ -151,10 +151,10 @@ class DataHarmonizer:
         self._fmt_diff(missing, extra, "filenames")
 
     def _validate_wide_annotation(self, df: pl.DataFrame, ann: pl.DataFrame) -> None:
-        ann_channels = set(ann.select("FILENAME").unique().to_series().to_list())
+        ann_filenames = set(ann.select("FILENAME").unique().to_series().to_list())
         excl = set(getattr(self, "exclude_runs", set()) or set())
         df_files  = df_files  - excl
-        ann_channels = ann_channels - excl
+        ann_filenames = ann_filenames - excl
 
         # Infer candidate intensity columns (unchanged logic)
         float_types = {pl.Float64, pl.Float32}
@@ -163,8 +163,8 @@ class DataHarmonizer:
         meta_float_exclude = {"ReferenceIntensity", "MaxPepProb"}
         data_channels = float_cols - meta_float_exclude
 
-        missing = sorted([c for c in ann_channels if c not in df.columns])
-        extra   = sorted([c for c in data_channels if c not in ann_channels])
+        missing = sorted([c for c in ann_filenames if c not in df.columns])
+        extra   = sorted([c for c in data_channels if c not in ann_filenames])
         self._fmt_diff(missing, extra, "channels")
 
     def _rename_columns_safely(self, df: pl.DataFrame) -> pl.DataFrame:
@@ -476,26 +476,26 @@ class DataHarmonizer:
         """
         Melt a wide matrix into the canonical long schema.
 
-        If an annotation file is provided, it is used to define channels and metadata.
-        If not, channels are inferred from columns ending with '<signal_key>'.
+        If an annotation file is provided, it is used to define filenames and metadata.
+        If not, filenames are inferred from columns ending with '<signal_key>'.
         """
         if self.annotation_file:
             ann = self._load_annotation()
-            channels = ann.select("FILENAME").unique().to_series().to_list() #TODO change, channels to filename. tmt outdated anyway... or use both filenames/channels
+            filenames = ann.select("FILENAME").unique().to_series().to_list()
 
             # Strict two-way validation before melt
             self._validate_wide_annotation(df, ann)
 
-            id_vars = [c for c in df.columns if c not in channels]
+            id_vars = [c for c in df.columns if c not in filenames]
             if not id_vars:
                 raise ValueError(
-                    "No identifier columns left after selecting channels; "
+                    "No identifier columns left after selecting filenames; "
                     "check your annotation and table."
                 )
 
             long_df = df.melt(
                 id_vars=id_vars,
-                value_vars=channels,
+                value_vars=filenames,
                 variable_name="FILENAME",
                 value_name="SIGNAL",
             ).with_columns(
@@ -512,27 +512,11 @@ class DataHarmonizer:
             long_df = long_df.with_columns(pl.lit("wide").alias("INPUT_LAYOUT"))
             return long_df
 
-        # No annotation: infer channels, FILENAME, CONDITION, REPLICATE from headers
+        # No annotation: infer FILENAME, CONDITION, REPLICATE from headers
         return self._melt_wide_to_long_no_annotation(df)
 
     def _strip_mods(self, s: str) -> str:
         return _strip_mods_impl(s)
-        #if s is None:
-        #    return None
-
-        #out = s.strip("_")
-
-        ## 1) n-terminal tags
-        #out = re.sub(r"^n\[[^]]*\](?=[A-Z])", "", out)
-
-        ## 2) C-terminal tags
-        #out = re.sub(r"c\[[^]]*\]$", "", out)
-
-        ## Generic: drop any bracketed annotation and parentheses
-        #out = re.sub(r"\[.*?\]", "", out)
-        #out = out.replace("(", "").replace(")", "")
-
-        #return out
 
     def _convert_numeric_ptms(self, s: str | None) -> str | None:
         return _convert_numeric_ptms_impl(
@@ -540,70 +524,6 @@ class DataHarmonizer:
             enabled=self.convert_numeric_ptms,
             ptm_map=PTM_MAP,
         )
-        #"""
-        #Convert numeric mass tags (e.g. C[57.0215]) to named PTMs using PTM_MAP.
-
-        #Expected PTM_MAP structure (flexible):
-
-        #    PTM_MAP = {
-        #        "57.0215": "Carbamidomethyl (C)",
-        #        "15.9949": "Oxidation (M)",
-        #        ...
-        #    }
-
-        #or
-
-        #    PTM_MAP = {
-        #        "57.0215": {"name": "Carbamidomethyl (C)", "unimod": "UNIMOD:4", ...},
-        #        ...
-        #    }
-
-        #We try a few string formats of the mass to be robust (raw, 4dp, 6dp).
-        #"""
-        #if s is None:
-        #    return None
-
-        #if not self.convert_numeric_ptms:
-        #    return s
-
-        #def _replace(match: re.Match) -> str:
-        #    token = match.group(1)  # AA letter or 'n'/'c'
-        #    mass_raw = match.group(2)
-
-        #    try:
-        #        mass_val = float(mass_raw)
-        #    except ValueError:
-        #        return match.group(0)
-
-        #    # try a few representations as keys
-        #    candidates = {
-        #        mass_raw,
-        #        f"{mass_val:.4f}",
-        #        f"{mass_val:.5f}",
-        #        f"{mass_val:.6f}",
-        #    }
-
-        #    name = None
-        #    meta = None
-        #    for key in candidates:
-        #        if key in PTM_MAP:
-        #            meta = PTM_MAP[key]
-        #            if isinstance(meta, dict):
-        #                name = meta.get("name") or meta.get("label") or key
-        #            else:
-        #                name = str(meta)
-        #            break
-
-        #    if name is None:
-        #        # unknown mass -> leave numeric tag as-is
-        #        return match.group(0)
-
-        #    # Example outcome: C[Carbamidomethyl (C)], M[Oxidation (M)], n[Acetyl (Protein N-term)]
-        #    return f"{token}[{name}]"
-
-        ## matches AA[float] or n[float] / c[float]
-        #return re.sub(r"([A-Znc])\[(\-?\d+\.\d+)\]", _replace, s)
-
     def _normalize_peptido_index_seq(self, s: str | None) -> str | None:
         return _normalize_peptido_index_seq_impl(
             s,
@@ -611,38 +531,6 @@ class DataHarmonizer:
             collapse_all_ptms=self.collapse_all_ptms,
             ptm_map=PTM_MAP,
         )
-        #"""
-        #Build the peptidomics INDEX sequence from a modified sequence.
-
-        #Order:
-        #  1) convert numeric PTMs to names via PTM_MAP
-        #  2) strip leading/trailing '_' and simple wrappers
-        #  3) strip Oxidation on Met and N-terminal acetylation
-        #  4) optionally collapse all remaining PTMs if collapse_all_ptms is True
-
-        #By default (collapse_all_ptms = False), other PTMs remain and define
-        #distinct INDEX entries for modified vs unmodified peptides.
-        #"""
-        #if s is None:
-        #    return None
-
-        ## 1) numeric mass -> named PTMs (for FragPipe)
-        #seq = self._convert_numeric_ptms(s)
-
-        ## 2) trim underscores and whitespace
-        #seq = seq.strip("_").strip()
-
-        ## 3) strip Oxidation on M (either numeric already converted, or native Spectronaut)
-        ##     Example patterns after conversion: M[Oxidation (M)]
-        #seq = re.sub(r"M\[[^]]*Oxidation[^]]*\]", "M", seq)
-
-        ## 4) optional global PTM collapse: everything else gets its brackets removed
-        #if self.collapse_all_ptms:
-        #    seq = re.sub(r"^n\[[^]]*\](?=[A-Z])", "", seq)
-        #    seq = re.sub(r"c\[[^]]*\]$", "", seq)
-        #    seq = re.sub(r"\[[^]]+\]", "", seq)
-
-        #return seq
 
     def _assert_required_phospho_columns(self, df: pl.DataFrame) -> pl.DataFrame:
         # For phospho indexing we need both:
