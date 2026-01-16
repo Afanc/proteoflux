@@ -11,16 +11,11 @@ import pandas as pd
 import numpy as np
 import patsy
 from typing import Tuple, Optional
-from itertools import combinations
 import inmoose.limma as imo
-from scipy.stats import t as t_dist
-from scipy.special import digamma, polygamma
-from statsmodels.stats.multitest import multipletests
 from itertools import combinations
 from proteoflux.utils.utils import log_time, log_warning, log_info
-#from proteoflux.analysis.statisticaltester import StatisticalTester
 from proteoflux.analysis.clustering import run_clustering, run_clustering_missingness
-from proteoflux.analysis.stats_ops import raw_stats_from_fit, bh_qvalues
+from proteoflux.analysis.stats_ops import raw_stats_from_fit, bh_qvalues, two_sided_t_pvalue
 from proteoflux.analysis.missingness import compute_missingness
 from proteoflux.analysis.adata_schema import (
     # .uns
@@ -56,6 +51,76 @@ from proteoflux.analysis.adata_schema import (
 )
 
 
+def _genes_by_samples_df(X_like: np.ndarray, obs_names, var_names) -> pd.DataFrame:
+    """Return (G × N) as DataFrame indexed by features with sample columns."""
+    return pd.DataFrame(X_like, index=obs_names, columns=var_names).T
+
+
+def _design_no_intercept(obs: pd.DataFrame, levels: list[str]) -> patsy.DesignMatrix:
+    """Patsy design matrix: 0 + levelA + levelB + ... (mechanical shared helper)."""
+    tmp = obs.copy()
+    for lvl in levels:
+        tmp[lvl] = (tmp["CONDITION"] == lvl).astype(int)
+    formula = "0 + " + " + ".join(levels)
+    return patsy.dmatrix(formula, tmp)
+
+
+def _fit_limma_with_contrasts(
+    *,
+    df_GxN: pd.DataFrame,
+    design_dm,
+    contrasts_df: pd.DataFrame,
+    pilot_mode: bool,
+    fully_mask: Optional[np.ndarray] = None,
+) -> dict:
+    """
+    Shared limma fit path used by standard and covariate branches.
+
+    Guarantees:
+      - raw stats computed via shared primitive
+      - BH q-values computed after applying fully_mask to p-values (if provided)
+      - eBayes stats (if not pilot) likewise masked before BH
+    """
+    fit = imo.lmFit(df_GxN, design=design_dm)
+    fit = imo.contrasts_fit(fit, contrasts=contrasts_df)
+
+    coefs  = fit.coefficients.values
+    stdu   = fit.stdev_unscaled.values
+    sigma  = fit.sigma.to_numpy()
+    df_res = fit.df_residual
+
+    se_raw, t_raw, p_raw = raw_stats_from_fit(coefs=coefs, stdu=stdu, sigma=sigma, df_res=df_res)
+    if fully_mask is not None and np.any(fully_mask):
+        p_raw = np.asarray(p_raw, dtype=float)
+        p_raw[fully_mask] = 1.0
+    q_raw = bh_qvalues(p_raw)
+
+    if not pilot_mode:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            fit = imo.eBayes(fit)
+        s2post     = fit.s2_post.to_numpy()
+        se_ebayes  = stdu * np.sqrt(s2post[:, None])
+        t_ebayes   = fit.t.values
+        p_ebayes   = fit.p_value.values
+        if fully_mask is not None and np.any(fully_mask):
+            p_ebayes = np.asarray(p_ebayes, dtype=float)
+            p_ebayes[fully_mask] = 1.0
+        q_ebayes = bh_qvalues(p_ebayes)
+    else:
+        se_ebayes = t_ebayes = p_ebayes = q_ebayes = None
+
+    return {
+        "coefs": coefs,
+        "se_raw": se_raw,
+        "t_raw": t_raw,
+        "p_raw": p_raw,
+        "q_raw": q_raw,
+        "se_ebayes": se_ebayes,
+        "t_ebayes": t_ebayes,
+        "p_ebayes": p_ebayes,
+        "q_ebayes": q_ebayes,
+        "df_res": df_res,
+    }
 
 def _contrast_defs_from_cfg(levels: list[str], cfg: dict) -> list[str]:
     """Return list of limma contrast definitions like ['A - B', ...] (mechanical extraction)."""
@@ -176,22 +241,7 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     if len(levels) < 2:
         log_warning("Pilot study mode: only 1 condition detected; skipping statistical analysis.")
 
-        # Compute missingness exactly like the standard path
-        if "qvalue" in adata.layers:
-            miss_mat = adata.layers["qvalue"].T
-            miss_source = "qvalue"
-        elif "raw" in adata.layers:
-            miss_mat = adata.layers["raw"].T
-            miss_source = "raw"
-        else:
-            miss_mat = adata.X.T
-            miss_source = "X"
-
-        missing_df = StatisticalTester.compute_missingness(
-            intensity_matrix = miss_mat,
-            conditions       = adata.obs['CONDITION'].tolist(),
-            feature_ids      = adata.var_names.tolist(),
-        )
+        missing_df, miss_source = _compute_missingness_payload(adata)
 
         out = adata.copy()
         out.uns[UNS_CONTRAST_NAMES] = []
@@ -213,79 +263,45 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
 
     if len(levels) < 2:
         raise ValueError(f"Need ≥2 conditions for contrasts; found {levels}")
-    for lvl in levels:
-        obs[lvl] = (obs["CONDITION"] == lvl).astype(int)
 
-    # Patsy design (no intercept) - keep as Patsy DesignMatrix
-    formula   = "0 + " + " + ".join(levels)
-    design_dm = patsy.dmatrix(formula, obs)
+    design_dm = _design_no_intercept(obs, levels)
 
     # Expression: genes × samples
-    df_X = pd.DataFrame(adata.X, index=adata.obs_names, columns=adata.var_names).T
+    df_X = _genes_by_samples_df(adata.X, adata.obs_names, adata.var_names)
 
-    # Fit
-    fit_imo = imo.lmFit(df_X, design=design_dm)
-    resid_var = np.asarray(fit_imo.sigma, dtype=np.float32) ** 2
-    adata.uns[UNS_RESIDUAL_VARIANCE] = resid_var
-
-    # Contrasts
-    contrast_df = _make_contrasts(levels, design_dm, config)
-
-    fit_imo = imo.contrasts_fit(fit_imo, contrasts=contrast_df)
-
-    # Raw (pre-eBayes) statistics
-    contrast_names = list(contrast_df.columns)
-    coefs  = fit_imo.coefficients.values          # (n_genes × n_contrasts)
-    stdu   = fit_imo.stdev_unscaled.values        # same shape
-    sigma  = fit_imo.sigma.to_numpy()             # (n_genes,)
-    df_res = fit_imo.df_residual                  # (n_genes,)
-
-    se_raw, t_raw, p_raw = raw_stats_from_fit(coefs=coefs, stdu=stdu, sigma=sigma, df_res=df_res)
-
-    # Fully-imputed detection (contrast-local) — apply BEFORE BH to keep q-values clean.
+    # Fully-imputed detection (contrast-local) — used for pre-BH masking in shared fit helper.
     cond_arr = adata.obs["CONDITION"].astype(str).to_numpy()
     fully = _fully_imputed_mask_from_layer(adata=adata, layer_name="raw", conditions=cond_arr, contrast_names=contrast_names)
 
-    if np.any(fully):
-        p_raw[fully] = 1.0
-    q_raw = bh_qvalues(p_raw)
+    limma_res = _fit_limma_with_contrasts(
+        df_GxN=df_X,
+        design_dm=design_dm,
+        contrasts_df=contrast_df,
+        pilot_mode=pilot_mode,
+        fully_mask=fully,
+    )
 
-    # Moderated (post-eBayes) statistics
-    if not pilot_mode:
-        with np.errstate(divide='ignore', invalid='ignore'):
-            fit_imo    = imo.eBayes(fit_imo)
-
-        s2post     = fit_imo.s2_post.to_numpy()       # (n_genes,)
-        se_ebayes  = stdu * np.sqrt(s2post[:, np.newaxis])
-        t_ebayes   = fit_imo.t.values
-        p_ebayes   = fit_imo.p_value.values
-
-        if np.any(fully):
-            p_ebayes[fully] = 1.0
-
-        q_ebayes = bh_qvalues(p_ebayes)
-
-    else:
-        # Placeholders (omit from .varm below)
-        se_ebayes = t_ebayes = p_ebayes = q_ebayes = None
-
+    # Residual variance (from the raw lmFit, matching prior behavior)
+    fit_for_var = imo.lmFit(df_X, design=design_dm)
+    resid_var = np.asarray(fit_for_var.sigma, dtype=np.float32) ** 2
+    adata.uns[UNS_RESIDUAL_VARIANCE] = resid_var
 
     # Assemble into AnnData
     out = adata.copy()
 
-    out.varm[VARM_LOG2FC] = coefs
+    out.varm[VARM_LOG2FC] = limma_res["coefs"]
 
     if not pilot_mode:
-        out.varm[VARM_SE_RAW] = se_raw
-        out.varm[VARM_T_RAW] = t_raw
-        out.varm[VARM_P_RAW] = p_raw
-        out.varm[VARM_Q_RAW] = q_raw
+        out.varm[VARM_SE_RAW] = limma_res["se_raw"]
+        out.varm[VARM_T_RAW] = limma_res["t_raw"]
+        out.varm[VARM_P_RAW] = limma_res["p_raw"]
+        out.varm[VARM_Q_RAW] = limma_res["q_raw"]
 
         # moderated statistics
-        out.varm[VARM_SE_EBAYES] = se_ebayes
-        out.varm[VARM_T_EBAYES] = t_ebayes
-        out.varm[VARM_P_EBAYES] = p_ebayes
-        out.varm[VARM_Q_EBAYES] = q_ebayes
+        out.varm[VARM_SE_EBAYES] = limma_res["se_ebayes"]
+        out.varm[VARM_T_EBAYES] = limma_res["t_ebayes"]
+        out.varm[VARM_P_EBAYES] = limma_res["p_ebayes"]
+        out.varm[VARM_Q_EBAYES] = limma_res["q_ebayes"]
 
     # metadata
 
@@ -334,9 +350,6 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     All outputs/keys match the current implementation.
     """
 
-    # ----------------------------
-    # Small helpers (pure functions)
-    # ----------------------------
     def _get_levels_and_base(obs: pd.DataFrame, cfg: dict) -> Tuple[list, str]:
         levels = sorted(obs["CONDITION"].unique())
         if len(levels) < 2:
@@ -353,16 +366,6 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
             if k in adata.layers:
                 return k
         raise ValueError("Covariate layer not found in AnnData.layers (tried: covariate, imputed_covariate, cov, ft)")
-
-    def _genes_by_samples_df(X_like: np.ndarray, obs_names, var_names) -> pd.DataFrame:
-        """Return (G × N) as DataFrame indexed by features with sample columns."""
-        return pd.DataFrame(X_like, index=obs_names, columns=var_names).T
-
-    def _build_group_design_no_intercept(obs: pd.DataFrame, levels: list) -> patsy.DesignMatrix:
-        tmp = obs.copy()
-        for lvl in levels:
-            tmp[lvl] = (tmp["CONDITION"] == lvl).astype(int)
-        return patsy.dmatrix("0 + " + " + ".join(levels), tmp)
 
     def _stage1_ols_y_on_1_plus_c(Y: np.ndarray, C: np.ndarray, ridge_lambda: float = 1e-6) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -410,53 +413,14 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
 
         # t-statistics and FDR for covariate slope
         t1 = np.where(se1 > 0, beta1 / se1, 0.0)
-        p1 = 2 * t_dist.sf(np.abs(t1), df=df1)
+        p1 = two_sided_t_pvalue(t1, df=df1)
         if np.any(flat):
             # for “flat” rows, explicitly null the test: t=0, p=1 (avoids huge betas)
             t1[flat] = 0.0
             p1[flat] = 1.0
-        q1 = multipletests(p1, method="fdr_bh")[1]
+        q1 = bh_qvalues(p1[:, None])[:, 0]
 
         return beta1, beta0, R, se1, t1, p1, q1
-
-    def _fit_limma_with_contrasts(df_GxN: pd.DataFrame, design_dm, contrasts_df: pd.DataFrame):
-        """lmFit + contrasts (+ eBayes if not pilot_mode); returns raw and moderated stats."""
-        fit = imo.lmFit(df_GxN, design=design_dm)
-        fit = imo.contrasts_fit(fit, contrasts=contrasts_df)
-
-        # raw stats
-        coefs  = fit.coefficients.values
-        stdu   = fit.stdev_unscaled.values
-        sigma  = fit.sigma.to_numpy()
-        df_res = fit.df_residual
-
-        se_raw, t_raw, p_raw = raw_stats_from_fit(coefs=coefs, stdu=stdu, sigma=sigma, df_res=df_res)
-        q_raw = bh_qvalues(p_raw)
-
-        # eBayes
-        if not pilot_mode:
-            with np.errstate(divide='ignore', invalid='ignore'):
-                fit = imo.eBayes(fit)
-            s2post     = fit.s2_post.to_numpy()
-            se_ebayes  = stdu * np.sqrt(s2post[:, None])
-            t_ebayes   = fit.t.values
-            p_ebayes   = fit.p_value.values
-            q_ebayes = bh_qvalues(p_ebayes)
-        else:
-            se_ebayes = t_ebayes = p_ebayes = q_ebayes = None
-
-        return {
-            "coefs": coefs,
-            "se_raw": se_raw,
-            "t_raw": t_raw,
-            "p_raw": p_raw,
-            "q_raw": q_raw,
-            "se_ebayes": se_ebayes,
-            "t_ebayes": t_ebayes,
-            "p_ebayes": p_ebayes,
-            "q_ebayes": q_ebayes,
-            "df_res": df_res,
-        }
 
     def _covariate_part_per_contrast(beta1: np.ndarray, C_centered_df: pd.DataFrame,
                                      obs: pd.DataFrame, levels: list, contrast_names: list) -> np.ndarray:
@@ -549,11 +513,26 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     R_df = pd.DataFrame(R, index=Y_df.index, columns=Y_df.columns)  # (G×N)
 
     # Stage 2: limma on residuals
-    design2 = _build_group_design_no_intercept(obs, levels)
+    design2 = _design_no_intercept(obs, levels)
     contr   = _make_contrasts(levels, design2, config)
 
-    limma_resid = _fit_limma_with_contrasts(R_df, design2, contr)
     contrast_names = list(contr.columns)
+
+    cond_arr = obs["CONDITION"].astype(str).to_numpy()
+    fully = _fully_imputed_mask_from_layer(
+        adata=adata,
+        layer_name="raw",
+        conditions=cond_arr,
+        contrast_names=contrast_names,
+    )
+
+    limma_resid = _fit_limma_with_contrasts(
+        df_GxN=R_df,
+        design_dm=design2,
+        contrasts_df=contr,
+        pilot_mode=pilot_mode,
+        fully_mask=fully,
+    )
 
     # Per-contrast mask: True where a contrast lacks FT info on at least one side
     # Align raw_covariate to the same sample order, then make a (G x N) non-imputed mask
@@ -572,30 +551,16 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         # Mark this contrast "no FT info" if either side has zero real FT
         contrast_noft[:, j] = (cntA == 0) | (cntB == 0)
 
-
-    # Also fit raw (Y) with same design/contrasts (for decomposition)
-    limma_raw = imo.lmFit(Y_df, design=design2)
-    limma_raw = imo.contrasts_fit(limma_raw, contr)
-    if not pilot_mode :
-        with np.errstate(divide='ignore', invalid='ignore'):
-            limma_raw = imo.eBayes(limma_raw)
-            raw_p     = limma_raw.p_value.values
-
-            # Apply fully-imputed mask BEFORE BH for raw model q-values.
-            cond_arr = obs["CONDITION"].astype(str).to_numpy()
-            fully = _fully_imputed_mask_from_layer(adata=adata,
-                                                   layer_name = "raw",
-                                                   conditions=cond_arr,
-                                                   contrast_names=contrast_names)
-            if np.any(fully):
-                raw_p[fully] = 1.0
-
-            raw_q = bh_qvalues(raw_p)
-    else:
-        raw_p = raw_q = None
-        fully = None
-
-    raw_coefs = limma_raw.coefficients.values
+    limma_raw = _fit_limma_with_contrasts(
+        df_GxN=Y_df,
+        design_dm=design2,
+        contrasts_df=contr,
+        pilot_mode=pilot_mode,
+        fully_mask=fully,
+    )
+    raw_coefs = limma_raw["coefs"]
+    raw_p = limma_raw["p_ebayes"] if not pilot_mode else None
+    raw_q = limma_raw["q_ebayes"] if not pilot_mode else None
 
     # For "no-FT" contrasts, fall back to RAW phospho (coef + p/q) in the adjusted outputs
     if beta_mode == "fixed1":
@@ -608,17 +573,24 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
             limma_resid["coefs"][contrast_noft] = raw_coefs[contrast_noft]
 
     # limma on the covariate (FT) matrix itself (same design/contrasts)
-    limma_cov = imo.lmFit(C_df, design=design2)
-    limma_cov = imo.contrasts_fit(limma_cov, contr)
+    fully_ft = None
     if not pilot_mode:
-        with np.errstate(divide='ignore', invalid='ignore'):
-            limma_cov = imo.eBayes(limma_cov)
-        cov_p     = limma_cov.p_value.values
-        cov_q = bh_qvalues(cov_p)
-    else:
-        cov_p = cov_q = None
-
-    cov_coefs = limma_cov.coefficients.values
+        fully_ft = _fully_imputed_mask_from_layer(
+            adata=adata,
+            layer_name="raw_covariate",
+            conditions=cond_arr,
+            contrast_names=contrast_names,
+        )
+    limma_cov = _fit_limma_with_contrasts(
+        df_GxN=C_df,
+        design_dm=design2,
+        contrasts_df=contr,
+        pilot_mode=pilot_mode,
+        fully_mask=fully_ft,
+    )
+    cov_coefs = limma_cov["coefs"]
+    cov_p = limma_cov["p_ebayes"] if not pilot_mode else None
+    cov_q = limma_cov["q_ebayes"] if not pilot_mode else None
 
     # Covariate part per contrast
     cov_part = _covariate_part_per_contrast(
@@ -655,7 +627,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         # Residual variance from stage-2 limma (adjusted model)
         fit_resid = imo.lmFit(R_df, design=design2)
         resid_var = np.asarray(fit_resid.sigma, dtype=np.float32) ** 2
-        out.uns["residual_variance"] = resid_var
+        out.uns[UNS_RESIDUAL_VARIANCE] = resid_var
 
     # Raw model (same contrasts) - for decomposition display
     out.varm[VARM_RAW_LOG2FC] = raw_coefs
@@ -677,42 +649,24 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     out.layers["residuals_covariate"] = R_df.T.values
 
     # Metadata
-    out.uns["contrast_names"]   = contrast_names
-    out.uns["model_type"]       = "residualization_no_interaction"
+    out.uns[UNS_CONTRAST_NAMES] = contrast_names
+    out.uns["model_type"] = "residualization_no_interaction"
 
     out.uns[UNS_MISSINGNESS] = missing_df
     out.uns[UNS_MISSINGNESS_SOURCE] = miss_source
     out.uns[UNS_MISSINGNESS_RULE] = "nan-is-missing"
 
-    out.uns["has_covariate"] = True
-    out.uns["pilot_study_mode"] = bool(pilot_mode)
+    out.uns[UNS_HAS_COVARIATE] = True
+    out.uns[UNS_PILOT_MODE] = bool(pilot_mode)
+
     if (not pilot_mode) and (fully is not None):
         _neutralize_fully_imputed_contrasts(out=out, fully=fully)
-        out.uns["n_fully_imputed_cells"] = int(np.count_nonzero(fully))
+        out.uns[UNS_N_FULLY_IMPUTED_CELLS] = int(np.count_nonzero(fully))
 
-    # stash covariate (FT) limma results for the viewer
-    # Neutralize FT results where FT is fully imputed in both conditions (per contrast).
-    # Use raw_covariate as the authority (NaN == missing).
+    # FT limma results (already fully-masked pre-BH in shared fit helper)
+    out.varm[VARM_FT_LOG2FC] = cov_coefs
+
     if not pilot_mode:
-        cond_arr = out.obs["CONDITION"].astype(str).to_numpy()
-        fully_ft = _fully_imputed_mask_from_layer(
-            adata=adata,
-            layer_name="raw_covariate",
-            conditions=cond_arr,
-            contrast_names=contrast_names,
-        )
-        if np.any(fully_ft):
-            # Clean q-values by forcing p=1 before BH.
-            cov_p = np.asarray(cov_p, dtype=float)
-            cov_p[fully_ft] = 1.0
-            cov_q = bh_qvalues(cov_p)
-            cov_coefs = np.asarray(cov_coefs, dtype=float)
-            cov_coefs[fully_ft] = 1.0
-
-    # (optional) p-values too:
-    out.varm["ft_log2fc"] = cov_coefs
-    if not pilot_mode:
-
         out.varm[VARM_FT_Q_EBAYES] = cov_q
         out.varm[VARM_FT_P_EBAYES] = cov_p
 

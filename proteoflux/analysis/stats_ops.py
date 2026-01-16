@@ -5,6 +5,10 @@ from scipy.stats import t as t_dist
 from statsmodels.stats.multitest import multipletests
 
 
+def two_sided_t_pvalue(t: np.ndarray, df) -> np.ndarray:
+    """Two-sided p-values for a t-statistic array (mechanical shared primitive)."""
+    return 2 * t_dist.sf(np.abs(t), df=df)
+
 def raw_stats_from_fit(
     *,
     coefs: np.ndarray,
@@ -20,7 +24,7 @@ def raw_stats_from_fit(
     """
     se = stdu * sigma[:, None]
     t = coefs / se
-    p = 2 * t_dist.sf(np.abs(t), df=df_res[:, None])
+    p = two_sided_t_pvalue(t, df=df_res[:, None])
     return se, t, p
 
 
