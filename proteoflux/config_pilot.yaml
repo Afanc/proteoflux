@@ -1,0 +1,63 @@
+dataset:
+  input_file: "data/data_pilot.tsv"
+  input_layout: "long"
+  analysis_type: "proteomics"
+  annotation_file:
+  exclude_runs: null
+  index_column: "PG.ProteinGroups"
+  signal_column: "FG.MS2RawQuantity"
+  qvalue_column: "PG.Qvalue"
+  pep_column: "PG.PEP"
+  charge_column: "FG.Charge"
+  condition_column: "R.Condition"
+  replicate_column: "R.Replicate"
+  filename_column: "R.FileName"
+  run_evidence_column: "PG.RunEvidenceCount"
+  precursors_exp_column: "PG.NrOfPrecursorsIdentified (Experiment-wide)"
+  ibaq_column: "PG.IBAQ"
+  fasta_column: "PG.FastaHeaders"
+  protein_weight: "PG.MolecularWeight"
+  protein_descriptions: "PG.ProteinDescriptions"
+  gene_names_column: "PG.Genes"
+  peptide_seq_column: "FG.LabeledSequence"
+
+preprocessing:
+  pivot_signal_method: "sum"
+  directlfq_cores: 8
+  filtering:
+    qvalue: 0.01
+    pep: 0.003
+    run_evidence_count: 3
+    contaminants_files:
+      - "data/Contaminants_2022.fasta"
+  normalization:
+    method:
+      - "log2"
+      - "median_equalization_by_tag"
+    reference_tag:
+      - "HUMAN"
+    loess_span: 0.9
+  imputation:
+    method: "tnknn"
+    lc_conmed_lod_k: 10
+    random_state: 42
+
+analysis:
+  sign_threshold: 0.05
+  annotation_matrix: false
+  only_against: null
+  exports:
+    export_plot: true
+    export_table: false
+    table_use_xlsx: true
+    path_plot: "data/proteoflux_report_pilot.pdf"
+    path_table: "data/proteoflux_table_pilot.xslx"
+    path_h5ad: "data/proteoflux_results_pilot.h5ad"
+    umap_n_neighbors: 15
+    volcano_top_annotated: 20
+  title: "Proteoflux Analysis Report"
+  intro_text: |
+    This report summarizes the proteomic analysis pipeline applied to your dataset.
+    We performed filtering to remove low-confidence identifications and contaminants, computed protein
+    intensities, normalized these, imputed missing values, and ran a differential expression analysis.
+  footer_text: "Proteomics Core Facility - Biozentrum - University of Basel"

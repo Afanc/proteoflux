@@ -120,7 +120,6 @@ class Dataset:
             eff_cfg["input_layout"] = inject_cfg.get(
                 "input_layout", eff_cfg.get("input_layout", self.input_layout)
             )
-            #eff_cfg["analysis_type"] = inject_cfg.get("analysis_type", "DIA")
             eff_cfg["analysis_type"] = normalize_analysis_type(
                 inject_cfg.get("analysis_type", self.analysis_type)
             )
