@@ -95,7 +95,6 @@ class Preprocessor:
                 f"Invalid pep_direction='{self.pep_direction}'. Use 'lower' or 'higher'."
             )
 
-        #self.pivot_signal_method = config.get("pivot_signal_method", "sum")
         # Pivoting / rollups
         # Canonical key: protein_rollup_method
         # Legacy alias: pivot_signal_method
@@ -859,7 +858,6 @@ class Preprocessor:
                 # 2) Replicate counts per CONDITION must match.
                 # NOTE: comparisons against NULL yield NULL in Polars and would silently bypass filters;
                 # therefore we validate NULL explicitly before comparing.
-                #missing_main = cmp.filter(pl.col("N").is_null()).select("CONDITION")
                 missing_main = cmp.filter(pl.col("N").is_null()).select(pl.col("CONDITION_FT").alias("CONDITION"))
                 missing_cov = cmp.filter(pl.col("N_FT").is_null()).select("CONDITION")
                 if missing_main.height or missing_cov.height:
@@ -876,12 +874,6 @@ class Preprocessor:
                         "Covariate has different replicate counts per CONDITION than the main dataset. "
                         f"Mismatch table:\n{bad}"
                     )
-                #bad = cmp.filter(pl.col("N") != pl.col("N_FT"))
-                #if bad.height:
-                #    raise ValueError(
-                #        "Covariate alignment: replicate counts differ per CONDITION. "
-                #        f"Details:\n{bad}"
-                #    )
 
         self.intermediate_results.add_df("condition_pivot", mapping_tmp)
 
@@ -1852,29 +1844,4 @@ class Preprocessor:
             log_info(
                 "Covariate centering: per-feature median across all samples applied."
             )
-
-    # -------------------------------------------------------------------------
-    # Debug helper
-    # -------------------------------------------------------------------------
-
-    def _log_pivot_health(
-        self, label: str, df: pl.DataFrame, head_rows: int = 3, preview_cols: int = 50
-    ) -> None:
-        """Log shape, total NA count, and tiny head() preview for debugging."""
-        if df is None:
-            return
-        cols = [c for c in df.columns if c != "INDEX"]
-        rows, cols_n = df.height, len(cols)
-
-        na_counts = df.select(
-            [pl.col(c).is_null().sum().alias(c) for c in cols]
-        )
-        total_nas = int(
-            na_counts.select(pl.all().sum()).to_numpy().ravel()[0]
-        )
-
-        log_info(f"{label}: shape={rows}×{cols_n}, total_NAs={total_nas}")
-
-        preview = df.select(["INDEX"] + cols[:preview_cols]).head(head_rows)
-        log_info(f"{label} preview:\n{preview}")
 

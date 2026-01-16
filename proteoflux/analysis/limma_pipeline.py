@@ -269,6 +269,9 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     # Expression: genes × samples
     df_X = _genes_by_samples_df(adata.X, adata.obs_names, adata.var_names)
 
+    contrast_df = _make_contrasts(levels, design_dm, config)
+    contrast_names = list(contrast_df.columns)
+
     # Fully-imputed detection (contrast-local) — used for pre-BH masking in shared fit helper.
     cond_arr = adata.obs["CONDITION"].astype(str).to_numpy()
     fully = _fully_imputed_mask_from_layer(adata=adata, layer_name="raw", conditions=cond_arr, contrast_names=contrast_names)

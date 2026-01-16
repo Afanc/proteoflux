@@ -1,16 +1,11 @@
 dataset:
-  input_file: "data/data_phospho.tsv"
+  input_file: "data/data_phospho_pilot.tsv"
   input_layout: "long"
   analysis_type: "phospho"
-  annotation_file: "data/annot_phospho.tsv"
+  annotation_file: null
   exclude_runs: null
 
   inject_runs:
-    flowthrough:
-      analysis_type: "peptidomics"
-      input_file: "data/data_phospho_FT.tsv"
-      annotation_file: null
-      is_covariate: True
 
   index_column: null
   signal_column: "FG.MS2RawQuantity"
@@ -40,15 +35,13 @@ dataset:
   ptm_probabilities_column: "EG.PTMProbabilities [Phospho (STY)]"
 
 preprocessing:
-  peptide_rollup_method: "sum"
+  pivot_signal_method: "sum"
   directlfq_cores: 8
-  directlfq_min_nonan: 2
   phospho:
     stochio_correction_level: "protein"
     multisite_collapse_policy: "duplicate"
     localization_mode: "filter_soft"
     localization_threshold: 0.0
-    covariate_pivot_method: "sum"
   filtering:
     qvalue: 0.01
     pep: 0.003
