@@ -18,8 +18,10 @@ from scipy.special import digamma, polygamma
 from statsmodels.stats.multitest import multipletests
 from itertools import combinations
 from proteoflux.utils.utils import log_time, log_warning, log_info
-from proteoflux.analysis.statisticaltester import StatisticalTester
+#from proteoflux.analysis.statisticaltester import StatisticalTester
 from proteoflux.analysis.clustering import run_clustering, run_clustering_missingness
+from proteoflux.analysis.stats_ops import raw_stats_from_fit, bh_qvalues
+from proteoflux.analysis.missingness import compute_missingness
 from proteoflux.analysis.adata_schema import (
     # .uns
     UNS_CONTRAST_NAMES,
@@ -54,23 +56,6 @@ from proteoflux.analysis.adata_schema import (
 )
 
 
-def _raw_stats_from_fit(
-    *,
-    coefs: np.ndarray,
-    stdu: np.ndarray,
-    sigma: np.ndarray,
-    df_res: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Centralized raw-stat computation (mechanical extraction):
-      se_raw = stdu * sigma[:, None]
-      t_raw  = coefs / se_raw
-      p_raw  = 2 * t.sf(|t_raw|, df=df_res[:, None])
-    """
-    se_raw = stdu * sigma[:, None]
-    t_raw = coefs / se_raw
-    p_raw = 2 * t_dist.sf(np.abs(t_raw), df=df_res[:, None])
-    return se_raw, t_raw, p_raw
 
 def _contrast_defs_from_cfg(levels: list[str], cfg: dict) -> list[str]:
     """Return list of limma contrast definitions like ['A - B', ...] (mechanical extraction)."""
@@ -108,6 +93,10 @@ def _contrast_defs_from_cfg(levels: list[str], cfg: dict) -> list[str]:
 
     return [f"{a} - {b}" for a, b in combinations(levels, 2)]
 
+def _compute_missingness_payload(adata_in: ad.AnnData) -> tuple[pd.DataFrame, str]:
+    """Compute missingness over the full feature set (downstream depends on full-length alignment)."""
+    res = compute_missingness(adata_in, max_features=None, random_seed=0)
+    return res.df, res.source
 
 def _make_contrasts(levels: list[str], design_dm, cfg: dict) -> pd.DataFrame:
     """Build limma contrasts matrix (mechanical extraction)."""
@@ -115,26 +104,6 @@ def _make_contrasts(levels: list[str], design_dm, cfg: dict) -> pd.DataFrame:
     contrast_df = imo.makeContrasts(defs, levels=design_dm)
     contrast_df.columns = [c.replace(" - ", "_vs_") for c in contrast_df.columns]
     return contrast_df
-
-
-def _compute_missingness_payload(adata_in: ad.AnnData) -> tuple[pd.DataFrame, str]:
-    """Compute missingness payload exactly like current behavior (mechanical extraction)."""
-    if "qvalue" in adata_in.layers:
-        miss_mat = adata_in.layers["qvalue"].T
-        miss_source = "qvalue"
-    elif "raw" in adata_in.layers:
-        miss_mat = adata_in.layers["raw"].T
-        miss_source = "raw"
-    else:
-        miss_mat = adata_in.X.T
-        miss_source = "X"
-
-    missing_df = StatisticalTester.compute_missingness(
-        intensity_matrix=miss_mat,
-        conditions=adata_in.obs["CONDITION"].tolist(),
-        feature_ids=adata_in.var_names.tolist(),
-    )
-    return missing_df, miss_source
 
 
 def _fully_imputed_mask_from_layer(
@@ -271,10 +240,7 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     sigma  = fit_imo.sigma.to_numpy()             # (n_genes,)
     df_res = fit_imo.df_residual                  # (n_genes,)
 
-    se_raw, t_raw, p_raw = _raw_stats_from_fit(coefs=coefs, stdu=stdu, sigma=sigma, df_res=df_res)
-    #se_raw = stdu * sigma[:, np.newaxis]
-    #t_raw  = coefs / se_raw
-    #p_raw  = 2 * t_dist.sf(np.abs(t_raw), df=df_res[:, None])
+    se_raw, t_raw, p_raw = raw_stats_from_fit(coefs=coefs, stdu=stdu, sigma=sigma, df_res=df_res)
 
     # Fully-imputed detection (contrast-local) — apply BEFORE BH to keep q-values clean.
     cond_arr = adata.obs["CONDITION"].astype(str).to_numpy()
@@ -282,10 +248,7 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
 
     if np.any(fully):
         p_raw[fully] = 1.0
-    q_raw  = np.vstack([
-        multipletests(p_raw[:, j], method="fdr_bh")[1]
-        for j in range(p_raw.shape[1])
-    ]).T
+    q_raw = bh_qvalues(p_raw)
 
     # Moderated (post-eBayes) statistics
     if not pilot_mode:
@@ -300,10 +263,7 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         if np.any(fully):
             p_ebayes[fully] = 1.0
 
-        q_ebayes   = np.vstack([
-            multipletests(p_ebayes[:, j], method="fdr_bh")[1]
-            for j in range(p_ebayes.shape[1])
-        ]).T
+        q_ebayes = bh_qvalues(p_ebayes)
 
     else:
         # Placeholders (omit from .varm below)
@@ -348,8 +308,10 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     return out
 
 @log_time("Clustering")
-def clustering_pipeline(adata: ad.AnnData, max_features: int) -> ad.AnnData:
+def clustering_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     """Run feature clustering and missingness clustering (unchanged behavior)."""
+    analysis_cfg = (config or {}).get("analysis", {}) or {}
+    max_features = int(analysis_cfg.get("clustering_max", 8000))
     adata = run_clustering(adata,
                            n_pcs=adata.X.shape[0]-1,
                            max_features=max_features,
@@ -358,8 +320,6 @@ def clustering_pipeline(adata: ad.AnnData, max_features: int) -> ad.AnnData:
 
     return adata
 
-#TODO think about, switch to a class ? or separate utils script ?
-#TODO should we simplify some of the code now that we decided we keep the beta=1 model ? hmmm
 @log_time("Running Covariate branch")
 def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bool) -> ad.AnnData:
     """Two-stage residualization (no interaction).
@@ -470,11 +430,8 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         sigma  = fit.sigma.to_numpy()
         df_res = fit.df_residual
 
-        se_raw, t_raw, p_raw = _raw_stats_from_fit(coefs=coefs, stdu=stdu, sigma=sigma, df_res=df_res)
-        #se_raw = stdu * sigma[:, None]
-        #t_raw  = coefs / se_raw
-        #p_raw  = 2 * t_dist.sf(np.abs(t_raw), df=df_res[:, None])
-        q_raw  = np.vstack([multipletests(p_raw[:, j], method="fdr_bh")[1] for j in range(p_raw.shape[1])]).T
+        se_raw, t_raw, p_raw = raw_stats_from_fit(coefs=coefs, stdu=stdu, sigma=sigma, df_res=df_res)
+        q_raw = bh_qvalues(p_raw)
 
         # eBayes
         if not pilot_mode:
@@ -484,7 +441,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
             se_ebayes  = stdu * np.sqrt(s2post[:, None])
             t_ebayes   = fit.t.values
             p_ebayes   = fit.p_value.values
-            q_ebayes   = np.vstack([multipletests(p_ebayes[:, j], method="fdr_bh")[1] for j in range(p_ebayes.shape[1])]).T
+            q_ebayes = bh_qvalues(p_ebayes)
         else:
             se_ebayes = t_ebayes = p_ebayes = q_ebayes = None
 
@@ -633,7 +590,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
             if np.any(fully):
                 raw_p[fully] = 1.0
 
-            raw_q     = np.vstack([multipletests(raw_p[:, j], method="fdr_bh")[1] for j in range(raw_p.shape[1])]).T
+            raw_q = bh_qvalues(raw_p)
     else:
         raw_p = raw_q = None
         fully = None
@@ -657,7 +614,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         with np.errstate(divide='ignore', invalid='ignore'):
             limma_cov = imo.eBayes(limma_cov)
         cov_p     = limma_cov.p_value.values
-        cov_q     = np.vstack([multipletests(cov_p[:, j], method="fdr_bh")[1] for j in range(cov_p.shape[1])]).T
+        cov_q = bh_qvalues(cov_p)
     else:
         cov_p = cov_q = None
 
@@ -733,7 +690,6 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         _neutralize_fully_imputed_contrasts(out=out, fully=fully)
         out.uns["n_fully_imputed_cells"] = int(np.count_nonzero(fully))
 
-
     # stash covariate (FT) limma results for the viewer
     # Neutralize FT results where FT is fully imputed in both conditions (per contrast).
     # Use raw_covariate as the authority (NaN == missing).
@@ -749,10 +705,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
             # Clean q-values by forcing p=1 before BH.
             cov_p = np.asarray(cov_p, dtype=float)
             cov_p[fully_ft] = 1.0
-            cov_q = np.vstack([
-                multipletests(cov_p[:, j], method="fdr_bh")[1]
-                for j in range(cov_p.shape[1])
-            ]).T
+            cov_q = bh_qvalues(cov_p)
             cov_coefs = np.asarray(cov_coefs, dtype=float)
             cov_coefs[fully_ft] = 1.0
 

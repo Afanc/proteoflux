@@ -8,14 +8,12 @@ from proteoflux.utils.utils import debug_protein_view, logger, log_time
 @log_time("Proteoflux Pipeline")
 def run_pipeline(config: dict):
     dataset = Dataset(**config)
+
     adata = dataset.get_anndata()
     adata = run_limma_pipeline(adata, config)
+    adata = clustering_pipeline(adata, config)
 
     analysis_config = config.get("analysis", {})
-    max_features = analysis_config.get("clustering_max", 8000)
-
-    adata = clustering_pipeline(adata, max_features=max_features)
-
     if analysis_config.get("export_plot", True):
         plotter = ReportPlotter(adata, config)
         plotter.plot_all()

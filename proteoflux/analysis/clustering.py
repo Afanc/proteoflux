@@ -16,6 +16,19 @@ from sklearn.metrics import pairwise_distances
 from sklearn.manifold import MDS
 from typing import Optional, Dict, Any, Sequence
 from proteoflux.utils.utils import log_time
+from proteoflux.analysis.adata_schema import (
+    UNS_NEIGHBORS,
+    UNS_PCA,
+    UNS_UMAP,
+    UNS_MDS,
+    UNS_MISSING_SAMPLE_LINKAGE,
+    UNS_MISSING_SAMPLE_ORDER,
+    UNS_MISSING_FEATURE_LINKAGE,
+    UNS_MISSING_FEATURE_ORDER,
+    UNS_MISSING_FEATURE_SUBSET_INDICES,
+    UNS_MISSING_FEATURE_SELECTION,
+    UNS_MISSING_MAX_FEATURES,
+)
 
 def _lc_mindet_impute(
     M: np.ndarray,
@@ -166,7 +179,7 @@ def run_clustering(
     # PCA (cap PCs for tiny sample counts)
     n_comps = max(1, min(int(n_pcs), E.n_obs - 1))
     sc.tl.pca(E, n_comps=n_comps)
-    adata.uns["pca"] = E.uns.get("pca", {})
+    adata.uns[UNS_PCA] = E.uns.get("pca", {})
 
     # Neighbors on PCA space
     if "neighbors" not in E.uns:
@@ -261,16 +274,16 @@ def run_clustering(
         adata.obsm["X_umap"] = E.obsm["X_umap"]
 
     if "neighbors" in E.uns:
-        adata.uns["neighbors"] = E.uns["neighbors"]
+        adata.uns[UNS_NEIGHBORS] = E.uns["neighbors"]
         for k in ("distances", "connectivities"):
             if k in E.obsp:
                 adata.obsp[k] = E.obsp[k]
 
     if "mds" in E.uns:
-        adata.uns["mds"] = E.uns["mds"]
+        adata.uns[UNS_MDS] = E.uns["mds"]
 
     if "umap" in E.uns:
-        adata.uns["umap"] = E.uns["umap"]
+        adata.uns[UNS_UMAP] = E.uns["umap"]
 
     # Mirror clustering results into adata.uns under the same keys
     for key in list(A.uns.keys()):
@@ -322,19 +335,21 @@ def run_clustering_missingness(
     # Cluster samples (rows in Miss)
     s_link = sch.linkage(Miss, method=hierarchical_method, metric=hierarchical_metric)
     leaves_s = sch.leaves_list(s_link)
-    adata.uns['missing_sample_linkage'] = s_link
-    adata.uns['missing_sample_order']   = adata.obs_names[leaves_s].tolist()
+
+    adata.uns[UNS_MISSING_SAMPLE_LINKAGE] = s_link
+    adata.uns[UNS_MISSING_SAMPLE_ORDER] = adata.obs_names[leaves_s].tolist()
 
     # Cluster features (cols in Miss)
     f_link = sch.linkage(Miss.T, method=hierarchical_method, metric=hierarchical_metric)
     leaves_f = sch.leaves_list(f_link)
-    adata.uns['missing_feature_linkage'] = f_link
-    adata.uns['missing_feature_order']   = adata.var_names[feat_idx][leaves_f].tolist()
+
+    adata.uns[UNS_MISSING_FEATURE_LINKAGE] = f_link
+    adata.uns[UNS_MISSING_FEATURE_ORDER] = adata.var_names[feat_idx][leaves_f].tolist()
 
     # provenance
     if len(feat_idx) < n_vars:
-        adata.uns['missing_feature_subset_indices'] = feat_idx
-        adata.uns['missing_feature_selection']      = feature_selection
-        adata.uns['missing_max_features']           = int(max_features)
+        adata.uns[UNS_MISSING_FEATURE_SUBSET_INDICES] = feat_idx
+        adata.uns[UNS_MISSING_FEATURE_SELECTION] = feature_selection
+        adata.uns[UNS_MISSING_MAX_FEATURES] = int(max_features)
 
     return adata
