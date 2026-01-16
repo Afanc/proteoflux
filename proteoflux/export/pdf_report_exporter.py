@@ -263,7 +263,7 @@ class ReportPlotter:
         imputation  = preproc.get("imputation", {})
         de_method   = self.analysis_config.get("ebayes_method", "limma")
         input_layout = self.dataset_config.get("input_layout", "")
-        analysis_type = "Proteomics" if self.dataset_config.get("analysis_type", "") == "DIA" else "Phosphoproteomics" #TODO have to do this better evenutually, 1.8
+        analysis_type = self.dataset_config.get("analysis_type", "proteomics")
         xlsx_export = os.path.basename(self.analysis_config.get('exports').get('path_table'))
         h5ad_export = os.path.basename(self.analysis_config.get('exports').get('path_h5ad'))
 

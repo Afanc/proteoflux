@@ -1,7 +1,7 @@
 dataset:
   input_file: "data/searle_test2.tsv"
   input_layout: "long"
-  analysis_type: "DIA"
+  analysis_type: "proteomics"
   annotation_file: "data/annotation_searle2.tsv"
   exclude_runs:
   index_column: "PG.ProteinGroups"
@@ -22,7 +22,8 @@ dataset:
   peptide_seq_column: "FG.LabeledSequence"
 
 preprocessing:
-  pivot_signal_method: "sum"
+  protein_rollup_method: "sum"
+  peptide_rollup_method: "sum"
   directlfq_cores: 8
   directlfq_min_nonan: 1
   filtering:

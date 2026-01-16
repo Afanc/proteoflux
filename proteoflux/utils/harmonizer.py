@@ -3,6 +3,11 @@ import polars as pl
 from typing import Dict, List
 from proteoflux.utils.utils import log_time, logger, log_info, log_warning
 from proteoflux.utils.ptm_map import PTM_MAP
+from proteoflux.utils.sequence_ops import (
+    strip_mods as _strip_mods_impl,
+    convert_numeric_ptms as _convert_numeric_ptms_impl,
+    normalize_peptido_index_seq as _normalize_peptido_index_seq_impl,
+)
 
 
 class DataHarmonizer:
@@ -511,293 +516,133 @@ class DataHarmonizer:
         return self._melt_wide_to_long_no_annotation(df)
 
     def _strip_mods(self, s: str) -> str:
-        if s is None:
-            return None
+        return _strip_mods_impl(s)
+        #if s is None:
+        #    return None
 
-        #if self.convert_numeric_ptms:
-        #    s = self._convert_numeric_ptms(s)
+        #out = s.strip("_")
 
-        out = s.strip("_")
+        ## 1) n-terminal tags
+        #out = re.sub(r"^n\[[^]]*\](?=[A-Z])", "", out)
 
-        # 1) n-terminal tags
-        out = re.sub(r"^n\[[^]]*\](?=[A-Z])", "", out)
+        ## 2) C-terminal tags
+        #out = re.sub(r"c\[[^]]*\]$", "", out)
 
-        # 2) C-terminal tags
-        out = re.sub(r"c\[[^]]*\]$", "", out)
+        ## Generic: drop any bracketed annotation and parentheses
+        #out = re.sub(r"\[.*?\]", "", out)
+        #out = out.replace("(", "").replace(")", "")
 
-        # Generic: drop any bracketed annotation and parentheses
-        out = re.sub(r"\[.*?\]", "", out)
-        out = out.replace("(", "").replace(")", "")
-
-        return out
-
-#    def _phospho_positions_from_modified_seq(self, s: str | None) -> list[int]:
-#        """
-#        Extract 1-based peptide-local positions of phospho sites from a modified peptide sequence.
-#
-#        We treat a residue as phospho if any of its bracket mods contains 'Phospho (STY)'.
-#        Non-phospho bracket annotations are ignored for position counting.
-#        """
-#        if s is None:
-#            return []
-#
-#        # strip outer "_" and ignore leading n[...] tags if present
-#        txt = s.strip("_")
-#        txt = re.sub(r"^n\[[^]]*\](?=[A-Z])", "", txt)
-#
-#        # match each residue and its trailing bracket mods (possibly multiple)
-#        # e.g. "S[Phospho (STY)]", "C[Carbamidomethyl (C)]", "T[Phospho (STY)][Other]"
-#        pat = re.compile(r"([A-Z])((?:\[[^\]]+\])*)")
-#
-#        pos = 0
-#        out: list[int] = []
-#        for m in pat.finditer(txt):
-#            pos += 1
-#            mods = m.group(2) or ""
-#            if "Phospho (STY)" in mods:
-#                out.append(pos)
-#        return out
-#
-#        self, ptm_sites_str: str | None, expected_sites: int
-#    ) -> list[str]:
-#        """
-#        Parse EG.ProteinPTMLocations (PTM_SITES_STR) into phospho-only site tokens,
-#        using the expected number of phosphosites derived from the modified peptide sequence.
-#
-#        This is necessary because a single parenthesis group can mean either:
-#          - ambiguity for one site:     (S197,S201)   when expected_sites == 1
-#          - two distinct sites:        (S576,S578)   when expected_sites == 2
-#
-#        Rules:
-#          1) Split across protein-group members by ';' (preserve order)
-#          2) If a protein member has multiple '(...)' groups concatenated, each group is one site
-#             (ambiguity inside group preserved).
-#          3) If a protein member has exactly one '(...)' group:
-#               - if expected_sites <= 1: keep it as one (possibly ambiguous) site-group
-#               - else: split comma-separated phospho entries into distinct site-groups
-#          4) Filter to phospho-only entries (S/T/Y) within each site-group.
-#          5) Require all protein-group members have the same number of site-groups.
-#          6) Emit group-level token per site index: join per-protein group with ';'
-#
-#        Input examples:
-#          "(S87);(S86)"           -> ["(S87);(S86)"]                (one site, two proteins)
-#          "(S2,T18)"              -> ["(S2)", "(T18)"]              (two sites, one protein)
-#          "(S2,T18);(S2,T18)"     -> ["(S2);(S2)", "(T18);(T18)"]   (two sites, two proteins)
-#          "(C843,S856)"           -> ["(S856)"]                     (phospho-only filtering)
-#          "(S197,S201)(S222,S226)"-> ["(S197,S201)", "(S222,S226)"] (two sites, ambiguous positions)
-#        """
-#        if ptm_sites_str is None:
-#            return []
-#        txt = str(ptm_sites_str).strip()
-#        if not txt:
-#            return []
-#
-#        # split across protein group members; preserve order
-#        # Note: within each protein part, Spectronaut can encode multiple sites as concatenated "(...) (...)"
-#        prot_parts = [p.strip() for p in txt.split(";") if p.strip()]
-#        if not prot_parts:
-#            return []
-#
-#        def _filter_group(group_txt: str) -> str | None:
-#            """
-#            Filter a single '(...)' group to phospho-only entries (S/T/Y), preserving ambiguity.
-#            Returns '(S197,S201)' style string (ambiguity preserved) or None if nothing phospho remains.
-#            """
-#            g = group_txt.strip()
-#            if g.startswith("(") and g.endswith(")"):
-#                g = g[1:-1].strip()
-#            if not g:
-#                return None
-#            elems = [e.strip() for e in g.split(",") if e.strip()]
-#            elems = [e for e in elems if e and e[0] in {"S", "T", "Y"}]
-#            if not elems:
-#                return None
-#            return "(" + ",".join(elems) + ")"
-#
-#        def _flatten_groups_as_single_site(groups: list[str]) -> list[str]:
-#            """
-#            For expected_sites == 1, ProteinPTMLocations may encode ambiguity as multiple '(...)' groups,
-#            e.g. '(S1026)(S1051)'. In that case we collapse to one ambiguity group '(S1026,S1051)'.
-#            """
-#            elems_all: list[str] = []
-#            seen: set[str] = set()
-#            for g in groups:
-#                fg = _filter_group(g)
-#                if fg is None:
-#                    continue
-#                inner = fg[1:-1].strip()
-#                if not inner:
-#                    continue
-#                for e in [x.strip() for x in inner.split(",") if x.strip()]:
-#                    if e not in seen:
-#                        seen.add(e)
-#                        elems_all.append(e)
-#            if not elems_all:
-#                return []
-#            return ["(" + ",".join(elems_all) + ")"]
-#
-#        def _split_single_group_if_multisite(group_txt: str, expected: int) -> list[str]:
-#            """
-#            If we have exactly one '(...)' group for a protein member, decide whether to:
-#              - keep as one ambiguous site (expected <= 1), or
-#              - split into multiple site-groups (expected > 1)
-#            """
-#            fg = _filter_group(group_txt)
-#            if fg is None:
-#                return []
-#            inner = fg[1:-1].strip()
-#            if not inner:
-#                return []
-#            elems = [e.strip() for e in inner.split(",") if e.strip()]
-#            # expected > 1 => treat comma-separated entries as multiple sites
-#            if expected > 1 and len(elems) > 1:
-#                return ["(" + e + ")" for e in elems]
-#            # else keep ambiguity as one group
-#            return [fg]
-#
-#        per_prot_groups: list[list[str]] = []
-#        for p in prot_parts:
-#            p2 = p.strip()
-#
-#            # Primary: extract all '(...)' groups in order.
-#            # This correctly parses '(S197,S201)(S222,S226)' as two site groups.
-#            groups = re.findall(r"\([^)]*\)", p2)
-#            if groups:
-#                if expected_sites <= 1:
-#                    # Single-site phospho: multiple groups can encode ambiguity (e.g. '(S1026)(S1051)').
-#                    # Collapse to one ambiguity group to enforce 1:1 with the peptide phospho count.
-#                    per_prot_groups.append(_flatten_groups_as_single_site(groups))
-#                else:
-#                    if len(groups) == 1:
-#                        # single group: ambiguity vs multisite depends on expected_sites
-#                        per_prot_groups.append(_split_single_group_if_multisite(groups[0], expected_sites))
-#                    else:
-#                        # multiple groups: each group is one site; preserve ambiguity within each group
-#                        kept: list[str] = []
-#                        for g in groups:
-#                            fg = _filter_group(g)
-#                            if fg is not None:
-#                                kept.append(fg)
-#                        per_prot_groups.append(kept)
-#                continue
-#
-#        # all proteins must carry the same number of phospho sites after filtering
-#        lengths = {len(x) for x in per_prot_groups}
-#        if len(lengths) != 1:
-#            raise ValueError(
-#                "[PHOSPHO] EG.ProteinPTMLocations parsing produced inconsistent phospho-site counts "
-#                f"across protein-group members: parts={prot_parts} parsed={per_prot_groups}"
-#            )
-#
-#        n = len(per_prot_groups[0])
-#        if n == 0:
-#            return []
-#
-#        # assemble group-level token per site: "(S87);(S86)" etc.
-#        tokens: list[str] = []
-#        for i in range(n):
-#            toks_i = [per_prot_groups[j][i] for j in range(len(per_prot_groups))]
-#            tokens.append(";".join(toks_i))
-#        return tokens
+        #return out
 
     def _convert_numeric_ptms(self, s: str | None) -> str | None:
-        """
-        Convert numeric mass tags (e.g. C[57.0215]) to named PTMs using PTM_MAP.
+        return _convert_numeric_ptms_impl(
+            s,
+            enabled=self.convert_numeric_ptms,
+            ptm_map=PTM_MAP,
+        )
+        #"""
+        #Convert numeric mass tags (e.g. C[57.0215]) to named PTMs using PTM_MAP.
 
-        Expected PTM_MAP structure (flexible):
+        #Expected PTM_MAP structure (flexible):
 
-            PTM_MAP = {
-                "57.0215": "Carbamidomethyl (C)",
-                "15.9949": "Oxidation (M)",
-                ...
-            }
+        #    PTM_MAP = {
+        #        "57.0215": "Carbamidomethyl (C)",
+        #        "15.9949": "Oxidation (M)",
+        #        ...
+        #    }
 
-        or
+        #or
 
-            PTM_MAP = {
-                "57.0215": {"name": "Carbamidomethyl (C)", "unimod": "UNIMOD:4", ...},
-                ...
-            }
+        #    PTM_MAP = {
+        #        "57.0215": {"name": "Carbamidomethyl (C)", "unimod": "UNIMOD:4", ...},
+        #        ...
+        #    }
 
-        We try a few string formats of the mass to be robust (raw, 4dp, 6dp).
-        """
-        if s is None:
-            return None
+        #We try a few string formats of the mass to be robust (raw, 4dp, 6dp).
+        #"""
+        #if s is None:
+        #    return None
 
-        if not self.convert_numeric_ptms:
-            return s
+        #if not self.convert_numeric_ptms:
+        #    return s
 
-        def _replace(match: re.Match) -> str:
-            token = match.group(1)  # AA letter or 'n'/'c'
-            mass_raw = match.group(2)
+        #def _replace(match: re.Match) -> str:
+        #    token = match.group(1)  # AA letter or 'n'/'c'
+        #    mass_raw = match.group(2)
 
-            try:
-                mass_val = float(mass_raw)
-            except ValueError:
-                return match.group(0)
+        #    try:
+        #        mass_val = float(mass_raw)
+        #    except ValueError:
+        #        return match.group(0)
 
-            # try a few representations as keys
-            candidates = {
-                mass_raw,
-                f"{mass_val:.4f}",
-                f"{mass_val:.5f}",
-                f"{mass_val:.6f}",
-            }
+        #    # try a few representations as keys
+        #    candidates = {
+        #        mass_raw,
+        #        f"{mass_val:.4f}",
+        #        f"{mass_val:.5f}",
+        #        f"{mass_val:.6f}",
+        #    }
 
-            name = None
-            meta = None
-            for key in candidates:
-                if key in PTM_MAP:
-                    meta = PTM_MAP[key]
-                    if isinstance(meta, dict):
-                        name = meta.get("name") or meta.get("label") or key
-                    else:
-                        name = str(meta)
-                    break
+        #    name = None
+        #    meta = None
+        #    for key in candidates:
+        #        if key in PTM_MAP:
+        #            meta = PTM_MAP[key]
+        #            if isinstance(meta, dict):
+        #                name = meta.get("name") or meta.get("label") or key
+        #            else:
+        #                name = str(meta)
+        #            break
 
-            if name is None:
-                # unknown mass -> leave numeric tag as-is
-                return match.group(0)
+        #    if name is None:
+        #        # unknown mass -> leave numeric tag as-is
+        #        return match.group(0)
 
-            # Example outcome: C[Carbamidomethyl (C)], M[Oxidation (M)], n[Acetyl (Protein N-term)]
-            return f"{token}[{name}]"
+        #    # Example outcome: C[Carbamidomethyl (C)], M[Oxidation (M)], n[Acetyl (Protein N-term)]
+        #    return f"{token}[{name}]"
 
-        # matches AA[float] or n[float] / c[float]
-        return re.sub(r"([A-Znc])\[(\-?\d+\.\d+)\]", _replace, s)
+        ## matches AA[float] or n[float] / c[float]
+        #return re.sub(r"([A-Znc])\[(\-?\d+\.\d+)\]", _replace, s)
 
     def _normalize_peptido_index_seq(self, s: str | None) -> str | None:
-        """
-        Build the peptidomics INDEX sequence from a modified sequence.
+        return _normalize_peptido_index_seq_impl(
+            s,
+            convert_numeric_ptms_enabled=self.convert_numeric_ptms,
+            collapse_all_ptms=self.collapse_all_ptms,
+            ptm_map=PTM_MAP,
+        )
+        #"""
+        #Build the peptidomics INDEX sequence from a modified sequence.
 
-        Order:
-          1) convert numeric PTMs to names via PTM_MAP
-          2) strip leading/trailing '_' and simple wrappers
-          3) strip Oxidation on Met and N-terminal acetylation
-          4) optionally collapse all remaining PTMs if collapse_all_ptms is True
+        #Order:
+        #  1) convert numeric PTMs to names via PTM_MAP
+        #  2) strip leading/trailing '_' and simple wrappers
+        #  3) strip Oxidation on Met and N-terminal acetylation
+        #  4) optionally collapse all remaining PTMs if collapse_all_ptms is True
 
-        By default (collapse_all_ptms = False), other PTMs remain and define
-        distinct INDEX entries for modified vs unmodified peptides.
-        """
-        if s is None:
-            return None
+        #By default (collapse_all_ptms = False), other PTMs remain and define
+        #distinct INDEX entries for modified vs unmodified peptides.
+        #"""
+        #if s is None:
+        #    return None
 
-        # 1) numeric mass -> named PTMs (for FragPipe)
-        seq = self._convert_numeric_ptms(s)
+        ## 1) numeric mass -> named PTMs (for FragPipe)
+        #seq = self._convert_numeric_ptms(s)
 
-        # 2) trim underscores and whitespace
-        seq = seq.strip("_").strip()
+        ## 2) trim underscores and whitespace
+        #seq = seq.strip("_").strip()
 
-        # 3) strip Oxidation on M (either numeric already converted, or native Spectronaut)
-        #     Example patterns after conversion: M[Oxidation (M)]
-        seq = re.sub(r"M\[[^]]*Oxidation[^]]*\]", "M", seq)
+        ## 3) strip Oxidation on M (either numeric already converted, or native Spectronaut)
+        ##     Example patterns after conversion: M[Oxidation (M)]
+        #seq = re.sub(r"M\[[^]]*Oxidation[^]]*\]", "M", seq)
 
-        # 4) optional global PTM collapse: everything else gets its brackets removed
-        if self.collapse_all_ptms:
-            seq = re.sub(r"^n\[[^]]*\](?=[A-Z])", "", seq)
-            seq = re.sub(r"c\[[^]]*\]$", "", seq)
-            seq = re.sub(r"\[[^]]+\]", "", seq)
+        ## 4) optional global PTM collapse: everything else gets its brackets removed
+        #if self.collapse_all_ptms:
+        #    seq = re.sub(r"^n\[[^]]*\](?=[A-Z])", "", seq)
+        #    seq = re.sub(r"c\[[^]]*\]$", "", seq)
+        #    seq = re.sub(r"\[[^]]+\]", "", seq)
 
-        return seq
+        #return seq
 
     def _assert_required_phospho_columns(self, df: pl.DataFrame) -> pl.DataFrame:
         # For phospho indexing we need both:
@@ -958,14 +803,6 @@ class DataHarmonizer:
               .alias("_prot_sites")
         ).explode("_prot_sites")
 
-        #log_info(
-        #    f"[PHOSPHO] Parsed protein sites: rows={df2.height}, unique_protein_sites={df2.select('_prot_sites').n_unique()}"
-        #)
-        #log_info(
-        #    "[PHOSPHO] Parsed protein-location tokens: "
-        #    f"rows={df2.height}, "
-        #    f"unique _prot_sites={df2.select('_prot_sites').n_unique()} (token-only, no protein context)"
-        #)
         df2 = df2.with_columns(
             pl.col("_prot_sites").str.slice(0, 1).alias("_AA"),
             pl.col("_prot_sites").str.extract(r"(\d+)").cast(pl.Int64).alias("_ABS_POS"),
@@ -1015,17 +852,6 @@ class DataHarmonizer:
         log_info(
             f"Unique phosphosites: {df2.select('INDEX').n_unique()}"
         )
-
-        #offenders = (
-        #    df2.group_by("INDEX")
-        #       .agg([
-        #           pl.len().alias("N_ROWS"),
-        #           pl.col("PEPTIDE_INDEX").n_unique().alias("N_PEPTIDES"),
-        #       ])
-        #       .sort(["N_PEPTIDES", "N_ROWS"], descending=True)
-        #       .head(10)
-        #)
-        #log_info(f"[PHOSPHO] Top sites by #peptides (missed-cleavage variants):\n{offenders}")
 
         # ------------------------------------------------------------------
         # 7) Hard invariant: INDEX must never be null

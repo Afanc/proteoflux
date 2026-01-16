@@ -19,6 +19,7 @@ import csv
 from proteoflux.workflow.preprocessing import Preprocessor
 from proteoflux.utils.harmonizer import DataHarmonizer
 from proteoflux.utils.utils import polars_matrix_to_numpy, log_time, logger, log_info
+from proteoflux.utils.analysis_type import normalize_analysis_type
 
 pl.Config.set_tbl_rows(100)
 
@@ -38,6 +39,9 @@ class Dataset:
         self.load_method = dataset_cfg.get("load_method", "polars")
         self.input_layout = dataset_cfg.get("input_layout", "long")
         self.analysis_type = dataset_cfg.get("analysis_type", "DIA")
+        self.analysis_type = normalize_analysis_type(
+            dataset_cfg.get("analysis_type", "proteomics")
+        )
 
         dataset_cfg = kwargs.get("dataset", {}) or {}
 
@@ -62,6 +66,9 @@ class Dataset:
         self.exclude_runs = _to_set(raw_excl)
 
         # Harmonizer setup
+        #self.harmonizer = DataHarmonizer(dataset_cfg)
+        dataset_cfg = deepcopy(dataset_cfg) or {}
+        dataset_cfg["analysis_type"] = self.analysis_type
         self.harmonizer = DataHarmonizer(dataset_cfg)
 
         # Preprocessing config and setup
@@ -113,7 +120,10 @@ class Dataset:
             eff_cfg["input_layout"] = inject_cfg.get(
                 "input_layout", eff_cfg.get("input_layout", self.input_layout)
             )
-            eff_cfg["analysis_type"] = inject_cfg.get("analysis_type", "DIA")
+            #eff_cfg["analysis_type"] = inject_cfg.get("analysis_type", "DIA")
+            eff_cfg["analysis_type"] = normalize_analysis_type(
+                inject_cfg.get("analysis_type", self.analysis_type)
+            )
             eff_cfg["annotation_file"] = inject_cfg.get("annotation_file", None)
 
             # 3) harmonize with its own annot (no cross-merge!)
@@ -532,7 +542,7 @@ class Dataset:
         # Proteomics: peptide trends
         sample_names = [c for c in processed_mat.columns if c != "INDEX"]
 
-        proteomics_mode = self.analysis_type.lower() in {"dia", "dda", "proteomics"}
+        proteomics_mode = self.analysis_type == "proteomics"
         precursor_mode  = self.analysis_type in {"peptidomics", "phospho"}
 
         if proteomics_mode:

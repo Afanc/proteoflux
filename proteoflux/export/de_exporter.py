@@ -135,7 +135,7 @@ class DEExporter:
 
         ad = self.adata
         preproc = ad.uns.get("preprocessing", {})
-        analysis_type = str(preproc.get("analysis_type", "DIA")).lower()
+        analysis_type = str(preproc.get("analysis_type", "proteomics")).lower()
         is_phospho = analysis_type == "phospho"
         pilot_mode = bool(ad.uns.get("pilot_study_mode", False))
 
@@ -157,7 +157,7 @@ class DEExporter:
         if is_phospho and "NUM_PRECURSORS" in meta_df.columns:
             meta_df = meta_df.drop(columns=["NUM_PRECURSORS"])
 
-        if analysis_type == "DIA":
+        if analysis_type == "proteomics":
             # Placeholder column
             if "NUM_UNIQUE_PEPTIDES" not in meta_df.columns:
                 meta_df["NUM_UNIQUE_PEPTIDES"] = np.nan
@@ -396,7 +396,7 @@ class DEExporter:
         summary_df.index.name = "PHOSPHOSITE" if is_phospho else "UNIPROT_AC"
 
         # Compute NUM_UNIQUE_PEPTIDES for proteomics by var-position
-        if analysis_type == "DIA":
+        if analysis_type == "proteomics":
             pep_uns = ad.uns.get("peptides")
             assert pep_uns is not None, "uns['peptides'] is required to compute NUM_UNIQUE_PEPTIDES"
             pep_meta = pd.DataFrame({
@@ -441,7 +441,7 @@ class DEExporter:
             "Identification PEP": id_pep if id_pep is not None else None,
             "Spectral Counts": spectral_counts if spectral_counts is not None else None,
             "IBAQ Values": ibaq if ibaq is not None else None,
-            "Peptides (raw)": (None if (str(preproc.get("analysis_type", "DIA")).lower()=="phospho") else pep_wide_df),
+            "Peptides (raw)": (None if (str(preproc.get("analysis_type", "proteomics")).lower()=="phospho") else pep_wide_df),
         }
 
         if self.use_xlsx:
