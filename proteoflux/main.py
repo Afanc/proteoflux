@@ -20,6 +20,7 @@ def run_pipeline(config: dict):
         plotter = ReportPlotter(adata, config)
         plotter.plot_all()
 
+    export_config = analysis_config.get("exports")
     if not export_config:
         raise ValueError("Missing config.analysis.exports block (required for export paths).")
     exporter = DEExporter(adata,

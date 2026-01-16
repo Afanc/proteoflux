@@ -20,6 +20,57 @@ from itertools import combinations
 from proteoflux.utils.utils import log_time, log_warning, log_info
 from proteoflux.analysis.statisticaltester import StatisticalTester
 from proteoflux.analysis.clustering import run_clustering, run_clustering_missingness
+from proteoflux.analysis.adata_schema import (
+    # .uns
+    UNS_CONTRAST_NAMES,
+    UNS_PILOT_MODE,
+    UNS_HAS_COVARIATE,
+    UNS_MISSINGNESS,
+    UNS_MISSINGNESS_SOURCE,
+    UNS_MISSINGNESS_RULE,
+    UNS_N_FULLY_IMPUTED_CELLS,
+    UNS_RESIDUAL_VARIANCE,
+    # .varm
+    VARM_LOG2FC,
+    VARM_SE_RAW,
+    VARM_T_RAW,
+    VARM_P_RAW,
+    VARM_Q_RAW,
+    VARM_SE_EBAYES,
+    VARM_T_EBAYES,
+    VARM_P_EBAYES,
+    VARM_Q_EBAYES,
+    VARM_RAW_LOG2FC,
+    VARM_RAW_Q_EBAYES,
+    VARM_COV_PART,
+    VARM_COVARIATE_BETA,
+    VARM_COVARIATE_SE,
+    VARM_COVARIATE_T,
+    VARM_COVARIATE_P,
+    VARM_COVARIATE_Q,
+    VARM_FT_LOG2FC,
+    VARM_FT_P_EBAYES,
+    VARM_FT_Q_EBAYES,
+)
+
+
+def _raw_stats_from_fit(
+    *,
+    coefs: np.ndarray,
+    stdu: np.ndarray,
+    sigma: np.ndarray,
+    df_res: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Centralized raw-stat computation (mechanical extraction):
+      se_raw = stdu * sigma[:, None]
+      t_raw  = coefs / se_raw
+      p_raw  = 2 * t.sf(|t_raw|, df=df_res[:, None])
+    """
+    se_raw = stdu * sigma[:, None]
+    t_raw = coefs / se_raw
+    p_raw = 2 * t_dist.sf(np.abs(t_raw), df=df_res[:, None])
+    return se_raw, t_raw, p_raw
 
 def _contrast_defs_from_cfg(levels: list[str], cfg: dict) -> list[str]:
     """Return list of limma contrast definitions like ['A - B', ...] (mechanical extraction)."""
@@ -117,20 +168,21 @@ def _fully_imputed_mask_from_layer(
 
 def _neutralize_fully_imputed_contrasts(out: ad.AnnData, fully: np.ndarray) -> None:
     """Overwrite outputs for fully-imputed (feature × contrast) cells (post-fit, explicit)."""
-    if fully.shape != out.varm["log2fc"].shape:
+    if fully.shape != out.varm[VARM_LOG2FC].shape:
         raise ValueError(
-            f"Fully-imputed mask shape {fully.shape} does not match log2fc shape {out.varm['log2fc'].shape}"
+            f"Fully-imputed mask shape {fully.shape} does not match log2fc shape {out.varm[VARM_LOG2FC].shape}"
         )
     if not np.any(fully):
         return
-    out.varm["log2fc"][fully] = 0.0
-    for key in ("p_raw", "q_raw", "p_ebayes", "q_ebayes"):
+
+    out.varm[VARM_LOG2FC][fully] = 0.0
+    for key in (VARM_P_RAW, VARM_Q_RAW, VARM_P_EBAYES, VARM_Q_EBAYES):
         if key in out.varm:
             out.varm[key][fully] = 1.0
-    for key in ("t_raw", "t_ebayes"):
+    for key in (VARM_T_RAW, VARM_T_EBAYES):
         if key in out.varm:
             out.varm[key][fully] = 0.0
-    for key in ("se_raw", "se_ebayes"):
+    for key in (VARM_SE_RAW, VARM_SE_EBAYES):
         if key in out.varm:
             out.varm[key][fully] = np.inf
 
@@ -173,12 +225,12 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         )
 
         out = adata.copy()
-        out.uns["contrast_names"]     = []
-        out.uns["pilot_study_mode"]   = True
-        out.uns["missingness"]        = missing_df
-        out.uns["missingness_source"] = miss_source
-        out.uns["missingness_rule"]   = "nan-is-missing"
-        out.uns["has_covariate"]      = False
+        out.uns[UNS_CONTRAST_NAMES] = []
+        out.uns[UNS_PILOT_MODE] = True
+        out.uns[UNS_MISSINGNESS] = missing_df
+        out.uns[UNS_MISSINGNESS_SOURCE] = miss_source
+        out.uns[UNS_MISSINGNESS_RULE] = "nan-is-missing"
+        out.uns[UNS_HAS_COVARIATE] = False
         return out
 
     # Pilot mode due to singleton replicates (keep existing behavior/logging)
@@ -205,7 +257,7 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     # Fit
     fit_imo = imo.lmFit(df_X, design=design_dm)
     resid_var = np.asarray(fit_imo.sigma, dtype=np.float32) ** 2
-    adata.uns["residual_variance"] = resid_var
+    adata.uns[UNS_RESIDUAL_VARIANCE] = resid_var
 
     # Contrasts
     contrast_df = _make_contrasts(levels, design_dm, config)
@@ -219,9 +271,10 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     sigma  = fit_imo.sigma.to_numpy()             # (n_genes,)
     df_res = fit_imo.df_residual                  # (n_genes,)
 
-    se_raw = stdu * sigma[:, np.newaxis]
-    t_raw  = coefs / se_raw
-    p_raw  = 2 * t_dist.sf(np.abs(t_raw), df=df_res[:, None])
+    se_raw, t_raw, p_raw = _raw_stats_from_fit(coefs=coefs, stdu=stdu, sigma=sigma, df_res=df_res)
+    #se_raw = stdu * sigma[:, np.newaxis]
+    #t_raw  = coefs / se_raw
+    #p_raw  = 2 * t_dist.sf(np.abs(t_raw), df=df_res[:, None])
 
     # Fully-imputed detection (contrast-local) — apply BEFORE BH to keep q-values clean.
     cond_arr = adata.obs["CONDITION"].astype(str).to_numpy()
@@ -260,37 +313,37 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     # Assemble into AnnData
     out = adata.copy()
 
-    out.varm["log2fc"]  = coefs
+    out.varm[VARM_LOG2FC] = coefs
 
     if not pilot_mode:
-        out.varm["se_raw"]  = se_raw
-        out.varm["t_raw"]   = t_raw
-        out.varm["p_raw"]   = p_raw
-        out.varm["q_raw"]   = q_raw
+        out.varm[VARM_SE_RAW] = se_raw
+        out.varm[VARM_T_RAW] = t_raw
+        out.varm[VARM_P_RAW] = p_raw
+        out.varm[VARM_Q_RAW] = q_raw
 
         # moderated statistics
-        out.varm["se_ebayes"]  = se_ebayes
-        out.varm["t_ebayes"]   = t_ebayes
-        out.varm["p_ebayes"]   = p_ebayes
-        out.varm["q_ebayes"]   = q_ebayes
+        out.varm[VARM_SE_EBAYES] = se_ebayes
+        out.varm[VARM_T_EBAYES] = t_ebayes
+        out.varm[VARM_P_EBAYES] = p_ebayes
+        out.varm[VARM_Q_EBAYES] = q_ebayes
 
     # metadata
-    out.uns["contrast_names"] = contrast_names
-    out.uns["pilot_study_mode"] = bool(pilot_mode)
+
+    out.uns[UNS_CONTRAST_NAMES] = contrast_names
+    out.uns[UNS_PILOT_MODE] = bool(pilot_mode)
 
     if not pilot_mode:
         _neutralize_fully_imputed_contrasts(out=out, fully=fully)
-        out.uns["n_fully_imputed_cells"] = int(np.count_nonzero(fully))
+        out.uns[UNS_N_FULLY_IMPUTED_CELLS] = int(np.count_nonzero(fully))
 
 
     # Missingness
     missing_df, miss_source = _compute_missingness_payload(adata)
 
-    out.uns["missingness"] = missing_df
-    out.uns["missingness_source"] = miss_source
-    out.uns["missingness_rule"] = "nan-is-missing"
-
-    out.uns["has_covariate"] = False
+    out.uns[UNS_MISSINGNESS] = missing_df
+    out.uns[UNS_MISSINGNESS_SOURCE] = miss_source
+    out.uns[UNS_MISSINGNESS_RULE] = "nan-is-missing"
+    out.uns[UNS_HAS_COVARIATE] = False
 
     return out
 
@@ -416,9 +469,11 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         stdu   = fit.stdev_unscaled.values
         sigma  = fit.sigma.to_numpy()
         df_res = fit.df_residual
-        se_raw = stdu * sigma[:, None]
-        t_raw  = coefs / se_raw
-        p_raw  = 2 * t_dist.sf(np.abs(t_raw), df=df_res[:, None])
+
+        se_raw, t_raw, p_raw = _raw_stats_from_fit(coefs=coefs, stdu=stdu, sigma=sigma, df_res=df_res)
+        #se_raw = stdu * sigma[:, None]
+        #t_raw  = coefs / se_raw
+        #p_raw  = 2 * t_dist.sf(np.abs(t_raw), df=df_res[:, None])
         q_raw  = np.vstack([multipletests(p_raw[:, j], method="fdr_bh")[1] for j in range(p_raw.shape[1])]).T
 
         # eBayes
@@ -475,7 +530,6 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     ancova_cfg        = (config or {}).get("ancova", {})
     # Different beta modes for testing. Now hard fix to fixed1, because occam.
     beta_mode         = ancova_cfg.get("beta_mode", "fixed1")      # "free" | "nonneg" | "fixed1"
-    min_non_imputed   = int(ancova_cfg.get("min_non_imputed", 4)) #TODO maybe don't do this, only if fully imputed? 
     ridge_lambda_cfg  = float(ancova_cfg.get("ridge_lambda", 1e-6))  # forwarded into Stage-1 OLS
 
     # Inputs & preparation
@@ -511,10 +565,6 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         ridge_lambda=ridge_lambda_cfg,
     )
 
-    # Non-imputed sample counts per feature from 'raw_covariate' (NaN == imputed)
-    nonimp_counts = np.sum(~np.isnan(raw_cov_arr), axis=0)  # shape: (n_vars,)
-    low_info = nonimp_counts < max(min_non_imputed, 2)
-
     # Apply the requested beta_mode
     if beta_mode == "fixed1":
         beta1[:] = 1.0
@@ -525,15 +575,6 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
 
     # Fully imputed FT rows were already flagged; combine with low-info unless fixed1
     if beta_mode != "fixed1":
-        # Treat 'no/too-little FT information' as 'no adjustment' to avoid beta explosions
-        #low_or_all = low_info | imputed_all_cov
-        #if np.any(low_or_all):
-        #    beta1[low_or_all] = 0.0
-            # neutralize Stage-1 test for those rows (diagnostics only)
-            # Zero beta per contrast when FT has zero information in at least one condition
-            #cov_t[low_or_all] = 0.0
-            #cov_p[low_or_all] = 1.0
-            #cov_q[low_or_all] = 1.0
         # Per-contrast: if one condition has zero non-imputed FT samples, do not adjust.
         no_adjust = contrast_noft | imputed_all_cov[:, None]
         if np.any(no_adjust):
@@ -642,16 +683,17 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     out = adata.copy()
 
     # Stage-2 (adjusted) statistics
-    out.varm["log2fc"]     = limma_resid["coefs"]
+    out.varm[VARM_LOG2FC] = limma_resid["coefs"]
+
     if not pilot_mode:
-        out.varm["se_raw"]     = limma_resid["se_raw"]
-        out.varm["t_raw"]      = limma_resid["t_raw"]
-        out.varm["p_raw"]      = limma_resid["p_raw"]
-        out.varm["q_raw"]      = limma_resid["q_raw"]
-        out.varm["se_ebayes"]  = limma_resid["se_ebayes"]
-        out.varm["t_ebayes"]   = limma_resid["t_ebayes"]
-        out.varm["p_ebayes"]   = limma_resid["p_ebayes"]
-        out.varm["q_ebayes"]   = limma_resid["q_ebayes"]
+        out.varm[VARM_SE_RAW] = limma_resid["se_raw"]
+        out.varm[VARM_T_RAW] = limma_resid["t_raw"]
+        out.varm[VARM_P_RAW] = limma_resid["p_raw"]
+        out.varm[VARM_Q_RAW] = limma_resid["q_raw"]
+        out.varm[VARM_SE_EBAYES] = limma_resid["se_ebayes"]
+        out.varm[VARM_T_EBAYES] = limma_resid["t_ebayes"]
+        out.varm[VARM_P_EBAYES] = limma_resid["p_ebayes"]
+        out.varm[VARM_Q_EBAYES] = limma_resid["q_ebayes"]
 
         # Residual variance from stage-2 limma (adjusted model)
         fit_resid = imo.lmFit(R_df, design=design2)
@@ -659,20 +701,20 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         out.uns["residual_variance"] = resid_var
 
     # Raw model (same contrasts) - for decomposition display
-    out.varm["raw_log2fc"]   = raw_coefs
+    out.varm[VARM_RAW_LOG2FC] = raw_coefs
     if not pilot_mode:
-        out.varm["raw_q_ebayes"] = raw_q
+        out.varm[VARM_RAW_Q_EBAYES] = raw_q
 
     # Covariate decomposition piece
-    out.varm["cov_part"] = cov_part
+    out.varm[VARM_COV_PART] = cov_part
 
     # Stage-1 covariate stats (per feature)
     if not pilot_mode:
-        out.varm["covariate_beta"] = beta1[:, None]
-        out.varm["covariate_se"]   = cov_se[:, None]
-        out.varm["covariate_t"]    = cov_t[:, None]
-        out.varm["covariate_p"]    = cov_p[:, None]
-        out.varm["covariate_q"]    = cov_q[:, None]
+        out.varm[VARM_COVARIATE_BETA] = beta1[:, None]
+        out.varm[VARM_COVARIATE_SE] = cov_se[:, None]
+        out.varm[VARM_COVARIATE_T] = cov_t[:, None]
+        out.varm[VARM_COVARIATE_P] = cov_p[:, None]
+        out.varm[VARM_COVARIATE_Q] = cov_q[:, None]
 
     # Residuals layer for diagnostics
     out.layers["residuals_covariate"] = R_df.T.values
@@ -680,9 +722,10 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     # Metadata
     out.uns["contrast_names"]   = contrast_names
     out.uns["model_type"]       = "residualization_no_interaction"
-    out.uns["missingness"]      = missing_df
-    out.uns["missingness_source"] = miss_source
-    out.uns["missingness_rule"] = "nan-is-missing"
+
+    out.uns[UNS_MISSINGNESS] = missing_df
+    out.uns[UNS_MISSINGNESS_SOURCE] = miss_source
+    out.uns[UNS_MISSINGNESS_RULE] = "nan-is-missing"
 
     out.uns["has_covariate"] = True
     out.uns["pilot_study_mode"] = bool(pilot_mode)
@@ -716,9 +759,9 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     # (optional) p-values too:
     out.varm["ft_log2fc"] = cov_coefs
     if not pilot_mode:
-        out.varm["ft_q_ebayes"] = cov_q
-        # (optional) p-values too:
-        out.varm["ft_p_ebayes"] = cov_p
+
+        out.varm[VARM_FT_Q_EBAYES] = cov_q
+        out.varm[VARM_FT_P_EBAYES] = cov_p
 
     # Describe decomposition rule once for the viewer
     out.uns["decomposition_rule"] = "raw_log2fc ≈ log2fc (adjusted) + cov_part"
