@@ -10,6 +10,154 @@ from proteoflux.utils.sequence_ops import expr_clean_peptide_seq
 if TYPE_CHECKING:
     from proteoflux.workflow.preprocessing import Preprocessor
 
+def _center_by_rowmean(df: pl.DataFrame, sample_cols: list[str]) -> pl.DataFrame:
+    """
+    Mechanical extraction of the current centering logic:
+      - compute row mean using mean_horizontal after converting NaN -> null
+      - divide each sample column by that mean
+    """
+    return (
+        df.with_columns(
+            pl.mean_horizontal(
+                [
+                    pl.when(pl.col(c).is_nan()).then(None).otherwise(pl.col(c))
+                    for c in sample_cols
+                ]
+            ).alias("__rowmean__")
+        )
+        .with_columns([(pl.col(c) / pl.col("__rowmean__")).alias(c) for c in sample_cols])
+        .drop("__rowmean__")
+    )
+
+def _build_consistency_precursors(
+    *,
+    self: "Preprocessor",
+    df: pl.DataFrame,
+    cond_to_runs: dict[str, list[str]],
+) -> None:
+    """Mechanical extraction of precursor consistency logic (peptidomics/phospho)."""
+
+    prec_long = (
+        df.select(["INDEX", "PEPTIDE_LSEQ", "CHARGE", "FILENAME", "SIGNAL"])
+        .drop_nulls(["INDEX", "CHARGE"])
+        .with_columns(
+            [
+                pl.concat_str(
+                    [
+                        pl.col("INDEX").cast(pl.Utf8),
+                        pl.lit("/+"),
+                        pl.col("CHARGE").cast(pl.Utf8),
+                    ]
+                ).alias("PREC_KEY"),
+                (pl.col("SIGNAL").is_not_null() & ~pl.col("SIGNAL").is_nan()).alias(
+                    "HAS_SIGNAL"
+                ),
+            ]
+        )
+        .group_by(["PREC_KEY", "FILENAME"], maintain_order=True)
+        .agg(pl.col("HAS_SIGNAL").any().alias("HAS_SIGNAL"))
+    )
+
+    prec2idx = (
+        df.select(["INDEX", "CHARGE"])
+        .drop_nulls(["INDEX", "CHARGE"])
+        .with_columns(
+            pl.concat_str(
+                [
+                    pl.col("INDEX").cast(pl.Utf8),
+                    pl.lit("/+"),
+                    pl.col("CHARGE").cast(pl.Utf8),
+                ]
+            ).alias("PREC_KEY")
+        )
+        .select(["PREC_KEY", "INDEX"])
+        .unique()
+    )
+
+    wide_prec = (
+        prec_long.pivot(index="PREC_KEY", columns="FILENAME", values="HAS_SIGNAL")
+        .fill_null(False)
+    )
+    bool_sample_cols = [c for c in wide_prec.columns if c != "PREC_KEY"]
+
+    per_cond_prec: List[pl.DataFrame] = []
+
+    for cond, runs in cond_to_runs.items():
+        cond_cols = [c for c in bool_sample_cols if c in runs]
+        if not cond_cols:
+            continue
+
+        cons_flag = pl.all_horizontal([pl.col(c) for c in cond_cols]).alias("_cons")
+
+        cons_prec = (
+            wide_prec.select(["PREC_KEY"] + cond_cols)
+            .with_columns(cons_flag)
+            .select(["PREC_KEY", pl.col("_cons").cast(pl.Int64).alias("_CONS_INT")])
+        )
+
+        cons_counts = (
+            cons_prec.join(prec2idx, on="PREC_KEY", how="left")
+            .group_by("INDEX", maintain_order=True)
+            .agg(pl.col("_CONS_INT").sum().alias(f"CONSISTENT_PRECURSOR_{cond}"))
+        )
+
+        per_cond_prec.append(cons_counts)
+
+    if per_cond_prec:
+        cons_df = per_cond_prec[0]
+        for extra in per_cond_prec[1:]:
+            cons_df = cons_df.join(extra, on="INDEX", how="outer")
+            keep_cols = ["INDEX"] + [
+                c for c in cons_df.columns if c.startswith("CONSISTENT_PRECURSOR_")
+            ]
+            cons_df = cons_df.select(keep_cols)
+
+        self.intermediate_results.add_df("consistent_precursors_per_condition", cons_df)
+
+
+def _build_consistency_peptides(
+    *,
+    self: "Preprocessor",
+    pep_wide: pl.DataFrame,
+    sample_cols: list[str],
+    cond_to_runs: dict[str, list[str]],
+) -> None:
+    """Mechanical extraction of peptide consistency logic (proteomics)."""
+
+    per_cond_pep: List[pl.DataFrame] = []
+
+    for cond, runs in cond_to_runs.items():
+        cond_cols = [c for c in sample_cols if c in runs]
+        if not cond_cols:
+            continue
+
+        consistent_flag = pl.all_horizontal(
+            [pl.col(c).is_not_null() & ~pl.col(c).is_nan() for c in cond_cols]
+        ).alias("_cons")
+
+        tmp = (
+            pep_wide.select(["INDEX"] + cond_cols)
+            .with_columns(consistent_flag)
+            .group_by("INDEX", maintain_order=True)
+            .agg(
+                pl.col("_cons")
+                .sum()
+                .cast(pl.Int64)
+                .alias(f"CONSISTENT_PEPTIDE_{cond}")
+            )
+        )
+        per_cond_pep.append(tmp)
+
+    if per_cond_pep:
+        cons_df = per_cond_pep[0]
+        for extra in per_cond_pep[1:]:
+            cons_df = cons_df.join(extra, on="INDEX", how="outer")
+            keep_cols = ["INDEX"] + [
+                c for c in cons_df.columns if c.startswith("CONSISTENT_PEPTIDE_")
+            ]
+            cons_df = cons_df.select(keep_cols)
+
+        self.intermediate_results.add_df("consistent_peptides_per_condition", cons_df)
 
 def build_peptide_tables(
     self: "Preprocessor",
@@ -36,7 +184,7 @@ def build_peptide_tables(
     if not needed.issubset(df.columns):
         return None
 
-    analysis = (self.analysis_type or "").strip().lower()
+    analysis = self.analysis_type
     precursor_only = analysis in {"peptidomics", "phospho"}
 
     seq_clean = expr_clean_peptide_seq("PEPTIDE_LSEQ").alias("PEPTIDE_SEQ")
@@ -218,25 +366,7 @@ def build_peptide_tables(
             if c not in ("PEPTIDE_ID", "INDEX", "PEPTIDE_SEQ")
         ]
 
-        pep_centered = (
-            pep_wide.with_columns(
-                pl.mean_horizontal(
-                    [
-                        pl.when(pl.col(c).is_nan())
-                        .then(None)
-                        .otherwise(pl.col(c))
-                        for c in sample_cols
-                    ]
-                ).alias("__rowmean__")
-            )
-            .with_columns(
-                [
-                    (pl.col(c) / pl.col("__rowmean__")).alias(c)
-                    for c in sample_cols
-                ]
-            )
-            .drop("__rowmean__")
-        )
+        pep_centered = _center_by_rowmean(pep_wide, sample_cols)
 
     # 4) Precursor-wide matrices (peptidomics/phospho: same feature + charge)
     if analysis == "phospho":
@@ -292,7 +422,7 @@ def build_peptide_tables(
         sample_col="FILENAME",
         protein_col="PREC_ID",
         values_col="SIGNAL",
-        aggregate_fn="sum",
+        aggregate_fn=self.peptide_rollup_method,
     )
 
     if analysis == "phospho":
@@ -316,25 +446,7 @@ def build_peptide_tables(
         for c, dt in zip(prec_wide.columns, prec_wide.dtypes)
         if (c not in id_cols) and (dt in pl.NUMERIC_DTYPES)
     ]
-    prec_centered = (
-        prec_wide.with_columns(
-            pl.mean_horizontal(
-                [
-                    pl.when(pl.col(c).is_nan())
-                    .then(None)
-                    .otherwise(pl.col(c))
-                    for c in prec_sample_cols
-                ]
-            ).alias("__rowmean__")
-        )
-        .with_columns(
-            [
-                (pl.col(c) / pl.col("__rowmean__")).alias(c)
-                for c in prec_sample_cols
-            ]
-        )
-        .drop("__rowmean__")
-    )
+    prec_centered = _center_by_rowmean(prec_wide, prec_sample_cols)
 
     self.intermediate_results.dfs["precursors_wide"] = prec_wide
     self.intermediate_results.dfs["precursors_centered"] = prec_centered
@@ -366,113 +478,20 @@ def build_peptide_tables(
         for cond in conditions
     }
 
-    analysis = self.analysis_type or ""
-
     if analysis in ["peptidomics", "phospho"]:
-        prec_long = (
-            df.select(["INDEX", "PEPTIDE_LSEQ", "CHARGE", "FILENAME", "SIGNAL"])
-            .drop_nulls(["INDEX", "CHARGE"])
-            .with_columns(
-                [
-                    pl.concat_str(
-                        [
-                            pl.col("INDEX").cast(pl.Utf8),
-                            pl.lit("/+"),
-                            pl.col("CHARGE").cast(pl.Utf8),
-                        ]
-                    ).alias("PREC_KEY"),
-                    (
-                        pl.col("SIGNAL").is_not_null()
-                        & ~pl.col("SIGNAL").is_nan()
-                    ).alias("HAS_SIGNAL"),
-                ]
-            )
-            .group_by(["PREC_KEY", "FILENAME"], maintain_order=True)
-            .agg(pl.col("HAS_SIGNAL").any().alias("HAS_SIGNAL"))
+        _build_consistency_precursors(
+            self=self,
+            df=df,
+            cond_to_runs=cond_to_runs,
         )
-
-        prec2idx = (
-            df.select(["INDEX", "CHARGE"])
-            .drop_nulls(["INDEX", "CHARGE"])
-            .with_columns(
-                pl.concat_str(
-                    [
-                        pl.col("INDEX").cast(pl.Utf8),
-                        pl.lit("/+"),
-                        pl.col("CHARGE").cast(pl.Utf8),
-                    ]
-                ).alias("PREC_KEY")
-            )
-            .select(["PREC_KEY", "INDEX"])
-            .unique()
-        )
-
-        wide_prec = (
-            prec_long.pivot(index="PREC_KEY", columns="FILENAME", values="HAS_SIGNAL")
-            .fill_null(False)
-        )
-        bool_sample_cols = [c for c in wide_prec.columns if c != "PREC_KEY"]
-
-        per_cond_prec: List[pl.DataFrame] = []
-
-        for cond, runs in cond_to_runs.items():
-            cond_cols = [c for c in bool_sample_cols if c in runs]
-            if not cond_cols:
-                continue
-
-            cons_flag = pl.all_horizontal([pl.col(c) for c in cond_cols]).alias("_cons")
-
-            cons_prec = (
-                wide_prec.select(["PREC_KEY"] + cond_cols)
-                .with_columns(cons_flag)
-                .select(["PREC_KEY", pl.col("_cons").cast(pl.Int64).alias("_CONS_INT")])
-            )
-
-            cons_counts = (
-                cons_prec.join(prec2idx, on="PREC_KEY", how="left")
-                .group_by("INDEX", maintain_order=True)
-                .agg(pl.col("_CONS_INT").sum().alias(f"CONSISTENT_PRECURSOR_{cond}"))
-            )
-
-            per_cond_prec.append(cons_counts)
-
-        if per_cond_prec:
-            cons_df = per_cond_prec[0]
-            for extra in per_cond_prec[1:]:
-                cons_df = cons_df.join(extra, on="INDEX", how="outer")
-                keep_cols = ["INDEX"] + [c for c in cons_df.columns if c.startswith("CONSISTENT_PRECURSOR_")]
-                cons_df = cons_df.select(keep_cols)
-
-            self.intermediate_results.add_df("consistent_precursors_per_condition", cons_df)
 
     else:
-        per_cond_pep: List[pl.DataFrame] = []
-
-        for cond, runs in cond_to_runs.items():
-            cond_cols = [c for c in sample_cols if c in runs]
-            if not cond_cols:
-                continue
-
-            consistent_flag = pl.all_horizontal(
-                [pl.col(c).is_not_null() & ~pl.col(c).is_nan() for c in cond_cols]
-            ).alias("_cons")
-
-            tmp = (
-                pep_wide.select(["INDEX"] + cond_cols)
-                .with_columns(consistent_flag)
-                .group_by("INDEX", maintain_order=True)
-                .agg(pl.col("_cons").sum().cast(pl.Int64).alias(f"CONSISTENT_PEPTIDE_{cond}"))
-            )
-            per_cond_pep.append(tmp)
-
-        if per_cond_pep:
-            cons_df = per_cond_pep[0]
-            for extra in per_cond_pep[1:]:
-                cons_df = cons_df.join(extra, on="INDEX", how="outer")
-                keep_cols = ["INDEX"] + [c for c in cons_df.columns if c.startswith("CONSISTENT_PEPTIDE_")]
-                cons_df = cons_df.select(keep_cols)
-
-            self.intermediate_results.add_df("consistent_peptides_per_condition", cons_df)
+        _build_consistency_peptides(
+            self=self,
+            pep_wide=pep_wide,
+            sample_cols=sample_cols,
+            cond_to_runs=cond_to_runs,
+        )
 
     return pep_wide, pep_centered
 

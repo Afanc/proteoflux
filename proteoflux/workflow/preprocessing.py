@@ -54,6 +54,17 @@ class Block(str, Enum):
     MAIN = "main"
     COV = "covariate"
 
+def _missing_columns(df: pl.DataFrame, required: set[str]) -> list[str]:
+    """Return sorted list of missing columns (strict, deterministic order)."""
+    return sorted(required - set(df.columns))
+
+
+def _require_columns(df: pl.DataFrame, required: set[str], *, context: str) -> None:
+    """Fail-fast required-column guard with consistent error formatting."""
+    missing = _missing_columns(df, required)
+    if missing:
+        raise ValueError(f"{context}: missing required columns: {missing!r}")
+
 
 class Preprocessor:
     """Handles filtering, pivoting, normalization, and imputation for proteomics data."""
@@ -146,6 +157,35 @@ class Preprocessor:
             phospho_cfg.get("stochio_correction_level", "protein")
         ).strip().lower()
         self.cov_align_on = "parent_protein" if level == "protein" else "parent_peptide"
+
+    def _split_main_covariate_rows(self, df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame | None]:
+        """
+        Split a long table into main vs covariate rows.
+        Mechanical extraction of the previous inlined logic:
+          - Prefer IS_COVARIATE if present (Null treated as False)
+          - Else, if ASSAY present and covariate assays configured, split by lowercased ASSAY membership
+          - Else: no covariate block (df_cov=None)
+        NOTE: This function does NOT enforce presence of covariate rows. That check
+        remains at the call site (same as before).
+        """
+        if not self.covariates_enabled:
+            return df, None
+
+        if "IS_COVARIATE" in df.columns:
+            # treat nulls as False (exact legacy semantics)
+            is_cov = pl.coalesce([pl.col("IS_COVARIATE"), pl.lit(False)])
+            return df.filter(~is_cov), df.filter(is_cov)
+
+        # Fallback: infer covariate rows from ASSAY matching configured assays (case-insensitive)
+        has_assay = "ASSAY" in df.columns
+        assay_lc = set(self.covariate_assays or [])
+        if has_assay and assay_lc:
+            return (
+                df.filter(~pl.col("ASSAY").str.to_lowercase().is_in(list(assay_lc))),
+                df.filter(pl.col("ASSAY").str.to_lowercase().is_in(list(assay_lc))),
+            )
+
+        return df, None
 
     def fit_transform(self, df: pl.DataFrame) -> PreprocessResults:
         """Run the full preprocessing pipeline and return a `PreprocessResults` bundle."""
@@ -329,32 +369,7 @@ class Preprocessor:
     def _filter(self, df: pl.DataFrame) -> None:
         """Apply first-pass filtering to main and (optionally) covariate blocks."""
 
-        if "IS_COVARIATE" in df.columns:
-            # treat nulls as False
-            is_cov = pl.coalesce([pl.col("IS_COVARIATE"), pl.lit(False)])
-            df_cov = df.filter(is_cov)
-            df_main = df.filter(~is_cov)
-        else:
-            # If IS_COVARIATE is absent, infer covariate rows from ASSAY matching configured assays.
-            has_assay = "ASSAY" in df.columns
-            assay_lc = set(a.lower() for a in (self.covariate_assays or []))
-            if has_assay and assay_lc:
-                df_cov = df.filter(
-                    pl.col("ASSAY").str.to_lowercase().is_in(list(assay_lc))
-                )
-                df_main = df.filter(
-                    ~pl.col("ASSAY").str.to_lowercase().is_in(list(assay_lc))
-                )
-            else:
-                df_main = df
-                df_cov = None
-
-        # If covariates are enabled but missing, fail early.
-        if self.covariates_enabled and (df_cov is None or len(df_cov) == 0):
-            raise ValueError(
-                "Covariates are enabled in config, but no covariate rows were found "
-                "(check ASSAY/IS_COVARIATE or config.covariates.assays)."
-            )
+        df_main, df_cov = self._split_main_covariate_rows(df)
 
         log_info("  Filtering (main block)")
         if df_cov is not None and len(df_cov):
@@ -1155,30 +1170,13 @@ class Preprocessor:
 
         df = self.intermediate_results.dfs["filtered_final_censored"]
 
-        required_cols = {"INDEX", "FILENAME", "SIGNAL"}
-        missing_cols = required_cols - set(df.columns)
-        if missing_cols:
-            raise ValueError(
-                f"Missing required columns for pivoting: {missing_cols}"
-            )
+        _require_columns(
+            df,
+            {"INDEX", "FILENAME", "SIGNAL"},
+            context="Pivoting",
+        )
 
-        if "IS_COVARIATE" in df.columns:
-            is_cov = pl.coalesce([pl.col("IS_COVARIATE"), pl.lit(False)])
-            df_cov = df.filter(is_cov)
-            df_main = df.filter(~is_cov)
-        else:
-            has_assay = "ASSAY" in df.columns
-            assay_lc = set(a.lower() for a in (self.covariate_assays or []))
-            if has_assay and assay_lc:
-                df_cov = df.filter(
-                    pl.col("ASSAY").str.to_lowercase().is_in(list(assay_lc))
-                )
-                df_main = df.filter(
-                    ~pl.col("ASSAY").str.to_lowercase().is_in(list(assay_lc))
-                )
-            else:
-                df_main = df
-                df_cov = None
+        df_main, df_cov = self._split_main_covariate_rows(df)
 
         def _pivot_block(_df: pl.DataFrame) -> Dict[str, Optional[pl.DataFrame]]:
             method = (self.protein_rollup_method or "sum").lower()

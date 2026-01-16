@@ -3,8 +3,9 @@ from __future__ import annotations
 import warnings
 from typing import Optional
 
+from proteoflux.utils.semantics import ANALYSIS_TYPES_CANONICAL
 
-CANONICAL = {"proteomics", "peptidomics", "phospho"}
+CANONICAL = set(ANALYSIS_TYPES_CANONICAL)
 
 
 def normalize_analysis_type(raw: Optional[str]) -> str:
