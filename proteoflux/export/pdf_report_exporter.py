@@ -114,6 +114,88 @@ def _shorten_labels_smart(names: List[str], max_len: int = 28, min_common: int =
         out.append(short)
     return out
 
+def _plot_ids_table_multi_column(ax, df_ids, *, cond_color_map=None):
+    """
+    Render a compact multi-column table of sample IDs.
+    Used when number of samples is too large for a bar plot.
+    """
+    ax.axis("off")
+
+    n = len(df_ids)
+    max_rows_per_col = 50
+    max_cols = 3
+
+    n_cols = min(max_cols, int(np.ceil(n / max_rows_per_col)))
+    n_rows = int(np.ceil(n / n_cols))
+
+    # Font size heuristic
+    if n_rows <= 50:
+        fontsize = 9
+    elif n_rows <= 75:
+        fontsize = 8
+    elif n_rows <= 100:
+        fontsize = 7
+    elif n_rows <= 150:
+        fontsize = 6
+    else:
+        fontsize = 5
+
+    cols = []
+    for i in range(n_cols):
+        start = i * n_rows
+        end = min((i + 1) * n_rows, n)
+        block = df_ids.iloc[start:end]
+        cols.append(block)
+
+    gs = GridSpecFromSubplotSpec(
+        1,
+        n_cols,
+        subplot_spec=ax.get_subplotspec(),
+        wspace=0.05,
+    )
+
+    for i, block in enumerate(cols):
+        ax_t = ax.figure.add_subplot(gs[0, i])
+        ax_t.axis("off")
+
+        cell_text = block[["Sample", "Condition", "IDs"]].values.tolist()
+        table = ax_t.table(
+            cellText=cell_text,
+            colLabels=["Sample", "Condition", "#IDs"],
+            loc="upper left",
+            cellLoc="left",
+            bbox=[0.0, 0.0, 1, 0.96],
+        )
+
+        table.auto_set_font_size(False)
+        table.set_fontsize(fontsize)
+
+        #table.scale(1.0, 1.55)
+
+        col_widths = {0: 0.72, 1: 0.13, 2: 0.15}
+
+        # Table indices: (row, col) where row=0 is header.
+        for (r, c), cell in table.get_celld().items():
+            #cell.PAD = 0.03
+            #cell.set_height(2.3)
+            txt = cell.get_text()
+
+            if c in col_widths:
+                cell.set_width(col_widths[c])
+
+            # Body alignment
+            cell._loc = "left"
+            txt.set_ha("left")
+            if c != 0:
+                txt.set_ha("center")
+            else:
+                cell._loc = "left"
+
+            # Color only the Condition text (body rows only)
+            if (r > 0) and (c == 1) and cond_color_map is not None:
+                label = txt.get_text()
+                if label in cond_color_map:
+                    txt.set_color(cond_color_map[label])
 
 def CV(values: np.ndarray, axis: int = 1, log_base: float = 2) -> np.ndarray:
     """Compute %CV from log-transformed values.
@@ -361,7 +443,7 @@ class ReportPlotter:
             fig.text(x0 + 0.06, y,
                      f"- Min. Num. Precursors = {filtering['min_precursors']}: {n_r} PSM removed",
                      ha="left", va="top", fontsize=11)
-            y -= line_height
+            y -= 0.8 * line_height
 
         if "min_linear_intensity" in filtering:
             removed_censor = flt_meta.get("censor").get("number_dropped", 0)
@@ -369,7 +451,7 @@ class ReportPlotter:
             fig.text(x0 + 0.06, y,
                      f"- Left Censoring ≤ {filtering['min_linear_intensity']}: {n_r} PSM removed",
                      ha="left", va="top", fontsize=11)
-            y -= line_height
+            y -= 0.8 * line_height
 
         # Quantification method
         quant_txt = quantification_method
@@ -509,29 +591,47 @@ class ReportPlotter:
         # plotting
         fig = plt.figure(figsize=(12,12))
         fig.subplots_adjust(top=0.95, bottom=0.10, left=0.10, right=0.85)
-        outer = GridSpec(2,1,height_ratios=[1,1],hspace=0.5)
+        outer = GridSpec(2,1,height_ratios=[1,1],hspace=0.25)
         ax_bar = fig.add_subplot(outer[0])
         inner = GridSpecFromSubplotSpec(1,2,subplot_spec=outer[1],wspace=0.3)
         ax_rm = fig.add_subplot(inner[0])
         ax_cv = fig.add_subplot(inner[1])
 
-        # barplot
-        sample_colors = [color_map.get(c, color_map['Total']) for c in self.adata.obs['CONDITION']]
-        ax_bar.grid(axis='y', which='both', visible=True)
-        ax_bar.bar(counts.index, counts.values, color=sample_colors)
-        ax_bar.set_xticks(range(len(counts.index)))
+        # barplot or table (keep the same space on page)
+        n_samples = int(len(counts.index))
+        if n_samples <= 30:
+            sample_colors = [color_map.get(c, color_map["Total"]) for c in self.adata.obs["CONDITION"]]
+            ax_bar.grid(axis="y", which="both", visible=True)
+            ax_bar.bar(counts.index, counts.values, color=sample_colors)
+            ax_bar.set_xticks(range(len(counts.index)))
 
-        # short sample names
-        sample_names = list(counts.index)
-        sample_names_short = _shorten_labels_smart(sample_names, max_len=28, min_common=5)
-        ax_bar.set_xticklabels(sample_names_short, rotation=45, ha='right')
+            # short sample names
+            sample_names = list(counts.index)
+            sample_names_short = _shorten_labels_smart(sample_names, max_len=28, min_common=5)
+            ax_bar.set_xticklabels(sample_names_short, rotation=45, ha="right")
 
-        ax_bar.set_ylabel('Number of IDs')
-        ax_bar.set_ylim([0, np.max(counts.values)+850]) #add some padding for annotation
-        ax_bar.set_title('Protein IDs per Sample')
-        for i, val in enumerate(counts.values):
-            ax_bar.text(i, val+50, str(int(val)),
-                        ha='center', va='bottom', fontsize=8, rotation=45)
+            ax_bar.set_ylabel("Number of IDs")
+            ax_bar.set_ylim([0, np.max(counts.values) + 850])  # padding for annotations
+            ax_bar.set_title("Protein IDs per Sample", pad=5)
+            for i, val in enumerate(counts.values):
+                ax_bar.text(
+                    i, val + 50, str(int(val)),
+                    ha="center", va="bottom", fontsize=8, rotation=45
+                )
+        else:
+            # Black/white table: Sample, Condition, #IDs
+            sample_names = list(counts.index)
+            sample_names_short = _shorten_labels_smart(sample_names, max_len=28, min_common=5)
+            cond_series = self.adata.obs.loc[sample_names, "CONDITION"].astype(str).to_numpy()
+            df_ids = pd.DataFrame(
+                {
+                    "Sample": sample_names_short,
+                    "Condition": cond_series,
+                    "IDs": [int(x) for x in counts.values],
+                }
+            )
+            ax_bar.set_title("Protein IDs per Sample")
+            _plot_ids_table_multi_column(ax_bar, df_ids, cond_color_map=color_map)
 
         # violins
         parts_rm = ax_rm.violinplot(data_rmad,positions=range(len(conds)),showmeans=False,showextrema=False,showmedians=True)
@@ -575,7 +675,7 @@ class ReportPlotter:
         # --- 1) pick the matrix (samples × features) and convert to DataFrame (features × samples)
         X = self.adata.X
         M = X.toarray() if hasattr(X, "toarray") else X
-        title = "Hierarchical clustering (processed intensities)"
+        title = "Hierarchical clustering (LC imputation)"
 
         df = pd.DataFrame(M.T, index=self.adata.var_names, columns=self.adata.obs_names)
 
@@ -604,14 +704,20 @@ class ReportPlotter:
         vmax = float(np.nanmax(df.values))
         cmap = "viridis"
 
-        # --- 5) layout: top dendrogram, left dendrogram, heatmap
+        # --- 5) layout: top dendrogram, condition strip, heatmap + dedicated colorbar column
         fig = plt.figure(figsize=(10.5, 9.0))
-        fig.subplots_adjust(left=0.06, right=0.92, bottom=0.15, top=0.94, wspace=0.0, hspace=0.0)
-        gs = GridSpec(2, 2, width_ratios=[1, 4], height_ratios=[1, 4])
+        fig.subplots_adjust(left=0.06, right=0.90, bottom=0.15, top=0.94, wspace=0.0, hspace=0.0)
+        gs = GridSpec(
+            3, 4,
+            width_ratios=[1.0, 4.0, 0.15, 0.12],
+            height_ratios=[1.0, 0.12, 4.0],
+        )
 
         ax_dend_top  = fig.add_subplot(gs[0, 1])
-        ax_dend_left = fig.add_subplot(gs[1, 0])
-        ax_heat      = fig.add_subplot(gs[1, 1])
+        ax_dend_left = fig.add_subplot(gs[2, 0])
+        ax_ann       = fig.add_subplot(gs[1, 1])
+        ax_heat      = fig.add_subplot(gs[2, 1])
+        ax_cbar      = fig.add_subplot(gs[2, 3])
 
         # top dendrogram (samples)
         sch.dendrogram(
@@ -629,9 +735,40 @@ class ReportPlotter:
         for spine in ax_dend_left.spines.values():
             spine.set_visible(False)
 
+        # Condition annotation strip (aligned with clustered sample order).
+        # IMPORTANT: color mapping must match the rest of the report (order-dependent).
+        cond_series = self.adata.obs.loc[list(df.columns), "CONDITION"].astype(str).to_numpy()
+
+        all_conds = (
+            list(self.adata.obs["CONDITION"].cat.categories.astype(str))
+            if hasattr(self.adata.obs["CONDITION"], "cat")
+            else pd.unique(self.adata.obs["CONDITION"].astype(str)).tolist()
+        )
+        # Match _plot_IDs_and_metrics(): anchor 'Total' first, then conditions in stable order.
+        cond_color_map = get_color_map(labels=(["Total"] + list(all_conds)))
+
+        rgb = np.array(
+            [matplotlib.colors.to_rgb(cond_color_map.get(c, cond_color_map["Total"])) for c in cond_series],
+            dtype=float,
+        )[None, :, :]
+
+        ax_ann.imshow(rgb, aspect="auto", interpolation="nearest")
+        ax_ann.set_xticks([])
+        ax_ann.set_yticks([])
+        for spine in ax_ann.spines.values():
+            spine.set_visible(False)
+
         # heatmap (already reordered)
-        im = ax_heat.imshow(df.values, aspect="auto", interpolation="nearest", cmap=cmap, vmin=vmin, vmax=vmax)
-        ax_heat.set_title(title, fontsize=12, pad=25)
+        im = ax_heat.imshow(
+            df.values,
+            aspect="auto",
+            interpolation="nearest",
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+        )
+        # Ensure strip and heatmap share identical horizontal geometry
+        fig.suptitle(title, fontsize=13, y=0.98)
 
         # neat axes: y is features (no tick labels for speed), x shows shortened sample names
         names_short = _shorten_labels_smart(list(df.columns), max_len=28, min_common=5)
@@ -639,9 +776,8 @@ class ReportPlotter:
         ax_heat.set_xticklabels(names_short, rotation=45, ha="right", fontsize=8)
         ax_heat.set_yticks([])
 
-        # colorbar
-        cbar = fig.colorbar(im, ax=[ax_heat, ax_dend_top], fraction=0.046, shrink=0.5, pad=0.02)
-        cbar.ax.set_ylabel("Value", rotation=90)
+        fig.colorbar(im, cax=ax_cbar)
+        ax_cbar.set_ylabel("Log Intensity")
 
         self.pdf.savefig(fig)
         plt.close(fig)
