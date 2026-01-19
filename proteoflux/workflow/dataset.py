@@ -33,43 +33,25 @@ class Dataset:
     def __init__(self, **kwargs) -> None:
         """Initialize from a nested config dict (`dataset`, `preprocessing`)."""
 
-        # Dataset-specific config
-        dataset_cfg = kwargs.get("dataset", {})
+        # Dataset-specific config (read once; keep original for injected runs)
+        dataset_cfg = kwargs.get("dataset", {}) or {}
+        self._dataset_cfg_original = deepcopy(dataset_cfg)
+
         self.file_path = dataset_cfg.get("input_file", None)
         self.load_method = dataset_cfg.get("load_method", "polars")
         self.input_layout = dataset_cfg.get("input_layout", "long")
-        self.analysis_type = dataset_cfg.get("analysis_type", "DIA")
         self.analysis_type = normalize_analysis_type(
             dataset_cfg.get("analysis_type", "proteomics")
         )
 
-        dataset_cfg = kwargs.get("dataset", {}) or {}
-
-        self._dataset_cfg_original = deepcopy(dataset_cfg)
         self.inject_runs_cfg: dict = dataset_cfg.get("inject_runs", {}) or {}
 
-        # Accept string OR list for exclude_runs
-        raw_excl = dataset_cfg.get("exclude_runs")
-
-        def _to_set(x):
-            if x is None:
-                return set()
-            if isinstance(x, str):
-                return {x.strip()} if x.strip() else set()
-            try:
-                return {str(v).strip() for v in x if str(v).strip()}
-            except TypeError:
-                # not iterable (e.g. int); fall back to single-item set
-                s = str(x).strip()
-                return {s} if s else set()
-
-        self.exclude_runs = _to_set(raw_excl)
+        self.exclude_runs = self._parse_exclude_runs(dataset_cfg.get("exclude_runs"))
 
         # Harmonizer setup
-        #self.harmonizer = DataHarmonizer(dataset_cfg)
-        dataset_cfg = deepcopy(dataset_cfg) or {}
-        dataset_cfg["analysis_type"] = self.analysis_type
-        self.harmonizer = DataHarmonizer(dataset_cfg)
+        eff_dataset_cfg = deepcopy(dataset_cfg) or {}
+        eff_dataset_cfg["analysis_type"] = self.analysis_type
+        self.harmonizer = DataHarmonizer(eff_dataset_cfg)
 
         # Preprocessing config and setup
         preprocessing_cfg = deepcopy(kwargs.get("preprocessing", {}) or {})
@@ -96,6 +78,32 @@ class Dataset:
 
         # Process
         self._load_and_process()
+
+    @staticmethod
+    def _parse_exclude_runs(x) -> set[str]:
+        """Accept None / str / iterable; return a normalized set of run identifiers."""
+        if x is None:
+            return set()
+        if isinstance(x, str):
+            return {x.strip()} if x.strip() else set()
+        try:
+            return {str(v).strip() for v in x if str(v).strip()}
+        except TypeError:
+            # not iterable (e.g. int); fall back to single-item set
+            s = str(x).strip()
+            return {s} if s else set()
+
+    @property
+    def is_proteomics(self) -> bool:
+        return self.analysis_type == "proteomics"
+
+    @property
+    def is_peptidomics(self) -> bool:
+        return self.analysis_type == "peptidomics"
+
+    @property
+    def is_phospho(self) -> bool:
+        return self.analysis_type == "phospho"
 
     @log_time("Runs Injection")
     def _load_injected_runs(self) -> list[pl.DataFrame]:
@@ -124,6 +132,7 @@ class Dataset:
                 inject_cfg.get("analysis_type", self.analysis_type)
             )
             eff_cfg["annotation_file"] = inject_cfg.get("annotation_file", None)
+            eff_cfg["is_covariate_run"] = bool((inject_cfg or {}).get("is_covariate", False))
 
             # 3) harmonize with its own annot (no cross-merge!)
             inj_harmonizer = DataHarmonizer(eff_cfg)
@@ -206,6 +215,34 @@ class Dataset:
 
         return pl.concat(fixed, how="vertical", rechunk=True)
 
+    def _maybe_concat_injected_runs(self, df_main: pl.DataFrame) -> pl.DataFrame:
+        """Optionally load + harmonize injected runs and concat them onto the primary table."""
+        if not self.inject_runs_cfg:
+            return df_main
+
+        injected_frames = self._load_injected_runs()
+        if not injected_frames:
+            return df_main
+
+        # make sure primary has the same boolean tag columns with False
+        for inject_name in self.inject_runs_cfg.keys():
+            if inject_name not in df_main.columns:
+                df_main = df_main.with_columns(pl.lit(False).alias(inject_name))
+
+        # ensure IS_COVARIATE exists on the primary and is False
+        if "IS_COVARIATE" not in df_main.columns:
+            df_main = df_main.with_columns(pl.lit(False).alias("IS_COVARIATE"))
+        else:
+            df_main = df_main.with_columns(
+                pl.coalesce([pl.col("IS_COVARIATE"), pl.lit(False)]).alias("IS_COVARIATE")
+            )
+
+        # ASSAY dtype guard on primary too (prevents Utf8/Null mismatches)
+        if "ASSAY" in df_main.columns:
+            df_main = df_main.with_columns(pl.col("ASSAY").cast(pl.Utf8))
+
+        return self._concat_relaxed([df_main] + injected_frames)
+
     def _load_and_process(self):
         """Load raw data, harmonize, inject runs, exclude runs, preprocess, convert."""
 
@@ -216,38 +253,9 @@ class Dataset:
         self.rawinput = self.harmonizer.harmonize(self.rawinput)
 
         # Inject runs (if any)
-        if self.inject_runs_cfg:
-            injected_frames = self._load_injected_runs()
-            if injected_frames:
-                # make sure primary has the same boolean tag columns with False
-                for inject_name in self.inject_runs_cfg.keys():
-                    if inject_name not in self.rawinput.columns:
-                        self.rawinput = self.rawinput.with_columns(
-                            pl.lit(False).alias(inject_name)
-                        )
+        self.rawinput = self._maybe_concat_injected_runs(self.rawinput)
 
-                # ensure IS_COVARIATE exists on the primary and is False
-                if "IS_COVARIATE" not in self.rawinput.columns:
-                    self.rawinput = self.rawinput.with_columns(
-                        pl.lit(False).alias("IS_COVARIATE")
-                    )
-                else:
-                    self.rawinput = self.rawinput.with_columns(
-                        pl.coalesce(
-                            [pl.col("IS_COVARIATE"), pl.lit(False)]
-                        ).alias("IS_COVARIATE")
-                    )
-
-                # ASSAY dtype guard on primary too (prevents Utf8/Null mismatches)
-                if "ASSAY" in self.rawinput.columns:
-                    self.rawinput = self.rawinput.with_columns(
-                        pl.col("ASSAY").cast(pl.Utf8)
-                    )
-                self.rawinput = self._concat_relaxed(
-                    [self.rawinput] + injected_frames
-                )
-
-        # Exclude files if any
+        # Exclude files (if any)
         self.rawinput = self._apply_exclude_runs(self.rawinput)
 
         # Apply preprocessing
@@ -423,27 +431,17 @@ class Dataset:
         sample_names = [col for col in processed_mat.columns if col != "INDEX"]
         obs = condition_df.loc[sample_names]
 
-        # Final AnnData
-        self.adata = ad.AnnData(
-            X=X.T,
-            obs=obs,
-            var=protein_meta_df,
+        self.adata = ad.AnnData(X=X.T, obs=obs, var=protein_meta_df)
+        self._attach_layers_main(
+            raw=raw,
+            lognorm=lognorm,
+            normalized=normalized,
+            qval=qval,
+            pep=pep,
+            locprob=locprob,
+            sc=sc,
+            ibaq=ibaq,
         )
-
-        # Attach protein-level layers
-        self.adata.layers["raw"] = raw.T
-        self.adata.layers["lognorm"] = lognorm.T
-        self.adata.layers["normalized"] = normalized.T
-        if qval is not None:
-            self.adata.layers["qvalue"] = qval.T
-        if pep is not None:
-            self.adata.layers["pep"] = pep.T
-        if locprob is not None:
-            self.adata.layers["locprob"] = locprob.T
-        if sc is not None:
-            self.adata.layers["spectral_counts"] = sc.T
-        if ibaq is not None:
-            self.adata.layers["ibaq"] = ibaq.T
 
         # Covariate (centered, imputed) - only if present
         if centered_cov_mat is not None:
@@ -474,31 +472,20 @@ class Dataset:
             sc_cov_np, _ = _to_np(sc_cov_mat)
             ibaq_cov_np, _ = _to_np(ibaq_cov_mat)
 
-            self.adata.layers["raw_covariate"] = filtered_cov_np.T
-            self.adata.layers["lognorm_covariate"] = lognorm_cov_np.T
-            self.adata.layers["normalized_covariate"] = normalized_cov_np.T
-            self.adata.layers["processed_covariate"] = processed_cov_np.T
-            self.adata.layers["centered_covariate"] = centered_cov_np.T
-            self.adata.layers["qval_covariate"] = qval_cov_np.T
-            self.adata.layers["pep_covariate"] = pep_cov_np.T
-            self.adata.layers["sc_covariate"] = sc_cov_np.T
-            self.adata.layers["ibaq_covariate"] = ibaq_cov_np.T
+            self._attach_layers_covariate(
+                raw=filtered_cov_np,
+                lognorm=lognorm_cov_np,
+                normalized=normalized_cov_np,
+                processed=processed_cov_np,
+                centered=centered_cov_np,
+                qval=qval_cov_np,
+                pep=pep_cov_np,
+                sc=sc_cov_np,
+                ibaq=ibaq_cov_np,
+            )
 
         # Preprocessing summary in .uns
-        self.adata.uns["preprocessing"] = {
-            "input_layout": self.input_layout,
-            "analysis_type": self.analysis_type,
-            "filtering": {
-                "cont": self.preprocessed_data.meta_cont,
-                "qvalue": self.preprocessed_data.meta_qvalue,
-                "pep": self.preprocessed_data.meta_pep,
-                "prec": self.preprocessed_data.meta_prec,
-                "censor": self.preprocessed_data.meta_censor,
-            },
-            "quantification": self.preprocessed_data.meta_quant,
-            "normalization": self.preprocessor.normalization,
-            "imputation": self.preprocessor.imputation,
-        }
+        self._attach_uns_preprocessing()
 
         # Distribution diagnostics from IntermediateResults
         dist_arrays = getattr(self.preprocessor.intermediate_results, "arrays", {})
@@ -538,47 +525,8 @@ class Dataset:
             self.adata.uns["preprocessing"]["distributions"]["missed_cleavages_per_sample"] = payload
 
         # Drill-down trend tables
-        # Proteomics: peptide trends
         sample_names = [c for c in processed_mat.columns if c != "INDEX"]
-
-        proteomics_mode = self.analysis_type == "proteomics"
-        precursor_mode  = self.analysis_type in {"peptidomics", "phospho"}
-
-        if proteomics_mode:
-            use_cols_w = ["PEPTIDE_ID"] + [c for c in sample_names if c in pep_wide_mat.columns]
-            use_cols_c = ["PEPTIDE_ID"] + [c for c in sample_names if c in pep_cent_mat.columns]
-
-            pep_wide_numeric = pep_wide_mat.select(use_cols_w)
-            pep_cent_numeric = pep_cent_mat.select(use_cols_c)
-
-            pep_raw, pep_idx = polars_matrix_to_numpy(pep_wide_numeric, index_col="PEPTIDE_ID")
-            pep_cent, pep_idx2 = polars_matrix_to_numpy(pep_cent_numeric, index_col="PEPTIDE_ID")
-            assert list(pep_idx) == list(pep_idx2)
-
-            rowmeta = (
-                pep_wide_mat.select(["PEPTIDE_ID", "INDEX", "PEPTIDE_SEQ"])
-                .unique()
-                .to_pandas()
-                .set_index("PEPTIDE_ID")
-                .loc[pep_idx]
-            )
-            pep_protein_index = rowmeta["INDEX"].astype(str).tolist()
-            peptide_seq = rowmeta["PEPTIDE_SEQ"].astype(str).tolist()
-
-            self.adata.uns["peptides"] = {
-                "rows": [str(x) for x in pep_idx],
-                "protein_index": pep_protein_index,
-                "peptide_seq": peptide_seq,
-                "cols": [c for c in sample_names if c in pep_wide_mat.columns],
-                "raw": np.asarray(pep_raw, dtype=np.float32),
-                "centered": np.asarray(pep_cent, dtype=np.float32),
-            }
-
-        elif precursor_mode:
-            # do not export peptide tables in peptidomics/phospho
-            pass
-        else:
-            raise ValueError(f"Unsupported analysis_type='{self.analysis_type}' for drill-down trend tables.")
+        self._attach_uns_drilldown_peptides(sample_names, pep_wide_mat, pep_cent_mat)
 
         # --- Precursor trend tables (for peptidomics; optional) ---
         prec_wide_mat = dfs_ir.get("precursors_wide")
@@ -661,6 +609,116 @@ class Dataset:
 
         # check index is fine between proteins and matrix index
         assert list(protein_meta_df.index) == list(protein_index)
+
+    def _attach_layers_main(
+        self,
+        *,
+        raw: np.ndarray,
+        lognorm: np.ndarray,
+        normalized: np.ndarray,
+        qval: np.ndarray | None,
+        pep: np.ndarray | None,
+        locprob: np.ndarray | None,
+        sc: np.ndarray | None,
+        ibaq: np.ndarray | None,
+    ) -> None:
+        self.adata.layers["raw"] = raw.T
+        self.adata.layers["lognorm"] = lognorm.T
+        self.adata.layers["normalized"] = normalized.T
+        if qval is not None:
+            self.adata.layers["qvalue"] = qval.T
+        if pep is not None:
+            self.adata.layers["pep"] = pep.T
+        if locprob is not None:
+            self.adata.layers["locprob"] = locprob.T
+        if sc is not None:
+            self.adata.layers["spectral_counts"] = sc.T
+        if ibaq is not None:
+            self.adata.layers["ibaq"] = ibaq.T
+
+    def _attach_layers_covariate(
+        self,
+        *,
+        raw: np.ndarray,
+        lognorm: np.ndarray,
+        normalized: np.ndarray,
+        processed: np.ndarray,
+        centered: np.ndarray,
+        qval: np.ndarray,
+        pep: np.ndarray,
+        sc: np.ndarray,
+        ibaq: np.ndarray,
+    ) -> None:
+        self.adata.layers["raw_covariate"] = raw.T
+        self.adata.layers["lognorm_covariate"] = lognorm.T
+        self.adata.layers["normalized_covariate"] = normalized.T
+        self.adata.layers["processed_covariate"] = processed.T
+        self.adata.layers["centered_covariate"] = centered.T
+        self.adata.layers["qval_covariate"] = qval.T
+        self.adata.layers["pep_covariate"] = pep.T
+        self.adata.layers["sc_covariate"] = sc.T
+        self.adata.layers["ibaq_covariate"] = ibaq.T
+
+    def _attach_uns_preprocessing(self) -> None:
+        self.adata.uns["preprocessing"] = {
+            "input_layout": self.input_layout,
+            "analysis_type": self.analysis_type,
+            "filtering": {
+                "cont": self.preprocessed_data.meta_cont,
+                "qvalue": self.preprocessed_data.meta_qvalue,
+                "pep": self.preprocessed_data.meta_pep,
+                "prec": self.preprocessed_data.meta_prec,
+                "censor": self.preprocessed_data.meta_censor,
+            },
+            "quantification": self.preprocessed_data.meta_quant,
+            "normalization": self.preprocessor.normalization,
+            "imputation": self.preprocessor.imputation,
+        }
+
+    def _attach_uns_drilldown_peptides(
+        self,
+        sample_names: list[str],
+        pep_wide_mat: pl.DataFrame,
+        pep_cent_mat: pl.DataFrame,
+    ) -> None:
+        if self.is_proteomics:
+            use_cols_w = ["PEPTIDE_ID"] + [c for c in sample_names if c in pep_wide_mat.columns]
+            use_cols_c = ["PEPTIDE_ID"] + [c for c in sample_names if c in pep_cent_mat.columns]
+
+            pep_wide_numeric = pep_wide_mat.select(use_cols_w)
+            pep_cent_numeric = pep_cent_mat.select(use_cols_c)
+
+            pep_raw, pep_idx = polars_matrix_to_numpy(pep_wide_numeric, index_col="PEPTIDE_ID")
+            pep_cent, pep_idx2 = polars_matrix_to_numpy(pep_cent_numeric, index_col="PEPTIDE_ID")
+            assert list(pep_idx) == list(pep_idx2)
+
+            rowmeta = (
+                pep_wide_mat.select(["PEPTIDE_ID", "INDEX", "PEPTIDE_SEQ"])
+                .unique()
+                .to_pandas()
+                .set_index("PEPTIDE_ID")
+                .loc[pep_idx]
+            )
+            pep_protein_index = rowmeta["INDEX"].astype(str).tolist()
+            peptide_seq = rowmeta["PEPTIDE_SEQ"].astype(str).tolist()
+
+            self.adata.uns["peptides"] = {
+                "rows": [str(x) for x in pep_idx],
+                "protein_index": pep_protein_index,
+                "peptide_seq": peptide_seq,
+                "cols": [c for c in sample_names if c in pep_wide_mat.columns],
+                "raw": np.asarray(pep_raw, dtype=np.float32),
+                "centered": np.asarray(pep_cent, dtype=np.float32),
+            }
+            return
+
+        if self.is_peptidomics or self.is_phospho:
+            # do not export peptide tables in peptidomics/phospho
+            return
+
+        raise ValueError(
+            f"Unsupported analysis_type='{self.analysis_type}' for drill-down trend tables."
+        )
 
     def get_anndata(self) -> ad.AnnData:
         """Export the processed dataset as an AnnData object."""

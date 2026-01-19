@@ -106,6 +106,14 @@ class Preprocessor:
                 "Config error: both 'protein_rollup_method' and legacy "
                 "'pivot_signal_method' are set. Use only 'protein_rollup_method'."
             )
+        allowed_protein_rollup_methods = ["sum", "mean", "median", "top3", "directlfq", "min", "max", "count", None]
+        if protein_rollup_method not in allowed_protein_rollup_methods:
+            raise ValueError(
+                "Invalid protein_rollup_method "
+                f"'{protein_rollup_method}'. "
+                f"Allowed values: {allowed_protein_rollup_methods}"
+            )
+
 
         if protein_rollup_method is None:
             protein_rollup_method = pivot_signal_method
@@ -114,7 +122,16 @@ class Preprocessor:
 
         # Explicit peptide rollup (precursor→peptide, peptide tables)
         # Default remains 'sum' to preserve current behavior.
-        self.peptide_rollup_method = (config.get("peptide_rollup_method", "sum") or "sum")
+        self.peptide_rollup_method = (
+            config.get("peptide_rollup_method", "sum") or "sum"
+        ).lower()
+
+        if self.peptide_rollup_method not in {"sum", "mean", "median"}:
+            raise ValueError(
+                "Invalid peptide_rollup_method "
+                f"'{self.peptide_rollup_method}'. "
+                "Allowed values: 'sum', 'mean', 'median'."
+            )
 
         self.directlfq_cores = config.get("directlfq_cores", 4)
         self.directlfq_min_nonan = config.get("directlfq_min_nonan", 1)
@@ -263,8 +280,6 @@ class Preprocessor:
             deduplication on peptide identifiers per run.
           - This should be called on the peptide-level long table (pre-protein rollup).
         """
-        at = self.analysis_type
-
         if "FILENAME" not in df_in.columns:
             raise ValueError(
                 "Cannot compute missed cleavages: missing required column 'FILENAME'."
@@ -283,7 +298,10 @@ class Preprocessor:
         # after melting to long format. If we don't drop those rows, every sample can end up
         # with the same peptide set -> identical missed-cleavage fractions.
         # For DIA-style proteomics/phospho we keep the workflow-like behavior (no SIGNAL gating).
+        at = self.analysis_type
+
         signal_present_filter = pl.lit(True)
+
         if at == "peptidomics":
             signal_present_filter = (
                 pl.col("SIGNAL").is_not_null()
@@ -364,43 +382,40 @@ class Preprocessor:
         )
 
         return tbl
+
+    def _filter_block(self, df: pl.DataFrame, tag: str) -> pl.DataFrame:
+        """Apply filtering steps in the same order as the original implementation."""
+        x = self._filter_contaminants(df)
+        self.intermediate_results.add_df(f"filtered_contaminants/{tag}", x)
+
+        x = self._filter_by_stat(x, "QVALUE")
+        self.intermediate_results.add_df(f"filtered_QVALUE/{tag}", x)
+
+        x = self._filter_by_stat(x, "PEP")
+        self.intermediate_results.add_df(f"filtered_PEP/{tag}", x)
+
+        x = self._filter_by_num_precursors(x)
+        self.intermediate_results.add_df(f"filtered_PREC/{tag}", x)
+
+        x = self._censor_low_val(x)
+        self.intermediate_results.add_df(f"filtered_final_censored/{tag}", x)
+
+        return x
+
     @log_time("Filtering")
     def _filter(self, df: pl.DataFrame) -> None:
         """Apply first-pass filtering to main and (optionally) covariate blocks."""
 
         df_main, df_cov = self._split_main_covariate_rows(df)
 
-        log_info("  Filtering (main block)")
-        if df_cov is not None and len(df_cov):
-            log_info("  Filtering (covariate block)")
-
-        def _filter_block(_df: pl.DataFrame, tag: str) -> pl.DataFrame:
-
-            x = self._filter_contaminants(_df)
-            self.intermediate_results.add_df(f"filtered_contaminants/{tag}", x)
-
-            x = self._filter_by_stat(x, "QVALUE")
-            self.intermediate_results.add_df(f"filtered_QVALUE/{tag}", x)
-
-            x = self._filter_by_stat(x, "PEP")
-            self.intermediate_results.add_df(f"filtered_PEP/{tag}", x)
-
-            x = self._filter_by_num_precursors(x)
-            self.intermediate_results.add_df(f"filtered_PREC/{tag}", x)
-
-            x = self._censor_low_val(x)
-            self.intermediate_results.add_df(f"filtered_final_censored/{tag}", x)
-
-            return x
-
         log_info("Filtering (main)")
         with log_indent():
-            main_f = _filter_block(df_main, "main")
+            main_f = self._filter_block(df_main, "main")
 
         if df_cov is not None and len(df_cov):
             log_info("Filtering (covariate)")
             with log_indent():
-                cov_f = _filter_block(df_cov, "covariate")
+                cov_f = self._filter_block(df_cov, "covariate")
         else:
             cov_f = None
 
@@ -595,13 +610,26 @@ class Preprocessor:
 
         thr = self.min_linear_intensity
 
-        mask = (pl.col("SIGNAL") < thr) & pl.col("SIGNAL").is_not_null()
+        mask_censor = (pl.col("SIGNAL") < thr) & pl.col("SIGNAL").is_not_null()
+        mask_count = mask_censor
+
+        # In peptidomics wide inputs (e.g. FragPipe), missing can be encoded as 0.0 after melt.
+        # Those zeros are “missing”, not “low-but-present”, so exclude them from censor *counts* only.
+        if self.analysis_type == "peptidomics" and "INPUT_LAYOUT" in df.columns:
+            is_wide = (
+                df.select(pl.col("INPUT_LAYOUT").cast(pl.Utf8, strict=False).first())
+                .item()
+                == "wide"
+            )
+            if is_wide:
+                mask_count = mask_count & (pl.col("SIGNAL") != 0)
+
         raw_vals_np = df["SIGNAL"].to_numpy()
-        will_censor = int(df.select(mask.sum()).item())
+        will_censor = int(df.select(mask_count.sum()).item())
         df_kept = len(df) - will_censor
 
         df = df.with_columns(
-            pl.when(mask).then(None).otherwise(pl.col("SIGNAL")).alias("SIGNAL")
+            pl.when(mask_censor).then(None).otherwise(pl.col("SIGNAL")).alias("SIGNAL")
         )
 
         log_info(
@@ -665,32 +693,6 @@ class Preprocessor:
                         pl.col("INDEX").cast(pl.Utf8),
                     ]
                 ).alias("GENE_NAMES")
-            )
-
-        # Detect FragPipe
-        is_fp = ("SOURCE" in df_full.columns) and (
-            "fragpipe"
-            in df_full.select(pl.col("SOURCE").unique())
-            .to_series()
-            .to_list()
-        )
-
-        if is_fp and {"PEPTIDE_LSEQ", "PRECURSORS_EXP"}.issubset(df_full.columns):
-            prec_df = (
-                df_full.select(["INDEX", "PEPTIDE_LSEQ", "PRECURSORS_EXP"])
-                .drop_nulls("PRECURSORS_EXP")
-                .unique()
-                .group_by("INDEX")
-                .agg(
-                    pl.col("PRECURSORS_EXP")
-                    .sum()
-                    .cast(pl.Int64)
-                    .alias("PRECURSORS_EXP")
-                )
-            )
-            base_meta = (
-                base_meta.drop("PRECURSORS_EXP", strict=False)
-                .join(prec_df, on="INDEX", how="left")
             )
 
         # Number of precursors used (unique sequence+charge)
@@ -1170,118 +1172,7 @@ class Preprocessor:
 
         df_main, df_cov = self._split_main_covariate_rows(df)
 
-        def _pivot_block(_df: pl.DataFrame) -> Dict[str, Optional[pl.DataFrame]]:
-            method = (self.protein_rollup_method or "sum").lower()
-            log_info(f"Quantification using {method}")
-            if method == "directlfq":
-                intensity = self._pivot_df_LFQ(
-                    df=_df,
-                    sample_col="FILENAME",
-                    protein_col="INDEX",
-                    values_col="SIGNAL",
-                    ion_col="PEPTIDE_LSEQ",
-                )
-            elif method in {"top3", "top_3"}:
-                intensity = self._pivot_df_top_n(
-                    df=_df,
-                    sample_col="FILENAME",
-                    protein_col="INDEX",
-                    values_col="SIGNAL",
-                    peptide_col="PEPTIDE_LSEQ",
-                    n=3,
-                )
-            else:
-                intensity = self._pivot_df(
-                    df=_df,
-                    sample_col="FILENAME",
-                    protein_col="INDEX",
-                    values_col="SIGNAL",
-                    aggregate_fn=self.protein_rollup_method,
-                )
-
-            qv = pp = sc = prec = lp = None
-            if "QVALUE" in _df.columns:
-                qv = self._pivot_df(
-                    _df, "FILENAME", "INDEX", "QVALUE", "mean"
-                )
-            if "PEP" in _df.columns:
-                pp = self._pivot_df(
-                    _df, "FILENAME", "INDEX", "PEP", "mean"
-                )
-            if self.analysis_type == "phospho":
-                df_prec = (
-                    _df.select(
-                        ["INDEX", "FILENAME", "PEPTIDE_LSEQ", "CHARGE"]
-                    )
-                    .drop_nulls(["PEPTIDE_LSEQ", "CHARGE"])
-                    .with_columns(
-                        pl.concat_str(
-                            [
-                                pl.col("PEPTIDE_LSEQ"),
-                                pl.lit("/"),
-                                pl.col("CHARGE").cast(pl.Utf8),
-                            ]
-                        ).alias("PREC_KEY")
-                    )
-                    .unique(
-                        subset=["INDEX", "FILENAME", "PREC_KEY"],
-                        maintain_order=True,
-                    )
-                    .group_by(["INDEX", "FILENAME"], maintain_order=True)
-                    .agg(pl.len().alias("N_UNIQ_PREC"))
-                )
-                sc = self._pivot_df(
-                    df_prec,
-                    "FILENAME",
-                    "INDEX",
-                    "N_UNIQ_PREC",
-                    "max",
-                ).fill_nan(0)
-            elif "SPECTRAL_COUNTS" in _df.columns:
-                sc = self._pivot_df(
-                    _df,
-                    "FILENAME",
-                    "INDEX",
-                    "SPECTRAL_COUNTS",
-                    "max",
-                )
-
-            if self.analysis_type == "phospho":
-                prec = self._pivot_df(
-                    _df, "FILENAME", "INDEX", "PRECURSORS_EXP", "max"
-                )
-            elif "PRECURSORS_EXP" in _df.columns:
-                prec = self._pivot_df(
-                    _df, "FILENAME", "INDEX", "PRECURSORS_EXP", "mean"
-                )
-            if "LOC_PROB" in _df.columns:
-                lp = self._pivot_df(
-                    _df, "FILENAME", "INDEX", "LOC_PROB", "max"
-                )
-            ibaq = None
-            if "IBAQ" in _df.columns and "INDEX" in _df.columns:
-                _df = _df.with_columns(
-                    pl.col("IBAQ")
-                    .cast(pl.Utf8, strict=False)
-                    .str.split(";")
-                    .list.eval(pl.element().cast(pl.Float64, strict=False))
-                    .list.mean()
-                    .alias("IBAQ")
-                )
-                ibaq = self._pivot_df(
-                    _df, "FILENAME", "INDEX", "IBAQ", "mean"
-                )
-            return {
-                "intensity": intensity,
-                "qv": qv,
-                "pep": pp,
-                "sc": sc,
-                "prec": prec,
-                "lp": lp,
-                "ibaq": ibaq,
-            }
-
-        main_piv = _pivot_block(df_main)
+        main_piv = self._pivot_main_block(df_main)
 
         intensity_pivot = main_piv["intensity"]
         qvalue_pivot = main_piv["qv"]
@@ -1314,43 +1205,17 @@ class Preprocessor:
         locprob_pivot = _align_to_intensity(locprob_pivot)
         ibaq_pivot = _align_to_intensity(ibaq_pivot)
 
-        # Optional phospho localization filtering
-        filtered_intensity = intensity_pivot
-        with log_indent():
-            if self.analysis_type == "phospho" and (locprob_pivot is not None):
-                log_info("Filtering (phospho localization)")
-                cols = [c for c in locprob_pivot.columns if c != "INDEX"]
-                lp_mat = locprob_pivot.select(cols).to_numpy()
-                if self.phospho_loc_mode == "filter_soft":
-                    keep = np.nanmax(lp_mat, axis=1) >= self.phospho_loc_thr
-                else:
-                    keep = np.nanmin(lp_mat, axis=1) >= self.phospho_loc_thr
-                keep = np.asarray(keep, dtype=bool)
-
-                kept_n = int(keep.sum())
-                total_n = int(lp_mat.shape[0])
-                dropped = total_n - kept_n
-                log_info(
-                    f"Phospho localization filter ({self.phospho_loc_mode}, thr={self.phospho_loc_thr}): "
-                    f"kept={kept_n}/{total_n}."
-                )
-
-                def _row_filter(
-                    pvt: Optional[pl.DataFrame],
-                ) -> Optional[pl.DataFrame]:
-                    if pvt is None:
-                        return None
-                    idx = pvt["INDEX"].to_numpy()
-                    idx_keep = idx[keep]
-                    return pvt.filter(pl.col("INDEX").is_in(idx_keep.tolist()))
-
-                filtered_intensity = _row_filter(intensity_pivot)
-                qvalue_pivot = _row_filter(qvalue_pivot)
-                pep_pivot = _row_filter(pep_pivot)
-                prec_pivot = _row_filter(prec_pivot)
-                sc_pivot = _row_filter(sc_pivot)
-                locprob_pivot = _row_filter(locprob_pivot)
-                ibaq_pivot = _row_filter(ibaq_pivot)
+        filtered_intensity, qvalue_pivot, pep_pivot, prec_pivot, sc_pivot, locprob_pivot, ibaq_pivot = (
+            self._apply_phospho_localization_filter(
+                intensity_pivot=intensity_pivot,
+                qvalue_pivot=qvalue_pivot,
+                pep_pivot=pep_pivot,
+                prec_pivot=prec_pivot,
+                sc_pivot=sc_pivot,
+                locprob_pivot=locprob_pivot,
+                ibaq_pivot=ibaq_pivot,
+            )
+        )
 
         ir = self.intermediate_results
         ir.set_columns_and_index(filtered_intensity)
@@ -1388,81 +1253,29 @@ class Preprocessor:
                         f"Covariate alignment key '{key_col}' not available in input."
                     )
 
-                def _pivot_cov_by_key(
-                    frame: Optional[pl.DataFrame], value_col: str, agg: str
-                ) -> Optional[pl.DataFrame]:
-                    if frame is None or value_col not in frame.columns:
-                        return None
-                    long_with_key = frame.join(
-                        cov_key_map, on="INDEX", how="left"
-                    ).drop_nulls([key_col])
-
-                    if value_col == "IBAQ":
-                        long_with_key = long_with_key.with_columns(
-                            pl.col("IBAQ")
-                            .cast(pl.Utf8, strict=False)
-                            .str.split(";")
-                            .list.eval(
-                                pl.element().cast(
-                                    pl.Float64, strict=False
-                                )
-                            )
-                            .list.mean()
-                            .alias("IBAQ")
-                        )
-
-                    if (
-                        value_col == "SIGNAL"
-                        and self.covariate_pivot_method.lower()
-                        == "directlfq"
-                    ):
-                        if "PEPTIDE_LSEQ" not in long_with_key.columns:
-                            raise ValueError(
-                                "Covariate LFQ requested but 'PEPTIDE_LSEQ' is missing in covariate runs. "
-                                "Either provide peptide sequences in the covariate data or set "
-                                "preprocessing.pivot_signal_method='sum'."
-                            )
-                        return self._pivot_df_LFQ(
-                            df=long_with_key.select(
-                                [key_col, "FILENAME", "PEPTIDE_LSEQ", value_col]
-                            ),
-                            sample_col="FILENAME",
-                            protein_col=key_col,
-                            values_col=value_col,
-                            ion_col="PEPTIDE_LSEQ",
-                        )
-                    else:
-                        return self._pivot_df(
-                            df=long_with_key.select(
-                                [key_col, "FILENAME", value_col]
-                            ),
-                            sample_col="FILENAME",
-                            protein_col=key_col,
-                            values_col=value_col,
-                            aggregate_fn=agg,
-                        )
-
                 log_info(
                     f"Covariate Quantification using {self.covariate_pivot_method}"
                 )
-                cov_int_by_key = _pivot_cov_by_key(
-                    df_cov, "SIGNAL", self.covariate_pivot_method
+
+                cov_int_by_key = self._pivot_cov_by_key(df_cov, cov_key_map, key_col, "SIGNAL", self.covariate_pivot_method)
+                cov_qv_by_key = self._pivot_cov_by_key(df_cov, cov_key_map, key_col, "QVALUE", "mean") if "QVALUE" in df_cov.columns else None
+                cov_pep_by_key = self._pivot_cov_by_key(df_cov, cov_key_map, key_col, "PEP", "mean") if "PEP" in df_cov.columns else None
+
+                cov_prec_by_key = (
+                    self._pivot_cov_by_key(df_cov, cov_key_map, key_col, "PRECURSORS_EXP", "mean")
+                    if "PRECURSORS_EXP" in df_cov.columns
+                    else None
                 )
-                cov_qv_by_key = _pivot_cov_by_key(
-                    df_cov, "QVALUE", "mean"
-                ) if "QVALUE" in df_cov.columns else None
-                cov_pep_by_key = _pivot_cov_by_key(
-                    df_cov, "PEP", "mean"
-                ) if "PEP" in df_cov.columns else None
-                cov_prec_by_key = _pivot_cov_by_key(
-                    df_cov, "PRECURSORS_EXP", "max"
+                cov_sc_by_key = (
+                    self._pivot_cov_by_key(df_cov, cov_key_map, key_col, "SPECTRAL_COUNTS", "max")
+                    if "SPECTRAL_COUNTS" in df_cov.columns
+                    else None
                 )
-                cov_sc_by_key = _pivot_cov_by_key(
-                    df_cov, "SPECTRAL_COUNTS", "max"
-                ) if "SPECTRAL_COUNTS" in df_cov.columns else None
-                cov_ibaq_by_key = _pivot_cov_by_key(
-                    df_cov, "IBAQ", "mean"
-                ) if "IBAQ" in df_cov.columns else None
+                cov_ibaq_by_key = (
+                    self._pivot_cov_by_key(df_cov, cov_key_map, key_col, "IBAQ", "mean")
+                    if "IBAQ" in df_cov.columns
+                    else None
+                )
 
                 order_idx = filtered_intensity.select("INDEX")
                 main_with_key = order_idx.join(main_key_map, on="INDEX", how="left")
@@ -1498,12 +1311,194 @@ class Preprocessor:
                 ir.add_df("raw_df_covariate", cov_int)
                 ir.add_df("qvalues_covariate", cov_qv)
                 ir.add_df("pep_covariate", cov_pep)
-                ir.add_df("spectral_counts_covariate", cov_prec)
+                # NOTE: Covariate "spectral counts" can be either a true SPECTRAL_COUNTS column
+                # (vendor-provided) or, in many datasets, effectively equivalent to precursor evidence.
+                # Prefer the explicit SPECTRAL_COUNTS pivot when available; otherwise fall back to
+                # precursor evidence to preserve historical behavior.
+                ir.add_df("spectral_counts_covariate", cov_sc if cov_sc is not None else cov_prec)
                 ir.add_df("ibaq_covariate", cov_ibaq)
                 log_info(
                     f"Built covariate pivot block - broadcast on {key_col}; shape matches main."
                 )
 
+    def _pivot_main_block(self, df: pl.DataFrame) -> Dict[str, Optional[pl.DataFrame]]:
+        """Mechanical extraction of the original per-block pivot logic."""
+        method = (self.protein_rollup_method or "sum").lower()
+        log_info(f"Quantification using {method}")
+        if method == "directlfq":
+            intensity = self._pivot_df_LFQ(
+                df=df,
+                sample_col="FILENAME",
+                protein_col="INDEX",
+                values_col="SIGNAL",
+                ion_col="PEPTIDE_LSEQ",
+            )
+        elif method in {"top3", "top_3"}:
+            intensity = self._pivot_df_top_n(
+                df=df,
+                sample_col="FILENAME",
+                protein_col="INDEX",
+                values_col="SIGNAL",
+                peptide_col="PEPTIDE_LSEQ",
+                n=3,
+            )
+        else:
+            intensity = self._pivot_df(
+                df=df,
+                sample_col="FILENAME",
+                protein_col="INDEX",
+                values_col="SIGNAL",
+                aggregate_fn=method,
+            )
+
+        qv = pp = sc = prec = lp = None
+        if "QVALUE" in df.columns:
+            qv = self._pivot_df(df, "FILENAME", "INDEX", "QVALUE", "mean")
+        if "PEP" in df.columns:
+            pp = self._pivot_df(df, "FILENAME", "INDEX", "PEP", "mean")
+
+        if self.analysis_type == "phospho":
+            df_prec = (
+                df.select(["INDEX", "FILENAME", "PEPTIDE_LSEQ", "CHARGE"])
+                .drop_nulls(["PEPTIDE_LSEQ", "CHARGE"])
+                .with_columns(
+                    pl.concat_str(
+                        [pl.col("PEPTIDE_LSEQ"), pl.lit("/"), pl.col("CHARGE").cast(pl.Utf8)]
+                    ).alias("PREC_KEY")
+                )
+                .unique(subset=["INDEX", "FILENAME", "PREC_KEY"], maintain_order=True)
+                .group_by(["INDEX", "FILENAME"], maintain_order=True)
+                .agg(pl.len().alias("N_UNIQ_PREC"))
+            )
+            sc = self._pivot_df(df_prec, "FILENAME", "INDEX", "N_UNIQ_PREC", "max").fill_nan(0)
+        elif "SPECTRAL_COUNTS" in df.columns:
+            sc = self._pivot_df(df, "FILENAME", "INDEX", "SPECTRAL_COUNTS", "max")
+
+        if self.analysis_type == "phospho":
+            prec = self._pivot_df(df, "FILENAME", "INDEX", "PRECURSORS_EXP", "max")
+        elif "PRECURSORS_EXP" in df.columns:
+            prec = self._pivot_df(df, "FILENAME", "INDEX", "PRECURSORS_EXP", "mean")
+
+        if "LOC_PROB" in df.columns:
+            lp = self._pivot_df(df, "FILENAME", "INDEX", "LOC_PROB", "max")
+
+        ibaq = None
+        if "IBAQ" in df.columns and "INDEX" in df.columns:
+            df2 = df.with_columns(
+                pl.col("IBAQ")
+                .cast(pl.Utf8, strict=False)
+                .str.split(";")
+                .list.eval(pl.element().cast(pl.Float64, strict=False))
+                .list.mean()
+                .alias("IBAQ")
+            )
+            ibaq = self._pivot_df(df2, "FILENAME", "INDEX", "IBAQ", "mean")
+
+        return {
+            "intensity": intensity,
+            "qv": qv,
+            "pep": pp,
+            "sc": sc,
+            "prec": prec,
+            "lp": lp,
+            "ibaq": ibaq,
+        }
+
+    def _apply_phospho_localization_filter(
+        self,
+        *,
+        intensity_pivot: pl.DataFrame,
+        qvalue_pivot: Optional[pl.DataFrame],
+        pep_pivot: Optional[pl.DataFrame],
+        prec_pivot: Optional[pl.DataFrame],
+        sc_pivot: Optional[pl.DataFrame],
+        locprob_pivot: Optional[pl.DataFrame],
+        ibaq_pivot: Optional[pl.DataFrame],
+    ) -> tuple[pl.DataFrame, Optional[pl.DataFrame], Optional[pl.DataFrame], Optional[pl.DataFrame], Optional[pl.DataFrame], Optional[pl.DataFrame], Optional[pl.DataFrame]]:
+        """Mechanical extraction of the original phospho localization filter block."""
+        filtered_intensity = intensity_pivot
+
+        with log_indent():
+            if self.analysis_type == "phospho" and (locprob_pivot is not None):
+                log_info("Filtering (phospho localization)")
+                cols = [c for c in locprob_pivot.columns if c != "INDEX"]
+                lp_mat = locprob_pivot.select(cols).to_numpy()
+                if self.phospho_loc_mode == "filter_soft":
+                    keep = np.nanmax(lp_mat, axis=1) >= self.phospho_loc_thr
+                else:
+                    keep = np.nanmin(lp_mat, axis=1) >= self.phospho_loc_thr
+                keep = np.asarray(keep, dtype=bool)
+
+                kept_n = int(keep.sum())
+                total_n = int(lp_mat.shape[0])
+                log_info(
+                    f"Phospho localization filter ({self.phospho_loc_mode}, thr={self.phospho_loc_thr}): "
+                    f"kept={kept_n}/{total_n}."
+                )
+
+                def _row_filter(pvt: Optional[pl.DataFrame]) -> Optional[pl.DataFrame]:
+                    if pvt is None:
+                        return None
+                    idx = pvt["INDEX"].to_numpy()
+                    idx_keep = idx[keep]
+                    return pvt.filter(pl.col("INDEX").is_in(idx_keep.tolist()))
+
+                filtered_intensity = _row_filter(intensity_pivot)
+                qvalue_pivot = _row_filter(qvalue_pivot)
+                pep_pivot = _row_filter(pep_pivot)
+                prec_pivot = _row_filter(prec_pivot)
+                sc_pivot = _row_filter(sc_pivot)
+                locprob_pivot = _row_filter(locprob_pivot)
+                ibaq_pivot = _row_filter(ibaq_pivot)
+
+        return filtered_intensity, qvalue_pivot, pep_pivot, prec_pivot, sc_pivot, locprob_pivot, ibaq_pivot
+
+    def _pivot_cov_by_key(
+        self,
+        frame: Optional[pl.DataFrame],
+        cov_key_map: pl.DataFrame,
+        key_col: str,
+        value_col: str,
+        agg: str,
+    ) -> Optional[pl.DataFrame]:
+        """Mechanical extraction of the original covariate pivot-by-key helper."""
+        if frame is None or value_col not in frame.columns:
+            return None
+
+        long_with_key = frame.join(cov_key_map, on="INDEX", how="left").drop_nulls([key_col])
+
+        if value_col == "IBAQ":
+            long_with_key = long_with_key.with_columns(
+                pl.col("IBAQ")
+                .cast(pl.Utf8, strict=False)
+                .str.split(";")
+                .list.eval(pl.element().cast(pl.Float64, strict=False))
+                .list.mean()
+                .alias("IBAQ")
+            )
+
+        if value_col == "SIGNAL" and self.covariate_pivot_method.lower() == "directlfq":
+            if "PEPTIDE_LSEQ" not in long_with_key.columns:
+                raise ValueError(
+                    "Covariate LFQ requested but 'PEPTIDE_LSEQ' is missing in covariate runs. "
+                    "Either provide peptide sequences in the covariate data or set "
+                    "preprocessing.protein_rollup_method='sum'."
+                )
+            return self._pivot_df_LFQ(
+                df=long_with_key.select([key_col, "FILENAME", "PEPTIDE_LSEQ", value_col]),
+                sample_col="FILENAME",
+                protein_col=key_col,
+                values_col=value_col,
+                ion_col="PEPTIDE_LSEQ",
+            )
+
+        return self._pivot_df(
+            df=long_with_key.select([key_col, "FILENAME", value_col]),
+            sample_col="FILENAME",
+            protein_col=key_col,
+            values_col=value_col,
+            aggregate_fn=agg,
+        )
     # -------------------------------------------------------------------------
     # Normalization
     # -------------------------------------------------------------------------

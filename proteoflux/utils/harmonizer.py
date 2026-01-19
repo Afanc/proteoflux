@@ -47,6 +47,8 @@ class DataHarmonizer:
         self.input_layout = (column_config.get("input_layout") or "long").strip().lower()
         self.analysis_type = (column_config.get("analysis_type") or "DIA").strip().lower()
 
+        self.is_covariate_run = bool(column_config.get("is_covariate_run", False))
+
         self.signal_key = column_config.get("signal_column")
         self.spectral_counts_key = column_config.get("spectral_counts_column")
 
@@ -191,9 +193,29 @@ class DataHarmonizer:
                     and original in {self.signal_key, self.spectral_counts_key}
                 ):
                     continue
-                log_warning(f"Column '{original}' not found in input data, skipping harmonization for it.")
+
+                if self._should_suppress_missing_warning_ptms(original):
+                    continue
+
+                log_warning(
+                    f"Column '{original}' not found in input data, skipping harmonization for it."
+                )
 
         return df.rename(rename_map) if rename_map else df
+
+    def _should_suppress_missing_warning_ptms(self, original_col: str) -> bool:
+        if not self.is_covariate_run:
+            return False
+
+        # PTM-only Spectronaut columns: expected to be missing in covariate (non-PTM) injections.
+        suppress = {
+            "PEP.PeptidePosition",
+            "EG.ProteinPTMLocations",
+            "EG.PTMProbabilities [Phospho (STY)]",
+            "EG.PTMPositions [Phospho (STY)]",
+            "EG.PTMSites [Phospho (STY)]",
+        }
+        return original_col in suppress
 
     def _standardize_then_inject(self, df: pl.DataFrame) -> pl.DataFrame:
         """Common path: rename → strict filename check → annotation join → coalesce condition/replicate."""
@@ -532,6 +554,48 @@ class DataHarmonizer:
             ptm_map=PTM_MAP,
         )
 
+    @staticmethod
+    def _coerce_scalar_float(v):
+        """Coerce semicolon-delimited or list-like values to a single float (deterministic)."""
+        if v is None:
+            return None
+        # Polars may pass python scalars or lists depending on inference
+        if isinstance(v, list):
+            if not v:
+                return None
+            v = v[0]
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return None
+            # Protein groups can carry multiple values separated by ';'
+            if ";" in s:
+                s = s.split(";", 1)[0].strip()
+            if not s:
+                return None
+            try:
+                return float(s)
+            except ValueError:
+                return None
+        try:
+            return float(v)
+        except Exception:
+            return None
+
+    def _coerce_meta_floats(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Normalize known protein-group float columns that can appear as list/semicolon strings."""
+        cols = [c for c in ("IBAQ", "PROTEIN_WEIGHT") if c in df.columns]
+        if not cols:
+            return df
+        return df.with_columns(
+            [
+                pl.col(c)
+                .map_elements(self._coerce_scalar_float, return_dtype=pl.Float64)
+                .alias(c)
+                for c in cols
+            ]
+        )
+
     def _assert_required_phospho_columns(self, df: pl.DataFrame) -> pl.DataFrame:
         # For phospho indexing we need both:
         # - peptide-local PTM positions (Spectronaut: "EG.PTMPositions [Phospho (STY)]")
@@ -773,6 +837,7 @@ class DataHarmonizer:
             df = self._melt_wide_to_long(df)
 
         df = self._standardize_then_inject(df)
+        df = self._coerce_meta_floats(df)
 
         if self.analysis_type == "phospho":
             df = self._build_phospho_index(df)
