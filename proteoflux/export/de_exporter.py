@@ -278,6 +278,22 @@ class DEExporter:
             blocks.append(observed_df)
             blocks.append(max_observed_col)
 
+        # Observed-per-contrast: for A_vs_B, take max(Observed_A, Observed_B).
+        observed_contrast_df = None
+        if observed_df is not None and self.contrasts:
+            contr_cols: Dict[str, pd.Series] = {}
+            for name in self.contrasts:
+                if "_vs_" not in str(name):
+                    continue
+                a, b = str(name).split("_vs_", 1)
+                col_a = f"Observed_{a}"
+                col_b = f"Observed_{b}"
+                if (col_a not in observed_df.columns) or (col_b not in observed_df.columns):
+                    continue
+                contr_cols[f"Observed_{name}"] = observed_df[[col_a, col_b]].max(axis=1)
+            if contr_cols:
+                observed_contrast_df = pd.DataFrame(contr_cols, index=ad.var_names)
+
         if consistent_df is not None:
             blocks.append(consistent_df)
             blocks.append(max_consistent_col)
@@ -286,6 +302,10 @@ class DEExporter:
             blocks.append(log2_int_cols)
         if raw_int_cols is not None:
             blocks.append(raw_int_cols)
+
+        # Append observed-per-contrast as trailing columns (Summary “tail”).
+        if observed_contrast_df is not None:
+            blocks.append(observed_contrast_df)
 
         # Phospho-specific: add FT_* (if flowthrough exists) & LocScores per sample; Covariate part columns
         # Detect FT by config (dataset.inject_runs.flowthrough) OR presence of covariate layers
@@ -360,6 +380,10 @@ class DEExporter:
             observed = [c for c in cols if c.startswith("Observed_")]
             max_obs = ["MAX_OBSERVED"] if "MAX_OBSERVED" in cols else []
 
+            # Split observed into per-condition vs per-contrast to keep contrast-level observed at the end.
+            observed_contrasts = [c for c in observed if "_vs_" in c]
+            observed_conditions = [c for c in observed if c not in set(observed_contrasts)]
+
             consistent = [c for c in cols if c.startswith("CONSISTENT_")]
             max_cons = ["MAX_CONSISTENT"] if "MAX_CONSISTENT" in cols else []
 
@@ -379,12 +403,13 @@ class DEExporter:
                 + raw_fc + raw_q + raw_p
                 + adj_fc + adj_q + adj_p
                 + cov_part
-                + observed + max_obs
+                + observed_conditions + max_obs
                 + consistent + max_cons
                 + proc_int + raw_int
                 + loc
                 + ft_fc + ft_q + ft_p
                 + ft_proc + ft_raw
+                + observed_contrasts
             )
 
             seen = set()

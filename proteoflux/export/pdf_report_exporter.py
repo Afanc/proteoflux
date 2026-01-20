@@ -33,6 +33,8 @@ from anndata import AnnData
 from typing import Optional, List, Union, Dict
 from proteoflux.utils.utils import logger, log_time
 
+MAX_SAMPLES_BARPLOT = 30
+
 matplotlib.use("Agg")
 matplotlib.rcParams.update({
     "font.family":       "STIXGeneral",
@@ -121,9 +123,14 @@ def _plot_ids_table_multi_column(ax, df_ids, *, cond_color_map=None):
     """
     ax.axis("off")
 
+    # --- for testing
+    #target_n = 100
+    #df_ids = pd.concat([df_ids] * int(np.ceil(target_n / len(df_ids))), ignore_index=True).iloc[:target_n]
+    # ---
+
     n = len(df_ids)
-    max_rows_per_col = 50
-    max_cols = 3
+    max_rows_per_col = 45
+    max_cols = 4
 
     n_cols = min(max_cols, int(np.ceil(n / max_rows_per_col)))
     n_rows = int(np.ceil(n / n_cols))
@@ -164,24 +171,17 @@ def _plot_ids_table_multi_column(ax, df_ids, *, cond_color_map=None):
             colLabels=["Sample", "Condition", "#IDs"],
             loc="upper left",
             cellLoc="left",
-            bbox=[0.0, 0.0, 1, 0.96],
+            bbox=[-0.1, 0.0, 1, 0.96],
+            colWidths=[0.65, 0.20, 0.15],
         )
 
+        table.set_clip_on(False)
         table.auto_set_font_size(False)
         table.set_fontsize(fontsize)
 
-        #table.scale(1.0, 1.55)
-
-        col_widths = {0: 0.72, 1: 0.13, 2: 0.15}
-
         # Table indices: (row, col) where row=0 is header.
         for (r, c), cell in table.get_celld().items():
-            #cell.PAD = 0.03
-            #cell.set_height(2.3)
             txt = cell.get_text()
-
-            if c in col_widths:
-                cell.set_width(col_widths[c])
 
             # Body alignment
             cell._loc = "left"
@@ -277,6 +277,8 @@ class ReportPlotter:
         self.config = config
         self.dataset_config = config.get("dataset", {})
         self.analysis_config = config.get("analysis", {})
+
+        self.analysis_type = self.dataset_config.get("analysis_type", "")
 
         self.export_config = self.analysis_config.get("exports")
         self.adata = adata
@@ -589,17 +591,35 @@ class ReportPlotter:
                 data_rmad.append(res["RMAD"])
 
         # plotting
+        n_samples = int(len(counts.index))
+        use_table = (n_samples > MAX_SAMPLES_BARPLOT)
+
         fig = plt.figure(figsize=(12,12))
-        fig.subplots_adjust(top=0.95, bottom=0.10, left=0.10, right=0.85)
-        outer = GridSpec(2,1,height_ratios=[1,1],hspace=0.25)
+
+        if use_table:
+            # Table needs more width; barplot benefits from extra right margin for legend.
+            fig.subplots_adjust(top=0.95, bottom=0.08, left=0.08, right=0.98)
+            outer_hspace = 0.10
+            # Allocate progressively more vertical space to the (table) top panel as n grows. up to 400 +- readable
+            top_ratio = float(np.clip(3.0 + (n_samples - 250) / 150.0, 2.0, 5.0))
+
+            #top_ratio = 2.0
+            bottom_ratio = 1.0
+        else:
+            fig.subplots_adjust(top=0.95, bottom=0.10, left=0.10, right=0.85)
+            outer_hspace = 0.40
+            top_ratio = 1.0
+            bottom_ratio = 1.0
+
+        outer = GridSpec(2, 1, height_ratios=[top_ratio, bottom_ratio], hspace=outer_hspace)
+
         ax_bar = fig.add_subplot(outer[0])
         inner = GridSpecFromSubplotSpec(1,2,subplot_spec=outer[1],wspace=0.3)
         ax_rm = fig.add_subplot(inner[0])
         ax_cv = fig.add_subplot(inner[1])
 
         # barplot or table (keep the same space on page)
-        n_samples = int(len(counts.index))
-        if n_samples <= 30:
+        if not use_table:
             sample_colors = [color_map.get(c, color_map["Total"]) for c in self.adata.obs["CONDITION"]]
             ax_bar.grid(axis="y", which="both", visible=True)
             ax_bar.bar(counts.index, counts.values, color=sample_colors)
@@ -610,9 +630,15 @@ class ReportPlotter:
             sample_names_short = _shorten_labels_smart(sample_names, max_len=28, min_common=5)
             ax_bar.set_xticklabels(sample_names_short, rotation=45, ha="right")
 
+            id_txt = "Protein IDs per Sample"
+            if self.analysis_type == "peptidomics":
+                id_txt = "Peptide IDs per Sample"
+            elif self.analysis_type == "phosphoproteomics":
+                id_txt = "Phosphosite IDs per Sample"
+
             ax_bar.set_ylabel("Number of IDs")
             ax_bar.set_ylim([0, np.max(counts.values) + 850])  # padding for annotations
-            ax_bar.set_title("Protein IDs per Sample", pad=5)
+            ax_bar.set_title(id_txt, pad=5)
             for i, val in enumerate(counts.values):
                 ax_bar.text(
                     i, val + 50, str(int(val)),
@@ -662,8 +688,9 @@ class ReportPlotter:
                        ha='center', va='bottom', fontsize=8)
 
         # shared legend
-        handles = [mpatches.Patch(color=color_map[c],label=c) for c in conds]
-        ax_bar.legend(handles=handles,title='Condition',bbox_to_anchor=(1.05,1),loc='upper left')
+        if not use_table:
+            handles = [mpatches.Patch(color=color_map[c],label=c) for c in conds]
+            ax_bar.legend(handles=handles,title='Condition',bbox_to_anchor=(1.05,1),loc='upper left')
         self.pdf.savefig(fig)
         plt.close(fig)
 
@@ -675,7 +702,7 @@ class ReportPlotter:
         # --- 1) pick the matrix (samples × features) and convert to DataFrame (features × samples)
         X = self.adata.X
         M = X.toarray() if hasattr(X, "toarray") else X
-        title = "Hierarchical clustering (LC imputation)"
+        title = "Hierarchical clustering (LC imputed)"
 
         df = pd.DataFrame(M.T, index=self.adata.var_names, columns=self.adata.obs_names)
 
