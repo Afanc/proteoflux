@@ -812,8 +812,15 @@ class ReportPlotter:
     def _plot_volcano_plots(self):
         """Volcano plots (one per contrast). eBayes-only; skip in pilot mode."""
 
-        sign_threshold = self.analysis_config.get("sign_threshold", 0.05)
-        volcano_top_annotated = self.analysis_config.get("exports").get("volcano_top_annotated", 10)
+        exports_cfg = self.analysis_config.get("exports", {}) or {}
+        sign_threshold = float(
+            exports_cfg.get(
+                "volcano_sign_threshold",
+                self.analysis_config.get("sign_threshold", 0.05),
+            )
+        )
+        volcano_top_annotated = int(exports_cfg.get("volcano_top_annotated", 10))
+
         for i, name in enumerate(self.contrast_names):
             logfc = self.log2fc[:, i]
             # choose source: eBayes if available, else raw

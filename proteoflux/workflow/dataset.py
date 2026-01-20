@@ -48,19 +48,20 @@ class Dataset:
 
         self.exclude_runs = self._parse_exclude_runs(dataset_cfg.get("exclude_runs"))
 
-        # Harmonizer setup
-        eff_dataset_cfg = deepcopy(dataset_cfg) or {}
-        eff_dataset_cfg["analysis_type"] = self.analysis_type
-        self.harmonizer = DataHarmonizer(eff_dataset_cfg)
-
         # Preprocessing config and setup
         preprocessing_cfg = deepcopy(kwargs.get("preprocessing", {}) or {})
 
-        # Peptide identity normalization: propagate dataset-level settings to
-        # preprocessing unless explicitly overridden.
-        for _k in ("collapse_met_oxidation", "drop_ptms"):
-            if _k not in preprocessing_cfg and _k in dataset_cfg:
-                preprocessing_cfg[_k] = dataset_cfg[_k]
+        # PTMs
+        collapse_met_oxidation = bool(preprocessing_cfg.get("collapse_met_oxidation", True))
+        drop_ptms = bool(preprocessing_cfg.get("drop_ptms", False))
+
+        # Harmonizer setup
+        eff_dataset_cfg = deepcopy(dataset_cfg) or {}
+        eff_dataset_cfg["analysis_type"] = self.analysis_type
+        eff_dataset_cfg["collapse_met_oxidation"] = collapse_met_oxidation
+        eff_dataset_cfg["drop_ptms"] = drop_ptms
+
+        self.harmonizer = DataHarmonizer(eff_dataset_cfg)
 
         # Derive covariate assays from inject_runs.*.is_covariate (no extra config burden)
         preprocessing_cfg["analysis_type"] = self.analysis_type
@@ -139,6 +140,10 @@ class Dataset:
             )
             eff_cfg["annotation_file"] = inject_cfg.get("annotation_file", None)
             eff_cfg["is_covariate_run"] = bool((inject_cfg or {}).get("is_covariate", False))
+            # Keep peptide identity normalization consistent with the main dataset:
+            # canonical source is preprocessing config.
+            eff_cfg["collapse_met_oxidation"] = bool(self.preprocessor.collapse_met_oxidation)
+            eff_cfg["drop_ptms"] = bool(self.preprocessor.drop_ptms)
 
             # 3) harmonize with its own annot (no cross-merge!)
             inj_harmonizer = DataHarmonizer(eff_cfg)
