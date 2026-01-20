@@ -1,11 +1,17 @@
 import re
-from typing import Any, Mapping
+from typing import Any, Mapping, Callable
 
 import polars as pl
 
 # ----------------------------------------------------------------------
-# Python string utilities (used via map_elements in harmonizer)
+# Shared patterns (single source of truth for peptide-index normalization)
 # ----------------------------------------------------------------------
+
+_RE_STRIP_US   = r"^_+|_+$"
+_RE_MET_OXI    = r"M\[[^\]]*Oxidation[^\]]*\]"
+_RE_NTERM_TAG  = r"^n\[[^\]]*\](?=[A-Z])"
+_RE_CTERM_TAG  = r"c\[[^\]]*\]$"
+_RE_BRACKETS   = r"\[[^\]]+\]"
 
 def strip_mods(s: str | None) -> str | None:
     """
@@ -17,13 +23,13 @@ def strip_mods(s: str | None) -> str | None:
     out = s.strip("_")
 
     # 1) n-terminal tags
-    out = re.sub(r"^n\[[^]]*\](?=[A-Z])", "", out)
+    out = re.sub(_RE_NTERM_TAG, "", out)
 
     # 2) C-terminal tags
-    out = re.sub(r"c\[[^]]*\]$", "", out)
+    out = re.sub(_RE_CTERM_TAG, "", out)
 
     # Generic: drop any bracketed annotation and parentheses
-    out = re.sub(r"\[.*?\]", "", out)
+    out = re.sub(_RE_BRACKETS, "", out)
     out = out.replace("(", "").replace(")", "")
 
     return out
@@ -77,48 +83,86 @@ def convert_numeric_ptms(
 
     return re.sub(r"([A-Znc])\[(\-?\d+\.\d+)\]", _replace, s)
 
-
-def normalize_peptido_index_seq(
+def normalize_peptide_index_seq(
     s: str | None,
     *,
-    convert_numeric_ptms_enabled: bool,
-    collapse_all_ptms: bool,
-    ptm_map: Mapping[str, Any],
+    collapse_met_oxidation: bool = True,
+    drop_ptms: bool = False,
+    convert_numeric_ptms_enabled: bool = False,
+    ptm_map: Mapping[str, Any] | None = None,
 ) -> str | None:
-    """
-    Exact copy of DataHarmonizer._normalize_peptido_index_seq logic, parameterized.
+    """Normalize a modified peptide sequence into a canonical *peptide index* sequence.
+
+    Single source of truth for peptide identity normalization across analysis types.
+
+    Rules:
+      - Always strip leading/trailing underscores.
+      - Optionally collapse Met oxidation tokens: ``M[...Oxidation...]`` -> ``M``.
+      - Optionally drop all PTM annotations (brackets and terminal tags).
+      - Optionally convert numeric PTMs (requires ``ptm_map``; used in harmonizer).
     """
     if s is None:
         return None
 
-    seq = convert_numeric_ptms(s, enabled=convert_numeric_ptms_enabled, ptm_map=ptm_map)
-    seq = seq.strip("_").strip()
-    seq = re.sub(r"M\[[^]]*Oxidation[^]]*\]", "M", seq)
+    seq = s
 
-    if collapse_all_ptms:
-        seq = re.sub(r"^n\[[^]]*\](?=[A-Z])", "", seq)
-        seq = re.sub(r"c\[[^]]*\]$", "", seq)
-        seq = re.sub(r"\[[^]]+\]", "", seq)
+    if convert_numeric_ptms_enabled:
+        if ptm_map is None:
+            raise ValueError("ptm_map must be provided when convert_numeric_ptms_enabled=True")
+        seq = convert_numeric_ptms(seq, enabled=True, ptm_map=ptm_map)
+
+    seq = seq.strip("_").strip()
+
+    if collapse_met_oxidation:
+        # Met-only: do not remove '[Oxidation...]' unless it is on M.
+        seq = re.sub(_RE_MET_OXI, "M", seq)
+
+    if drop_ptms:
+        # Mirror harmonizer semantics: remove terminal tags and any remaining bracket tokens.
+        seq = re.sub(_RE_NTERM_TAG, "", seq)
+        seq = re.sub(_RE_CTERM_TAG, "", seq)
+        seq = re.sub(_RE_BRACKETS, "", seq)
 
     return seq
 
+def expr_peptide_index_seq(
+    col: str,
+    *,
+    collapse_met_oxidation: bool = True,
+    drop_ptms: bool = False,
+    convert_numeric_ptms_enabled: bool = False,
+    ptm_map: Mapping[str, Any] | None = None,
+) -> pl.Expr:
+    """Polars expression variant of :func:`normalize_peptide_index_seq`.
 
-# ----------------------------------------------------------------------
-# Polars expression utilities (used in preprocessing)
-# ----------------------------------------------------------------------
-
-def expr_clean_peptide_seq(col: str) -> pl.Expr:
+    Default is a pure-regex expression (fast). If convert_numeric_ptms_enabled=True,
+    falls back to map_elements (slow) and should be used sparingly.
     """
-    Exact copy of the repeated preprocessing expression:
-      - strip Oxidation[...] (case-insensitive)
-      - strip leading/trailing underscores
-    """
-    return (
-        pl.col(col)
-        .str.replace_all(r"(?i)\[Oxidation[^\]]*\]", "")
-        .str.replace_all(r"^_+|_+$", "")
-    )
+    base = pl.col(col).cast(pl.Utf8)
 
+    if convert_numeric_ptms_enabled:
+        if ptm_map is None:
+            raise ValueError("ptm_map must be provided when convert_numeric_ptms_enabled=True")
+        fn: Callable[[str | None], str | None] = lambda s: normalize_peptide_index_seq(
+            s,
+            collapse_met_oxidation=collapse_met_oxidation,
+            drop_ptms=drop_ptms,
+            convert_numeric_ptms_enabled=True,
+            ptm_map=ptm_map,
+        )
+        return base.map_elements(fn, return_dtype=pl.Utf8)
+
+    expr = base.str.replace_all(_RE_STRIP_US, "")
+
+    if collapse_met_oxidation:
+        expr = expr.str.replace_all(_RE_MET_OXI, "M")
+
+    if drop_ptms:
+        expr = expr.str.replace_all(_RE_NTERM_TAG, "")
+        expr = expr.str.replace_all(_RE_CTERM_TAG, "")
+        expr = expr.str.replace_all(_RE_BRACKETS, "")
+
+    return expr
 
 def expr_strip_bracket_mods(col: str) -> pl.Expr:
     """

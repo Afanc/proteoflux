@@ -5,7 +5,7 @@ from typing import Optional, Tuple, TYPE_CHECKING, List
 import numpy as np
 import polars as pl
 
-from proteoflux.utils.sequence_ops import expr_clean_peptide_seq
+from proteoflux.utils.sequence_ops import expr_peptide_index_seq
 
 if TYPE_CHECKING:
     from proteoflux.workflow.preprocessing import Preprocessor
@@ -187,7 +187,12 @@ def build_peptide_tables(
     analysis = self.analysis_type
     precursor_only = analysis in {"peptidomics", "phospho"}
 
-    seq_clean = expr_clean_peptide_seq("PEPTIDE_LSEQ").alias("PEPTIDE_SEQ")
+    #seq_clean = expr_clean_peptide_seq("PEPTIDE_LSEQ").alias("PEPTIDE_SEQ")
+    seq_clean = expr_peptide_index_seq(
+        "PEPTIDE_LSEQ",
+        collapse_met_oxidation=getattr(self, "collapse_met_oxidation", True),
+        drop_ptms=getattr(self, "drop_ptms", False),
+    ).alias("PEPTIDE_SEQ")
 
     # 1) Clean peptide sequence
     pep_wide = None

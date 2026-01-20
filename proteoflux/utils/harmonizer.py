@@ -6,7 +6,8 @@ from proteoflux.utils.ptm_map import PTM_MAP
 from proteoflux.utils.sequence_ops import (
     strip_mods as _strip_mods_impl,
     convert_numeric_ptms as _convert_numeric_ptms_impl,
-    normalize_peptido_index_seq as _normalize_peptido_index_seq_impl,
+    #normalize_peptido_index_seq as _normalize_peptido_index_seq_impl,
+    normalize_peptide_index_seq as _normalize_peptide_index_seq_impl,
 )
 
 
@@ -53,7 +54,8 @@ class DataHarmonizer:
         self.spectral_counts_key = column_config.get("spectral_counts_column")
 
         self.convert_numeric_ptms = bool(column_config.get("convert_numeric_ptms", True))
-        self.collapse_all_ptms = bool(column_config.get("collapse_all_ptms", False))
+        self.collapse_met_oxidation = bool(column_config.get("collapse_met_oxidation", True))
+        self.drop_ptms = bool(column_config.get("drop_ptms", False))
 
         raw_excl = column_config.get("exclude_runs")
         self.exclude_runs = set()
@@ -546,11 +548,12 @@ class DataHarmonizer:
             enabled=self.convert_numeric_ptms,
             ptm_map=PTM_MAP,
         )
-    def _normalize_peptido_index_seq(self, s: str | None) -> str | None:
-        return _normalize_peptido_index_seq_impl(
+    def _normalize_peptide_index_seq(self, s: str | None) -> str | None:
+        return _normalize_peptide_index_seq_impl(
             s,
+            collapse_met_oxidation=self.collapse_met_oxidation,
+            drop_ptms=self.drop_ptms,
             convert_numeric_ptms_enabled=self.convert_numeric_ptms,
-            collapse_all_ptms=self.collapse_all_ptms,
             ptm_map=PTM_MAP,
         )
 
@@ -653,7 +656,7 @@ class DataHarmonizer:
               .map_elements(self._strip_mods, return_dtype=str)
               .alias("STRIPPED_SEQ"),
             pl.col("_seq_candidate")
-              .map_elements(self._normalize_peptido_index_seq, return_dtype=str)
+              .map_elements(self._normalize_peptide_index_seq, return_dtype=str)
               .alias("_INDEX_SEQ"),
         ).drop(["_seq_candidate"], strict=False)
 

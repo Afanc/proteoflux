@@ -38,7 +38,7 @@ from proteoflux.utils.utils import (
     log_indent,
 )
 from proteoflux.utils.sequence_ops import (
-    expr_clean_peptide_seq,
+    expr_peptide_index_seq,
     expr_strip_bracket_mods,
     expr_strip_underscores,
 )
@@ -132,6 +132,10 @@ class Preprocessor:
                 f"'{self.peptide_rollup_method}'. "
                 "Allowed values: 'sum', 'mean', 'median'."
             )
+
+        # Peptide identity normalization 
+        self.collapse_met_oxidation = bool(config.get("collapse_met_oxidation", True))
+        self.drop_ptms = bool(config.get("drop_ptms", False))
 
         self.directlfq_cores = config.get("directlfq_cores", 4)
         self.directlfq_min_nonan = config.get("directlfq_min_nonan", 1)
@@ -972,7 +976,11 @@ class Preprocessor:
                 f"Top{n} quantification requires column '{peptide_col}' in input DataFrame."
             )
 
-        seq_clean = expr_clean_peptide_seq(peptide_col).alias("PEPTIDE_SEQ")
+        seq_clean = expr_peptide_index_seq(
+            peptide_col,
+            collapse_met_oxidation=self.collapse_met_oxidation,
+            drop_ptms=self.drop_ptms,
+        ).alias("PEPTIDE_SEQ")
 
         base = (
             df.select(

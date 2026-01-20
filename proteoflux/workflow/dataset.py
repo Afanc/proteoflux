@@ -56,6 +56,12 @@ class Dataset:
         # Preprocessing config and setup
         preprocessing_cfg = deepcopy(kwargs.get("preprocessing", {}) or {})
 
+        # Peptide identity normalization: propagate dataset-level settings to
+        # preprocessing unless explicitly overridden.
+        for _k in ("collapse_met_oxidation", "drop_ptms"):
+            if _k not in preprocessing_cfg and _k in dataset_cfg:
+                preprocessing_cfg[_k] = dataset_cfg[_k]
+
         # Derive covariate assays from inject_runs.*.is_covariate (no extra config burden)
         preprocessing_cfg["analysis_type"] = self.analysis_type
         cov_assays = [
