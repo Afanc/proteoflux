@@ -1,30 +1,7 @@
 import typer
 from pathlib import Path
-import yaml
-from proteoflux.main import run_pipeline
 from importlib.resources import files
-from proteoflux import templates
-from proteoflux.utils.compact_repr import compact_repr
-import builtins
 from typing import Optional, Dict
-
-# Keep tracebacks readable: do not dump gigantic locals tables.
-# Also cap dataframe display sizes for any explicit prints/logs.
-try:
-    import polars as pl
-    pl.Config.set_tbl_rows(10)
-    pl.Config.set_tbl_cols(20)
-    pl.Config.set_tbl_width_chars(160)
-except Exception:
-    pass
-
-try:
-    import pandas as pd
-    pd.set_option("display.max_rows", 10)
-    pd.set_option("display.max_columns", 20)
-    pd.set_option("display.width", 160)
-except Exception:
-    pass
 
 app = typer.Typer(help="ProteoFlux: Reproducible proteomics workflows")
 
@@ -50,22 +27,14 @@ def _write_template(template_name: str, path: Path) -> None:
 @app.callback(invoke_without_command=True)
 def _root(
     ctx: typer.Context,
-    init: Optional[str] = typer.Option(
-        None,
-        "--init",
-        help="Write a config template and exit. Example: proteoflux --init spectronaut-proteomics",
-    ),
-    path: Path = typer.Option(
-        Path("proteoflux_config.yaml"),
-        "--path",
-        help="Output path for --init (default: proteoflux_config.yaml)",
-    ),
 ):
-    if init is not None:
-        _write_template(init, path)
-        raise typer.Exit(code=0)
     if ctx.invoked_subcommand is None:
-        typer.echo(ctx.get_help())
+        typer.echo(
+            "\nQuick start:\n"
+            "  proteoflux templates\n"
+            "  proteoflux init spectronaut-proteomics --path config.yaml\n"
+            "  proteoflux run --config config.yaml"
+        )
         raise typer.Exit(code=0)
 
 @app.command()
@@ -76,6 +45,18 @@ def init(
     """
     Generate a config scaffold from a named template.
     """
+    if template is None:
+        typer.echo("Missing TEMPLATE.\n")
+        typer.echo("Available templates:")
+        for name in sorted(_TEMPLATES.keys()):
+            typer.echo(f"  - {name}")
+        typer.echo(
+            "\nExample:\n"
+            "  proteoflux init spectronaut-proteomics --path config.yaml\n"
+            "\nThen run:\n"
+            "  proteoflux run --config config.yaml"
+        )
+        raise typer.Exit(code=0)
     _write_template(template, path)
 
 @app.command("templates")
@@ -91,10 +72,19 @@ def run(
     config: Path = typer.Option(None, help="Path to YAML config file"),
 ):
     """
-    Run ProteoFlux pipeline. Either use a full config YAML or specify core arguments manually.
+    Run ProteoFlux pipeline. Use a full config YAML.
     """
-    config_data = yaml.safe_load(config.read_text())
+    if config is None:
+        raise typer.BadParameter(
+            "Missing --config. Example: proteoflux run --config config.yaml"
+        )
 
+    import yaml
+    from proteoflux.utils.cli_setup import configure_cli_display
+    from proteoflux.main import run_pipeline
+
+    configure_cli_display()
+    config_data = yaml.safe_load(config.read_text())
     run_pipeline(config=config_data)
 
 if __name__ == "__main__":
