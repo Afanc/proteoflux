@@ -44,11 +44,10 @@ preprocessing:
   directlfq_cores: 8
   directlfq_min_nonan: 2
   phospho:
-    stochio_correction_level: "protein"
     multisite_collapse_policy: "duplicate"
-    localization_mode: "filter_soft"
-    localization_threshold: 0.0
-    covariate_pivot_method: "sum"
+    localization_filter_mode: "filter_soft"
+    localization_filter_threshold: 0.0
+    covariate_protein_rollup_method: "sum"
   filtering:
     qvalue: 0.01
     pep: 0.003
