@@ -53,13 +53,13 @@ class Dataset:
 
         # PTMs
         collapse_met_oxidation = bool(preprocessing_cfg.get("collapse_met_oxidation", True))
-        drop_ptms = bool(preprocessing_cfg.get("drop_ptms", False))
+        collapse_all_ptms = bool(preprocessing_cfg.get("collapse_all_ptms", False))
 
         # Harmonizer setup
         eff_dataset_cfg = deepcopy(dataset_cfg) or {}
         eff_dataset_cfg["analysis_type"] = self.analysis_type
         eff_dataset_cfg["collapse_met_oxidation"] = collapse_met_oxidation
-        eff_dataset_cfg["drop_ptms"] = drop_ptms
+        eff_dataset_cfg["collapse_all_ptms"] = collapse_all_ptms
 
         self.harmonizer = DataHarmonizer(eff_dataset_cfg)
 
@@ -143,7 +143,7 @@ class Dataset:
             # Keep peptide identity normalization consistent with the main dataset:
             # canonical source is preprocessing config.
             eff_cfg["collapse_met_oxidation"] = bool(self.preprocessor.collapse_met_oxidation)
-            eff_cfg["drop_ptms"] = bool(self.preprocessor.drop_ptms)
+            eff_cfg["collapse_all_ptms"] = bool(self.preprocessor.collapse_all_ptms)
 
             # 3) harmonize with its own annot (no cross-merge!)
             inj_harmonizer = DataHarmonizer(eff_cfg)

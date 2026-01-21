@@ -135,7 +135,7 @@ class Preprocessor:
 
         # Peptide identity normalization 
         self.collapse_met_oxidation = bool(config.get("collapse_met_oxidation", True))
-        self.drop_ptms = bool(config.get("drop_ptms", False))
+        self.collapse_all_ptms = bool(config.get("collapse_all_ptms", False))
 
         self.directlfq_cores = config.get("directlfq_cores", 4)
         self.directlfq_min_nonan = config.get("directlfq_min_nonan", 1)
@@ -152,7 +152,7 @@ class Preprocessor:
         phospho_cfg = config.get("phospho") or {}
 
         _mode = (
-            phospho_cfg.get("localization_mode", "filter_soft") or "filter_soft"
+            phospho_cfg.get("localization_filter_mode", "filter_soft") or "filter_soft"
         ).lower()
         if _mode not in {"filter_soft", "filter_strict"}:
             raise ValueError(
@@ -160,11 +160,11 @@ class Preprocessor:
             )
         self.phospho_loc_mode = _mode
         self.phospho_loc_thr = float(
-            phospho_cfg.get("localization_threshold", 0.75)
+            phospho_cfg.get("localization_filter_threshold", 0.75)
         )
-        self.covariate_pivot_method = phospho_cfg.get(
-            "covariate_pivot_method", "directlfq"
-        )
+        self.covariate_protein_rollup_method = phospho_cfg.get(
+            "covariate_protein_rollup_method", "directlfq"
+        ).lower()
 
         # Covariates: list of assay labels to extract & center after imputation
         cov_cfg = config.get("covariates") or {}
@@ -173,10 +173,7 @@ class Preprocessor:
         ]
         self.covariates_enabled = bool(cov_cfg.get("enabled", False))
 
-        level = str(
-            phospho_cfg.get("stochio_correction_level", "protein")
-        ).strip().lower()
-        self.cov_align_on = "parent_protein" if level == "protein" else "parent_peptide"
+        self.cov_align_on = "parent_protein"
 
     def _split_main_covariate_rows(self, df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame | None]:
         """
@@ -979,7 +976,7 @@ class Preprocessor:
         seq_clean = expr_peptide_index_seq(
             peptide_col,
             collapse_met_oxidation=self.collapse_met_oxidation,
-            drop_ptms=self.drop_ptms,
+            collapse_all_ptms=self.collapse_all_ptms,
         ).alias("PEPTIDE_SEQ")
 
         base = (
@@ -1262,10 +1259,10 @@ class Preprocessor:
                     )
 
                 log_info(
-                    f"Covariate Quantification using {self.covariate_pivot_method}"
+                    f"Covariate Quantification using {self.covariate_protein_rollup_method}"
                 )
 
-                cov_int_by_key = self._pivot_cov_by_key(df_cov, cov_key_map, key_col, "SIGNAL", self.covariate_pivot_method)
+                cov_int_by_key = self._pivot_cov_by_key(df_cov, cov_key_map, key_col, "SIGNAL", self.covariate_protein_rollup_method)
                 cov_qv_by_key = self._pivot_cov_by_key(df_cov, cov_key_map, key_col, "QVALUE", "mean") if "QVALUE" in df_cov.columns else None
                 cov_pep_by_key = self._pivot_cov_by_key(df_cov, cov_key_map, key_col, "PEP", "mean") if "PEP" in df_cov.columns else None
 
@@ -1485,7 +1482,7 @@ class Preprocessor:
                 .alias("IBAQ")
             )
 
-        if value_col == "SIGNAL" and self.covariate_pivot_method.lower() == "directlfq":
+        if value_col == "SIGNAL" and self.covariate_protein_rollup_method == "directlfq":
             if "PEPTIDE_LSEQ" not in long_with_key.columns:
                 raise ValueError(
                     "Covariate LFQ requested but 'PEPTIDE_LSEQ' is missing in covariate runs. "

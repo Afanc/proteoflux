@@ -29,7 +29,7 @@ dataset:
 preprocessing:
   convert_numeric_ptms: true
   collapse_met_oxidation: true
-  drop_ptms: false
+  collapse_all_ptms: false
   peptide_rollup_method: "sum"
   protein_rollup_method: null
   filtering:

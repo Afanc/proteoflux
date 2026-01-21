@@ -87,7 +87,7 @@ def normalize_peptide_index_seq(
     s: str | None,
     *,
     collapse_met_oxidation: bool = True,
-    drop_ptms: bool = False,
+    collapse_all_ptms: bool = False,
     convert_numeric_ptms_enabled: bool = False,
     ptm_map: Mapping[str, Any] | None = None,
 ) -> str | None:
@@ -117,7 +117,7 @@ def normalize_peptide_index_seq(
         # Met-only: do not remove '[Oxidation...]' unless it is on M.
         seq = re.sub(_RE_MET_OXI, "M", seq)
 
-    if drop_ptms:
+    if collapse_all_ptms:
         # Mirror harmonizer semantics: remove terminal tags and any remaining bracket tokens.
         seq = re.sub(_RE_NTERM_TAG, "", seq)
         seq = re.sub(_RE_CTERM_TAG, "", seq)
@@ -129,7 +129,7 @@ def expr_peptide_index_seq(
     col: str,
     *,
     collapse_met_oxidation: bool = True,
-    drop_ptms: bool = False,
+    collapse_all_ptms: bool = False,
     convert_numeric_ptms_enabled: bool = False,
     ptm_map: Mapping[str, Any] | None = None,
 ) -> pl.Expr:
@@ -146,7 +146,7 @@ def expr_peptide_index_seq(
         fn: Callable[[str | None], str | None] = lambda s: normalize_peptide_index_seq(
             s,
             collapse_met_oxidation=collapse_met_oxidation,
-            drop_ptms=drop_ptms,
+            collapse_all_ptms=collapse_all_ptms,
             convert_numeric_ptms_enabled=True,
             ptm_map=ptm_map,
         )
@@ -157,7 +157,7 @@ def expr_peptide_index_seq(
     if collapse_met_oxidation:
         expr = expr.str.replace_all(_RE_MET_OXI, "M")
 
-    if drop_ptms:
+    if collapse_all_ptms:
         expr = expr.str.replace_all(_RE_NTERM_TAG, "")
         expr = expr.str.replace_all(_RE_CTERM_TAG, "")
         expr = expr.str.replace_all(_RE_BRACKETS, "")

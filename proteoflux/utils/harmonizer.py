@@ -55,7 +55,7 @@ class DataHarmonizer:
 
         self.convert_numeric_ptms = bool(column_config.get("convert_numeric_ptms", True))
         self.collapse_met_oxidation = bool(column_config.get("collapse_met_oxidation", True))
-        self.drop_ptms = bool(column_config.get("drop_ptms", False))
+        self.collapse_all_ptms = bool(column_config.get("collapse_all_ptms", False))
 
         raw_excl = column_config.get("exclude_runs")
         self.exclude_runs = set()
@@ -552,7 +552,7 @@ class DataHarmonizer:
         return _normalize_peptide_index_seq_impl(
             s,
             collapse_met_oxidation=self.collapse_met_oxidation,
-            drop_ptms=self.drop_ptms,
+            collapse_all_ptms=self.collapse_all_ptms,
             convert_numeric_ptms_enabled=self.convert_numeric_ptms,
             ptm_map=PTM_MAP,
         )

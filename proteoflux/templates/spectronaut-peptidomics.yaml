@@ -24,7 +24,7 @@ dataset:
 
 preprocessing:
   collapse_met_oxidation: true
-  drop_ptms: false
+  collapse_all_ptms: false
   protein_rollup_method: null
   peptide_rollup_method: "sum"
   directlfq_cores: 8

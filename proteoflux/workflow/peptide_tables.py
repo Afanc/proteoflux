@@ -191,7 +191,7 @@ def build_peptide_tables(
     seq_clean = expr_peptide_index_seq(
         "PEPTIDE_LSEQ",
         collapse_met_oxidation=getattr(self, "collapse_met_oxidation", True),
-        drop_ptms=getattr(self, "drop_ptms", False),
+        collapse_all_ptms=getattr(self, "collapse_all_ptms", False),
     ).alias("PEPTIDE_SEQ")
 
     # 1) Clean peptide sequence
