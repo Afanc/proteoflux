@@ -656,9 +656,9 @@ class Dataset:
         processed: np.ndarray,
         centered: np.ndarray,
         qval: np.ndarray,
-        pep: np.ndarray,
         sc: np.ndarray,
-        ibaq: np.ndarray,
+        pep: np.ndarray | None,
+        ibaq: np.ndarray | None,
     ) -> None:
         self.adata.layers["raw_covariate"] = raw.T
         self.adata.layers["lognorm_covariate"] = lognorm.T
@@ -666,9 +666,13 @@ class Dataset:
         self.adata.layers["processed_covariate"] = processed.T
         self.adata.layers["centered_covariate"] = centered.T
         self.adata.layers["qval_covariate"] = qval.T
-        self.adata.layers["pep_covariate"] = pep.T
         self.adata.layers["sc_covariate"] = sc.T
-        self.adata.layers["ibaq_covariate"] = ibaq.T
+        if pep is not None:
+            self.adata.layers["pep_covariate"] = pep.T
+        if sc is not None:
+            self.adata.layers["sc_covariate"] = sc.T
+        if ibaq is not None:
+            self.adata.layers["ibaq_covariate"] = ibaq.T
 
     def _attach_uns_preprocessing(self) -> None:
         self.adata.uns["preprocessing"] = {

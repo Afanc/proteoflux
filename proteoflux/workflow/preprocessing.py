@@ -152,11 +152,11 @@ class Preprocessor:
         phospho_cfg = config.get("phospho") or {}
 
         _mode = (
-            phospho_cfg.get("localization_filter_mode", "filter_soft") or "filter_soft"
+            phospho_cfg.get("localization_filter_mode", "soft") or "soft"
         ).lower()
-        if _mode not in {"filter_soft", "filter_strict"}:
+        if _mode not in {"soft", "strict"}:
             raise ValueError(
-                "preprocessing.phospho.localization_mode must be 'filter_soft' or 'filter_strict'"
+                "preprocessing.phospho.localization_mode must be 'soft' or 'strict'"
             )
         self.phospho_loc_mode = _mode
         self.phospho_loc_thr = float(
@@ -1379,10 +1379,15 @@ class Preprocessor:
         elif "SPECTRAL_COUNTS" in df.columns:
             sc = self._pivot_df(df, "FILENAME", "INDEX", "SPECTRAL_COUNTS", "max")
 
-        if self.analysis_type == "phospho":
-            prec = self._pivot_df(df, "FILENAME", "INDEX", "PRECURSORS_EXP", "max")
-        elif "PRECURSORS_EXP" in df.columns:
-            prec = self._pivot_df(df, "FILENAME", "INDEX", "PRECURSORS_EXP", "mean")
+        if "PRECURSORS_EXP" in df.columns:
+            if self.analysis_type == "phospho":
+                prec = self._pivot_df(
+                    df, "FILENAME", "INDEX", "PRECURSORS_EXP", "max"
+                )
+            else:
+                prec = self._pivot_df(
+                    df, "FILENAME", "INDEX", "PRECURSORS_EXP", "mean"
+                )
 
         if "LOC_PROB" in df.columns:
             lp = self._pivot_df(df, "FILENAME", "INDEX", "LOC_PROB", "max")
@@ -1428,7 +1433,7 @@ class Preprocessor:
                 log_info("Filtering (phospho localization)")
                 cols = [c for c in locprob_pivot.columns if c != "INDEX"]
                 lp_mat = locprob_pivot.select(cols).to_numpy()
-                if self.phospho_loc_mode == "filter_soft":
+                if self.phospho_loc_mode == "soft":
                     keep = np.nanmax(lp_mat, axis=1) >= self.phospho_loc_thr
                 else:
                     keep = np.nanmin(lp_mat, axis=1) >= self.phospho_loc_thr

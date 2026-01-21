@@ -12,10 +12,10 @@ dataset:
       annotation_file: null
       is_covariate: True
 
-  index_column: null
   signal_column: "FG.MS2RawQuantity"
-  qvalue_column: "PG.Qvalue"
+  qvalue_column: "EG.Qvalue"
   pep_column: "EG.PEP"
+  index_column: null
 
   filename_column: "R.FileName"
   spectral_counts_column: "PG.RunEvidenceCount"
@@ -23,12 +23,12 @@ dataset:
   replicate_column: "R.Replicate"
 
   charge_column: "FG.Charge"
-  precursors_exp_column: "PG.NrOfPrecursorsIdentified (Experiment-wide)"
-  ibaq_column: "PG.IBAQ"
+  precursors_exp_column: null
   fasta_column: "PG.FastaHeaders"
-  protein_weight: "PG.MolecularWeight"
   protein_descriptions: "PG.ProteinDescriptions"
   gene_names_column: "PG.Genes"
+  protein_weight: null
+  ibaq_column: null
 
   uniprot_column: "PG.ProteinGroups"
   stripped_seq_column: "PEP.StrippedSequence"
@@ -45,12 +45,12 @@ preprocessing:
   directlfq_min_nonan: 2
   phospho:
     multisite_collapse_policy: "duplicate"
-    localization_filter_mode: "filter_soft"
-    localization_filter_threshold: 0.0
+    localization_filter_mode: "soft"
+    localization_filter_threshold: 0.75
     covariate_protein_rollup_method: "sum"
   filtering:
     qvalue: 0.01
-    pep: 0.003
+    pep: 0.10
     min_precursors: 1
     min_linear_intensity: 2
     contaminants_files:
