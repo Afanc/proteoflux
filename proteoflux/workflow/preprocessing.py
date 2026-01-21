@@ -246,6 +246,7 @@ class Preprocessor:
             meta_pep=meta_filtering.get("meta_pep"),
             meta_prec=meta_filtering.get("meta_prec"),
             meta_censor=meta_filtering.get("meta_censor"),
+            meta_loc=meta_filtering.get("meta_loc"),
             meta_quant=ir.metadata.get("quantification"),
             raw_covariate=ir.dfs.get("raw_df_covariate"),
             lognormalized_covariate=ir.dfs.get("postlog_covariate"),
@@ -1441,6 +1442,15 @@ class Preprocessor:
 
                 kept_n = int(keep.sum())
                 total_n = int(lp_mat.shape[0])
+                dropped_dict = {
+                    "mode": self.phospho_loc_mode,
+                    "threshold": self.phospho_loc_thr,
+                    "number_kept": kept_n,
+                    "number_dropped": int(total_n - kept_n),
+                }
+                self.intermediate_results.add_metadata(
+                    "filtering", "meta_loc", dropped_dict
+                )
                 log_info(
                     f"Phospho localization filter ({self.phospho_loc_mode}, thr={self.phospho_loc_thr}): "
                     f"kept={kept_n}/{total_n}."
@@ -1460,6 +1470,18 @@ class Preprocessor:
                 sc_pivot = _row_filter(sc_pivot)
                 locprob_pivot = _row_filter(locprob_pivot)
                 ibaq_pivot = _row_filter(ibaq_pivot)
+            elif self.analysis_type == "phospho":
+                skipped = {
+                    "skipped": True,
+                    "reason": "locprob matrix not available",
+                    "mode": self.phospho_loc_mode,
+                    "threshold": self.phospho_loc_thr,
+                    "number_kept": len(intensity_pivot),
+                    "number_dropped": 0,
+                }
+                self.intermediate_results.add_metadata(
+                    "filtering", "meta_loc", skipped
+                )
 
         return filtered_intensity, qvalue_pivot, pep_pivot, prec_pivot, sc_pivot, locprob_pivot, ibaq_pivot
 

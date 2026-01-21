@@ -447,6 +447,7 @@ class ReportPlotter:
                      ha="left", va="top", fontsize=11)
             y -= 0.8 * line_height
 
+        # Left censoring
         if "min_linear_intensity" in filtering:
             removed_censor = flt_meta.get("censor").get("number_dropped", 0)
             n_r = f"{removed_censor}".replace(",", "'")
@@ -454,6 +455,24 @@ class ReportPlotter:
                      f"- Left Censoring ≤ {filtering['min_linear_intensity']}: {n_r} PSM removed",
                      ha="left", va="top", fontsize=11)
             y -= 0.8 * line_height
+
+        # Phospho localization filter
+        loc_meta = flt_meta.get("loc", {})
+        if loc_meta and not loc_meta.get("skipped"):
+            removed_loc = loc_meta.get("number_dropped", 0)
+            n_r = f"{removed_loc}".replace(",", "'")
+            mode = str(loc_meta.get("mode", "")).replace("filter_", "")
+            thr = loc_meta.get("threshold", "n/a")
+            fig.text(
+                x0 + 0.06,
+                y,
+                f"- Phospho Localization Score ({mode}, thr={thr}): {n_r} sites removed",
+                ha="left",
+                va="top",
+                fontsize=11,
+            )
+            y -= 0.8 * line_height
+
 
         # Quantification method
         quant_txt = quantification_method

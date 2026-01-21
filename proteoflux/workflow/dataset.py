@@ -684,6 +684,7 @@ class Dataset:
                 "pep": self.preprocessed_data.meta_pep,
                 "prec": self.preprocessed_data.meta_prec,
                 "censor": self.preprocessed_data.meta_censor,
+                "loc": self.preprocessed_data.meta_loc,
             },
             "quantification": self.preprocessed_data.meta_quant,
             "normalization": self.preprocessor.normalization,

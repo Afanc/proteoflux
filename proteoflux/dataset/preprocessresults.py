@@ -23,6 +23,7 @@ class PreprocessResults:
     meta_prec: Dict
     meta_censor: Dict
     meta_quant: Dict
+    meta_loc: Dict
     raw_covariate: Optional[pl.DataFrame] = None
     lognormalized_covariate: Optional[pl.DataFrame] = None
     normalized_covariate:   Optional[pl.DataFrame] = None
