@@ -408,11 +408,12 @@ class ReportPlotter:
         y -= line_height
 
         # Contaminants
-        cont_cfg   = filtering.get("contaminants_files", [])
+        cont_cfg   = filtering.get("contaminants_files") or []
         flt_meta = self.adata.uns.get("preprocessing").get("filtering")
         quant_meta = self.adata.uns.get("preprocessing").get("quantification")
         base_names = [os.path.basename(f) for f in cont_cfg]
-        removed_cont = flt_meta.get("cont").get("number_dropped", 0)
+        cont_meta = flt_meta.get("cont") or {}
+        removed_cont = cont_meta.get("number_dropped", 0)
         n_cont = f"{removed_cont}".replace(",", "'")
         fig.text(x0 + 0.06, y,
                  f"- Contaminants ({', '.join(base_names)}): {n_cont} PSM removed",

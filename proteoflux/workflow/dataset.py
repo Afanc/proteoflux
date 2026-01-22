@@ -666,7 +666,6 @@ class Dataset:
         self.adata.layers["processed_covariate"] = processed.T
         self.adata.layers["centered_covariate"] = centered.T
         self.adata.layers["qval_covariate"] = qval.T
-        self.adata.layers["sc_covariate"] = sc.T
         if pep is not None:
             self.adata.layers["pep_covariate"] = pep.T
         if sc is not None:
