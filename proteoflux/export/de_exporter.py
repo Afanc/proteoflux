@@ -294,6 +294,26 @@ class DEExporter:
             if contr_cols:
                 observed_contrast_df = pd.DataFrame(contr_cols, index=ad.var_names)
 
+        # Flowthrough observed-per-contrast (FT)
+        ft_observed_contrast_df = None
+        if is_phospho and ("raw_covariate" in ad.layers) and self.contrasts:
+            raw_ft_layer = ad.layers["raw_covariate"]
+            raw_ft_mat = raw_ft_layer.A if hasattr(raw_ft_layer, "A") else raw_ft_layer
+
+            ft_cols: Dict[str, pd.Series] = {}
+            for name in self.contrasts:
+                if "_vs_" not in str(name):
+                    continue
+                a, b = str(name).split("_vs_", 1)
+                m_a = (conds == a)
+                m_b = (conds == b)
+                n_a = np.sum(~np.isnan(raw_ft_mat[m_a, :]), axis=0).astype(int) if np.any(m_a) else np.zeros(raw_ft_mat.shape[1], dtype=int)
+                n_b = np.sum(~np.isnan(raw_ft_mat[m_b, :]), axis=0).astype(int) if np.any(m_b) else np.zeros(raw_ft_mat.shape[1], dtype=int)
+                ft_cols[f"FT_Observed_{name}"] = pd.Series(np.maximum(n_a, n_b), index=ad.var_names)
+
+            if ft_cols:
+                ft_observed_contrast_df = pd.DataFrame(ft_cols, index=ad.var_names)
+
         if consistent_df is not None:
             blocks.append(consistent_df)
             blocks.append(max_consistent_col)
@@ -350,6 +370,10 @@ class DEExporter:
                     ft_raw = pd.DataFrame(ad.layers["raw_covariate"], index=ad.obs_names, columns=ad.var_names).T.add_prefix("FT_Raw_")
                     blocks.append(ft_raw)
 
+                # Append FT observed-per-contrast as the final Summary columns.
+                if ft_observed_contrast_df is not None:
+                    blocks.append(ft_observed_contrast_df)
+
         idx_name = "PHOSPHOSITE" if is_phospho else "UNIPROT_AC"
         summary_df = pd.concat([b for b in blocks if b is not None], axis=1)
 
@@ -398,6 +422,8 @@ class DEExporter:
             ft_proc = [c for c in cols if c.startswith("FT_processed_log2_")]
             ft_raw  = [c for c in cols if c.startswith("FT_Raw_")]
 
+            ft_observed_contrasts = [c for c in cols if c.startswith("FT_Observed_")]
+
             preferred = (
                 meta
                 + raw_fc + raw_q + raw_p
@@ -410,6 +436,7 @@ class DEExporter:
                 + ft_fc + ft_q + ft_p
                 + ft_proc + ft_raw
                 + observed_contrasts
+                + ft_observed_contrasts
             )
 
             seen = set()
