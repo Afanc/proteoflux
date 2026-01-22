@@ -4,23 +4,26 @@ dataset:
   analysis_type: "peptidomics"
   annotation_file: null
   exclude_runs: null
+
+  peptide_seq_column: "FG.LabeledSequence"
   index_column: null
   signal_column: "FG.MS2RawQuantity"
   qvalue_column: "FG.Qvalue"
   charge_column: "FG.Charge"
   pep_column: "EG.PEP"
+
+  filename_column: "R.FileName"
   condition_column: "R.Condition"
   replicate_column: "R.Replicate"
-  filename_column: "R.FileName"
   spectral_counts_column: null
   precursors_exp_column: null
-  ibaq_column: null
+
   fasta_column: "PG.FastaHeaders"
-  protein_weight: null
   protein_descriptions: "PG.ProteinDescriptions"
   gene_names_column: "PG.Genes"
-  peptide_seq_column: "FG.LabeledSequence"
   uniprot_column: "PG.ProteinGroups"
+  ibaq_column: null
+  protein_weight: null
 
 preprocessing:
   collapse_met_oxidation: true

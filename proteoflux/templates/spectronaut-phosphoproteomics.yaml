@@ -18,19 +18,19 @@ dataset:
   pep_column: "EG.PEP"
 
   filename_column: "R.FileName"
-  spectral_counts_column: null
   condition_column: "R.Condition"
   replicate_column: "R.Replicate"
+  spectral_counts_column: "PEP.RunEvidenceCount"
 
-  charge_column: "FG.Charge"
   precursors_exp_column: null
   ibaq_column: null
-  fasta_column: "PG.FastaHeaders"
   protein_weight: null
+  fasta_column: "PG.FastaHeaders"
   protein_descriptions: "PG.ProteinDescriptions"
   gene_names_column: "PG.Genes"
-
   uniprot_column: "PG.ProteinGroups"
+
+  charge_column: "FG.Charge"
   stripped_seq_column: "PEP.StrippedSequence"
   peptide_seq_column: "EG.ModifiedSequence"
   peptide_start_column: "PEP.PeptidePosition"
