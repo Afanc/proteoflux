@@ -7,10 +7,14 @@ dataset:
 
   inject_runs:
     flowthrough:
-      analysis_type: "peptidomics"
+      indexing_type: "peptidomics"
       input_file: "data/data_phospho_FT.tsv"
       annotation_file: null
       is_covariate: True
+      column_overrides:
+        qvalue_column: "PG.Qvalue"
+        pep_column: "PG.PEP"
+        precursors_exp_column: "PG.NrOfPrecursorsIdentified (Experiment-wide)"
 
   signal_column: "FG.MS2RawQuantity"
   qvalue_column: "EG.Qvalue"

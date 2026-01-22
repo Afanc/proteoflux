@@ -138,8 +138,50 @@ class Dataset:
             eff_cfg["analysis_type"] = normalize_analysis_type(
                 inject_cfg.get("analysis_type", self.analysis_type)
             )
+
+            # Injected runs: analysis_type is used for *indexing strategy* (harmonizer),
+            # not to redefine the main dataset analysis.
+            idx_type = inject_cfg.get("indexing_type", None)
+
+            eff_cfg["analysis_type"] = normalize_analysis_type(idx_type)
+
             eff_cfg["annotation_file"] = inject_cfg.get("annotation_file", None)
             eff_cfg["is_covariate_run"] = bool((inject_cfg or {}).get("is_covariate", False))
+
+
+            # This is the ONLY supported way to map different raw columns for injected runs
+            # while keeping the preprocessing code operating on canonical QVALUE/PEP/PRECURSORS_EXP.
+            col_over = inject_cfg.get("column_overrides") or {}
+            if col_over is not None and not isinstance(col_over, dict):
+                raise ValueError(
+                    f"inject_runs.{inject_name}.column_overrides must be a dict or null, "
+                    f"got {type(col_over).__name__}."
+                )
+            allowed = {
+                "index_column",
+                "signal_column",
+                "qvalue_column",
+                "pep_column",
+                "precursors_exp_column",
+                "spectral_counts_column",
+                "ibaq_column",
+                "fasta_column",
+                "protein_descriptions_column",
+                "gene_names_column",
+                "protein_weight",
+                "peptide_seq_column",
+                "uniprot_column",
+                "charge_column",
+                "peptide_start_column",
+            }
+            unknown = sorted(set(col_over.keys()) - allowed)
+            if unknown:
+                raise ValueError(
+                    f"inject_runs.{inject_name}.column_overrides has unknown keys: {unknown!r}. "
+                    f"Allowed keys: {sorted(allowed)!r}"
+                )
+            eff_cfg.update(col_over)
+
             # Keep peptide identity normalization consistent with the main dataset:
             # canonical source is preprocessing config.
             eff_cfg["collapse_met_oxidation"] = bool(self.preprocessor.collapse_met_oxidation)

@@ -7,10 +7,15 @@ dataset:
 
   inject_runs:
     flowthrough:
-      analysis_type: "peptidomics"
+      indexing_type: "peptidomics"
       input_file: "your_flowthrough.tsv"
       annotation_file: null
       is_covariate: true
+      column_overrides:
+        qvalue_column: "PG.Qvalue"
+        pep_column: "PG.PEP"
+        precursors_exp_column: "PG.NrOfPrecursorsIdentified (Experiment-wide)"
+
 
   index_column: null
   signal_column: "FG.MS2RawQuantity"
