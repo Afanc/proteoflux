@@ -16,8 +16,8 @@ dataset:
   precursors_exp_column: "PG.NrOfPrecursorsIdentified (Experiment-wide)"
   ibaq_column: "PG.IBAQ"
   fasta_column: "PG.FastaHeaders"
-  protein_weight: "PG.MolecularWeight"
-  protein_descriptions: "PG.ProteinDescriptions"
+  protein_weight_column: "PG.MolecularWeight"
+  protein_descriptions_column: "PG.ProteinDescriptions"
   gene_names_column: "PG.Genes"
   peptide_seq_column: "FG.LabeledSequence"
 

@@ -24,7 +24,7 @@ dataset:
   precursors_exp_column: null
   ibaq_column: null
   fasta_column: null
-  protein_weight: null
+  protein_weight_column: null
 
 preprocessing:
   convert_numeric_ptms: true

@@ -29,9 +29,9 @@ dataset:
 
   precursors_exp_column: null
   ibaq_column: null
-  protein_weight: null
+  protein_weight_column: null
   fasta_column: "PG.FastaHeaders"
-  protein_descriptions: "PG.ProteinDescriptions"
+  protein_descriptions_column: "PG.ProteinDescriptions"
   gene_names_column: "PG.Genes"
   uniprot_column: "PG.ProteinGroups"
 

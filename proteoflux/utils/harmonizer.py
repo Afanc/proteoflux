@@ -24,7 +24,7 @@ class DataHarmonizer:
         "filename_column": "FILENAME",
         "spectral_counts_column": "SPECTRAL_COUNTS",
         "fasta_column": "FASTA_HEADERS",
-        "protein_weight": "PROTEIN_WEIGHT",
+        "protein_weight_column": "PROTEIN_WEIGHT",
         "protein_descriptions_column": "PROTEIN_DESCRIPTIONS",
         "gene_names_column": "GENE_NAMES",
         "precursors_exp_column": "PRECURSORS_EXP",
