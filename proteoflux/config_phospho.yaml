@@ -51,7 +51,7 @@ preprocessing:
     multisite_collapse_policy: "duplicate"
     localization_filter_mode: "soft"
     localization_filter_threshold: 0.75
-    covariate_protein_rollup_method: "sum"
+    covariate_protein_rollup_method: "directlfq"
   filtering:
     qvalue: 0.01
     pep: 0.10
