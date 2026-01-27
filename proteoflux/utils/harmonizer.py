@@ -223,38 +223,34 @@ class DataHarmonizer:
         """Common path: rename → strict filename check → annotation join → coalesce condition/replicate."""
         df = self._rename_columns_safely(df)
 
-        # Always enforce canonical CONDITION/REPLICATE (annotation or not).
-        condition_sources = [c for c in ["CONDITION"] if c in df.columns]
-        replicate_sources = [r for r in ["REPLICATE"] if r in df.columns]
+        have_cond = "CONDITION" in df.columns
+        have_rep = "REPLICATE" in df.columns
 
-        if not condition_sources:
-            raise ValueError("Missing condition column: expected 'CONDITION'.")
-        if not replicate_sources:
-            raise ValueError("Missing replicate column: expected 'REPLICATE'.")
+        # If vendor file does not contain CONDITION/REPLICATE (e.g., DIA-NN), we require annotation.
+        if (not have_cond) or (not have_rep):
+            if not self.annotation_file:
+                missing = []
+                if not have_cond:
+                    missing.append("CONDITION")
+                if not have_rep:
+                    missing.append("REPLICATE")
+                raise ValueError(
+                    f"Missing required columns {missing} in input data and no annotation_file provided. "
+                    "Provide dataset.condition_column / dataset.replicate_column, or provide an annotation_file "
+                    "with columns: Condition, Replicate."
+                )
 
-        # Pick a single source deterministically (prefer canonical if present)
-        cond_src = condition_sources[0]
-        rep_src = replicate_sources[0]
-
-        if cond_src != "CONDITION":
-            df = df.with_columns(pl.col(cond_src).alias("CONDITION")).drop(cond_src, strict=False)
-        if rep_src != "REPLICATE":
-            df = df.with_columns(pl.col(rep_src).alias("REPLICATE")).drop(rep_src, strict=False)
-
-        # Strong typing: CONDITION must be string, REPLICATE must be integer.
-        df = df.with_columns(
-            pl.col("CONDITION").cast(pl.Utf8),
-            pl.col("REPLICATE").cast(pl.Int64),
-        )
-
-        # Hard fail on nulls (these break imputation downstream)
-        if df.select(pl.col("CONDITION").is_null().any()).item():
-            raise ValueError("CONDITION contains nulls after standardization. Fix input/annotation; refusing to proceed.")
-        if df.select(pl.col("REPLICATE").is_null().any()).item():
-            raise ValueError("REPLICATE contains nulls after standardization. Fix input/annotation; refusing to proceed.")
-
+        # If no annotation provided, enforce strong types and invariants directly from data.
         if not self.annotation_file:
-            return df  # nothing to inject
+            df = df.with_columns(
+                pl.col("CONDITION").cast(pl.Utf8),
+                pl.col("REPLICATE").cast(pl.Int64, strict=False),
+            )
+            if df.select(pl.col("CONDITION").is_null().any()).item():
+                raise ValueError("CONDITION contains nulls after standardization. Fix input; refusing to proceed.")
+            if df.select(pl.col("REPLICATE").is_null().any()).item():
+                raise ValueError("REPLICATE contains nulls after standardization. Fix input; refusing to proceed.")
+            return df
 
         log_info("Injecting annotation")
         ann = self._load_annotation()
@@ -262,6 +258,23 @@ class DataHarmonizer:
         # Require FILENAME for long join; for wide we will already have created it via melt.
         if "FILENAME" not in df.columns:
             raise ValueError("Cannot inject annotation: 'FILENAME' column not found in data.")
+
+        # Be tolerant about whitespace on the join key
+        df = df.with_columns(pl.col("FILENAME").cast(pl.Utf8).str.strip_chars())
+
+        # Strip common MS file extensions to make join robust (mirror annotation logic)
+        def _strip_ext(s: str | None) -> str | None:
+            if s is None:
+                return None
+            s = s.strip()
+            for ext in (".raw", ".d", ".mzML", ".mzXML", ".wiff"):
+                if s.lower().endswith(ext.lower()):
+                    return s[: -len(ext)]
+            return s
+
+        df = df.with_columns(
+            pl.col("FILENAME").map_elements(_strip_ext, return_dtype=pl.Utf8).alias("FILENAME")
+        )
 
         # Strict filename parity (long)
         self._validate_long_annotation(df, ann)
@@ -289,11 +302,20 @@ class DataHarmonizer:
                 "This means some FILENAME values in the data did not match the annotation (after stripping extensions)."
             )
 
-        # Explicit overwrite from annotation (canonical source of truth when provided)
+
+        # CONDITION/REPLICATE:
+        # - If data already had CONDITION/REPLICATE, annotation remains the canonical source of truth.
+        # - If data lacked them (DIA-NN), this injects them instead of crashing.
         df = df.with_columns(
             pl.col("_ANN_CONDITION").alias("CONDITION"),
             pl.col("_ANN_REPLICATE").alias("REPLICATE"),
         ).drop(["_ANN_CONDITION", "_ANN_REPLICATE"], strict=False)
+
+        # Strong typing: CONDITION must be string, REPLICATE must be integer.
+        df = df.with_columns(
+            pl.col("CONDITION").cast(pl.Utf8),
+            pl.col("REPLICATE").cast(pl.Int64, strict=False),
+        )
 
         # Handling of CONDITION/REPLICATE:
         required = {"CONDITION", "REPLICATE"}

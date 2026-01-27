@@ -1,0 +1,65 @@
+dataset:
+  input_file: "data/ecoli_diann181.tsv"
+  input_layout: "long"
+  analysis_type: "proteomics"
+  annotation_file: "data/annotation_diann.tsv"
+  exclude_runs:
+  index_column: Protein.Group
+  signal_column: Precursor.Quantity
+  qvalue_column: PG.Q.Value
+  pep_column: PEP
+  charge_column: Precursor.Charge
+  condition_column: null
+  replicate_column: null
+  filename_column: Run
+  spectral_counts_column: null
+  precursors_exp_column: null
+  ibaq_column: null
+  fasta_column: Protein.Names
+  protein_weight_column: null
+  protein_descriptions_column: null
+  gene_names_column: Genes
+  peptide_seq_column: Modified.Sequence
+
+preprocessing:
+  protein_rollup_method: "directlfq"
+  peptide_rollup_method: "sum"
+  directlfq_cores: 8
+  directlfq_min_nonan: 1
+  filtering:
+    qvalue: 0.01
+    pep: 0.05
+    min_precursors: 1
+    min_linear_intensity: 2
+    contaminants_files:
+      - "data/Contaminants_2022.fasta"
+  normalization:
+    method:
+      - "log2"
+      - "median_equalization_by_tag"
+    reference_tag:
+      - "HUMAN"
+  imputation:
+    method: "lc_conmed"
+    lc_conmed_lod_k: 10
+    random_state: 42
+
+analysis:
+  only_against: null
+  only_contrasts: null
+  exports:
+    export_plot: true
+    export_table: false
+    table_use_xlsx: true
+    path_plot: "data/proteoflux_report_diann.pdf"
+    path_table: "data/proteoflux_table_diann.xslx"
+    path_h5ad: "data/proteoflux_results_diann.h5ad"
+    umap_n_neighbors: 15
+    volcano_top_annotated: 20
+    volcano_sign_threshold: 0.05
+  title: "Proteoflux Analysis Report"
+  intro_text: |
+    This report summarizes the proteomic analysis pipeline applied to your dataset.
+    We performed filtering to remove low-confidence identifications and contaminants, normalized intensities,
+    imputed missing values, and finally ran Differential Expression analysis using limma.
+  footer_text: "Proteomics Core Facility - Biozentrum - University of Basel"
