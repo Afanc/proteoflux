@@ -13,7 +13,8 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import polars as pl
-import pyarrow.csv as pv_csv
+#import pyarrow.csv as pv_csv
+import pyarrow.parquet as pv_parquet
 import csv
 
 from proteoflux.workflow.preprocessing import Preprocessor
@@ -353,9 +354,17 @@ class Dataset:
 
     @log_time("Data Loading")
     def _load_rawdata(self, file_path: str) -> Union[pl.DataFrame, pd.DataFrame]:
-        """Load raw data from a CSV or TSV using Polars/PyArrow/Pandas backends."""
+        """Load raw data from CSV / TSV / Parquet using Polars or PyArrow backends."""
+        # --- Parquet (fast path, no delimiter logic)
+        if file_path.endswith((".parquet", ".pq")):
+            table = pv_parquet.read_table(file_path)
+            return pl.from_arrow(table)
+
         if not file_path.endswith((".csv", ".tsv")):
-            raise ValueError("Only CSV or TSV files are supported.")
+            raise ValueError(
+                "Unsupported input file format. "
+                "Supported: .csv, .tsv, .parquet"
+            )
 
         delimiter = "\t" if file_path.endswith(".tsv") else ","
 
