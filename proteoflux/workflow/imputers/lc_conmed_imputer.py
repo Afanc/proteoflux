@@ -45,7 +45,7 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
     Optimized version with per-row/per-condition caching.
 
     Missing value rule for cell X[i, j]:
-      • If the same condition has >= in_min_obs (now hardcoded to 1) observed values:
+      • If the same condition has >= in_min_obs observed values:
             center = median of that condition
             sd_pool = pooled SD across all conditions with data
             draw ~ Normal(center, jitter_frac * sd_pool)
@@ -66,13 +66,14 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
         lod_k=None,
         lod_shift=0.20,
         lod_sd_width=0.05,
+        in_min_obs=1,
         random_state=42,
     ):
         self.condition_map = condition_map
         self.sample_index = sample_index
         self.group_column = group_column
 
-        self.in_min_obs = 1
+        self.in_min_obs = in_min_obs
         self.lod_k = lod_k
         self.q_lower = q_lower
         self.q_upper = q_upper
