@@ -309,48 +309,11 @@ class Dataset:
         # Inject runs (if any)
         self.rawinput = self._maybe_concat_injected_runs(self.rawinput)
 
-        # Exclude files (if any)
-        self.rawinput = self._apply_exclude_runs(self.rawinput)
-
         # Apply preprocessing
         self.preprocessed_data = self._apply_preprocessing(self.rawinput)
 
         # Convert to AnnData format
         self._convert_to_anndata()
-
-    def _apply_exclude_runs(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Drop runs (by FILENAME) if requested. Safe if annotation is absent."""
-        if not self.exclude_runs:
-            return df
-        if "FILENAME" not in df.columns:
-            log_info(
-                "Exclude runs: 'FILENAME' not present after harmonization → skip."
-            )
-            return df
-
-        present = set(df.select("FILENAME").to_series().to_list())
-        to_drop = sorted(self.exclude_runs & present)
-        missing = sorted(self.exclude_runs - present)
-
-        if missing:
-            head = ", ".join(missing[:10])
-            tail = " ..." if len(missing) > 10 else ""
-            log_info(
-                f"Exclude runs: {len(missing)} not found in data → ignored: [{head}{tail}]"
-            )
-
-        if not to_drop:
-            log_info("Exclude runs: nothing to drop.")
-            return df
-
-        n_before = df.height
-        df2 = df.filter(~pl.col("FILENAME").is_in(to_drop))
-        n_after = df2.height
-        log_info(
-            f"Exclude runs: dropped {len(to_drop)} run(s), removed {n_before - n_after} row(s)."
-        )
-
-        return df2
 
     @log_time("Data Loading")
     def _load_rawdata(self, file_path: str) -> Union[pl.DataFrame, pd.DataFrame]:

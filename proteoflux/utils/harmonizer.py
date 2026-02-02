@@ -219,6 +219,38 @@ class DataHarmonizer:
         }
         return original_col in suppress
 
+    def _apply_exclude_runs(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Drop excluded runs by FILENAME. Safe no-op if exclude_runs empty or FILENAME missing."""
+        excl = set(getattr(self, "exclude_runs", set()) or set())
+        if not excl:
+            return df
+        if "FILENAME" not in df.columns:
+            log_info(f"Exclude runs: 'FILENAME' not present → skip.")
+            return df
+
+        present = set(df.select("FILENAME").unique().to_series().to_list())
+        to_drop = sorted(excl & present)
+        missing = sorted(excl - present)
+
+        if missing:
+            head = ", ".join(missing[:10])
+            tail = " ..." if len(missing) > 10 else ""
+            log_info(
+                f"Exclude runs: {len(missing)} not found in data → ignored: [{head}{tail}]"
+            )
+
+        if not to_drop:
+            log_info(f"Exclude runs: nothing to drop.")
+            return df
+
+        n_before = df.height
+        df2 = df.filter(~pl.col("FILENAME").is_in(to_drop))
+        n_after = df2.height
+        log_info(
+            f"Exclude runs: dropped {len(to_drop)} run(s), removed {n_before - n_after} row(s)."
+        )
+        return df2
+
     def _standardize_then_inject(self, df: pl.DataFrame) -> pl.DataFrame:
         """Common path: rename → strict filename check → annotation join → coalesce condition/replicate."""
         df = self._rename_columns_safely(df)
@@ -276,6 +308,10 @@ class DataHarmonizer:
             pl.col("FILENAME").map_elements(_strip_ext, return_dtype=pl.Utf8).alias("FILENAME")
         )
 
+        # Exclude runs before strict annotation parity + join.
+        # This makes it legal for the annotation to omit excluded runs, while remaining strict for kept runs.
+        df = self._apply_exclude_runs(df)
+
         # Strict filename parity (long)
         self._validate_long_annotation(df, ann)
 
@@ -288,6 +324,7 @@ class DataHarmonizer:
                 pl.col("Replicate").alias("_ANN_REPLICATE"),
             ]
         )
+
         df = df.join(ann_join, on="FILENAME", how="left")
 
         # Hard fail if any row did not match annotation
