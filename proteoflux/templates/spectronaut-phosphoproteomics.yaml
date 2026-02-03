@@ -70,6 +70,7 @@ preprocessing:
   imputation:
     method: "lc_conmed"
     lc_conmed_lod_k: 10
+    lc_conmed_in_min_obs: 1
     random_state: 42
 
 analysis:
