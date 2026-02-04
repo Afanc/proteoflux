@@ -77,7 +77,7 @@ class DataHarmonizer:
             )
         ann = pl.read_csv(self.annotation_file, separator="\t", ignore_errors=True)
 
-        required = {"Condition", "Replicate"}
+        required = {"Condition"}
         missing_req = sorted(required - set(ann.columns))
 
         # Pick a single join key (first match wins), then rename only that one -> 'FILENAME'
@@ -96,7 +96,7 @@ class DataHarmonizer:
         if missing_req:
             raise ValueError(
                 f"Annotation file {self.annotation_file!r} missing required columns: {missing_req}. "
-                "Provide canonical columns: Condition, Replicate."
+                "Provide canonical columns: Condition (Replicate optional)."
             )
 
         if join_col != "FILENAME":
@@ -121,12 +121,40 @@ class DataHarmonizer:
             pl.col("FILENAME").map_elements(_strip_ext, return_dtype=pl.Utf8).alias("FILENAME")
         )
 
+        # Condition always required
         ann = ann.with_columns(
             pl.col("Condition").cast(pl.Utf8).str.strip_chars(),
-            pl.col("Replicate").cast(pl.Int64, strict=False),
         )
+
+        # Replicate optional: if missing or partially missing, infer deterministic numbering per Condition.
+        if "Replicate" in ann.columns:
+            ann = ann.with_columns(pl.col("Replicate").cast(pl.Int64, strict=False))
+
+            # If replicate has any nulls, fill them by inference (but keep provided integers).
+            if ann.select(pl.col("Replicate").is_null().any()).item():
+                ann = ann.sort(["Condition", "FILENAME"]).with_columns(
+                    pl.when(pl.col("Replicate").is_null())
+                    .then(pl.int_range(1, pl.len() + 1).over("Condition"))
+                    .otherwise(pl.col("Replicate"))
+                    .alias("Replicate")
+                )
+        else:
+            # Entire column absent → infer 1..N per Condition (deterministic: sort by FILENAME)
+            ann = ann.sort(["Condition", "FILENAME"]).with_columns(
+                pl.int_range(1, pl.len() + 1).over("Condition").alias("Replicate")
+            )
+
+        # Final invariant: replicate must be fully defined integers now
         if ann.select(pl.col("Replicate").is_null().any()).item():
-            raise ValueError(f"Annotation file {self.annotation_file!r}: Replicate contains non-integer or null values.")
+            raise ValueError(
+                f"Annotation file {self.annotation_file!r}: Replicate could not be inferred for some rows."
+            )
+        #ann = ann.with_columns(
+        #    pl.col("Condition").cast(pl.Utf8).str.strip_chars(),
+        #    pl.col("Replicate").cast(pl.Int64, strict=False),
+        #)
+        #if ann.select(pl.col("Replicate").is_null().any()).item():
+        #    raise ValueError(f"Annotation file {self.annotation_file!r}: Replicate contains non-integer or null values.")
 
         return ann
 
@@ -157,19 +185,34 @@ class DataHarmonizer:
     def _validate_wide_annotation(self, df: pl.DataFrame, ann: pl.DataFrame) -> None:
         ann_filenames = set(ann.select("FILENAME").unique().to_series().to_list())
         excl = set(getattr(self, "exclude_runs", set()) or set())
-        df_files  = df_files  - excl
+
+        # In wide mode, annotation FILENAME must match the *label* part of
+        # columns like '<LABEL> {signal_key}' (e.g. '001_gm_003_D25 Intensity').
+        if not self.signal_key:
+            raise ValueError(
+                "Wide input with annotation: dataset.signal_column must be set "
+                "(for FragPipe this is typically 'Intensity')."
+            )
+
+        pattern = re.compile(rf"^(.+?)\s+{re.escape(self.signal_key)}$")
+        df_files: set[str] = set()
+        for col in df.columns:
+            m = pattern.match(col)
+            if m:
+                df_files.add(m.group(1).strip())
+
+        if not df_files:
+            raise ValueError(
+                f"Wide input with annotation: no columns match the pattern "
+                f"'<LABEL> {self.signal_key}'. Example columns: {df.columns[:20]}"
+            )
+
+        df_files = df_files - excl
         ann_filenames = ann_filenames - excl
 
-        # Infer candidate intensity columns (unchanged logic)
-        float_types = {pl.Float64, pl.Float32}
-        schema = df.schema
-        float_cols = {c for c, t in schema.items() if t in float_types}
-        meta_float_exclude = {"ReferenceIntensity", "MaxPepProb"}
-        data_channels = float_cols - meta_float_exclude
-
-        missing = sorted([c for c in ann_filenames if c not in df.columns])
-        extra   = sorted([c for c in data_channels if c not in ann_filenames])
-        self._fmt_diff(missing, extra, "channels")
+        missing = sorted(ann_filenames - df_files)
+        extra   = sorted(df_files - ann_filenames)
+        self._fmt_diff(missing, extra, "wide sample labels")
 
     def _rename_columns_safely(self, df: pl.DataFrame) -> pl.DataFrame:
         """
@@ -194,6 +237,10 @@ class DataHarmonizer:
                     and not self.annotation_file
                     and original in {self.signal_key, self.spectral_counts_key}
                 ):
+                    continue
+
+                # In wide layout, signal/evidence are encoded as suffixes in column headers
+                if self.input_layout == "wide" and original in {self.signal_key, self.spectral_counts_key}:
                     continue
 
                 if self._should_suppress_missing_warning_ptms(original):
@@ -269,7 +316,7 @@ class DataHarmonizer:
                 raise ValueError(
                     f"Missing required columns {missing} in input data and no annotation_file provided. "
                     "Provide dataset.condition_column / dataset.replicate_column, or provide an annotation_file "
-                    "with columns: Condition, Replicate."
+                    "with columns: Condition (Replicate optional)."
                 )
 
         # If no annotation provided, enforce strong types and invariants directly from data.
@@ -355,7 +402,7 @@ class DataHarmonizer:
         )
 
         # Handling of CONDITION/REPLICATE:
-        required = {"CONDITION", "REPLICATE"}
+        required = {"CONDITION"}
         missing = required - set(df.columns)
         if missing:
             raise ValueError(
@@ -407,31 +454,43 @@ class DataHarmonizer:
         label_re = re.compile(r"^([A-Za-z]+)_(\d+)$")
 
         parsed: list[tuple[str, int]] = []
+
+        strict_ok = True
         for lab in labels:
             m = label_re.match(lab)
             if not m:
-                raise ValueError(
-                    "Wide input without annotation: cannot parse sample label "
-                    f"'{lab}' as '<CONDITION>_<number>'. "
-                    f"Example labels: {labels[:10]}"
-                )
+                strict_ok = False
+                break
             parsed.append((m.group(1), int(m.group(2))))
 
-        # Renumber replicates per CONDITION: 1..N within each condition (order by original number)
-        by_cond: dict[str, list[tuple[int, int]]] = {}
-        for i, (cond, num) in enumerate(parsed):
-            by_cond.setdefault(cond, []).append((num, i))
+        if not strict_ok:
+            # Pilot fallback: do not try to guess condition/replicate from arbitrary labels.
+            # Just assign a single dummy condition and replicate.
+            log_warning(
+                "Wide input without annotation: extracted sample labels (e.g. "
+                f"'{labels[0]}', from columns like '<LABEL> {self.signal_key}') "
+                "do not match the expected pattern '<CONDITION>_<replicate>'. "
+                "Falling back to pilot mode: CONDITION='NA', REPLICATE=1 for all runs."
+            )
 
-        repls = [0] * len(labels)
-        for pairs in by_cond.values():
-            pairs.sort(key=lambda x: x[0])
-            for new_r, (_, idx) in enumerate(pairs, start=1):
-                repls[idx] = new_r
+            conds = ["NA"] * len(labels)
+            repls = [1] * len(labels)
+        else:
+            # Renumber replicates per CONDITION: 1..N within each condition (order by original number)
+            by_cond: dict[str, list[tuple[int, int]]] = {}
+            for i, (cond, num) in enumerate(parsed):
+                by_cond.setdefault(cond, []).append((num, i))
 
-        if any(r <= 0 for r in repls):
-            raise RuntimeError("Replicate renumbering failed: encountered unset replicate(s).")
+            repls = [0] * len(labels)
+            for pairs in by_cond.values():
+                pairs.sort(key=lambda x: x[0])
+                for new_r, (_, idx) in enumerate(pairs, start=1):
+                    repls[idx] = new_r
 
-        conds = [cond for cond, _ in parsed]
+            if any(r <= 0 for r in repls):
+                raise RuntimeError("Replicate renumbering failed: encountered unset replicate(s).")
+
+            conds = [cond for cond, _ in parsed]
 
         # Build small channel metadata table
         channel_meta = pl.DataFrame(
@@ -569,7 +628,39 @@ class DataHarmonizer:
             # Strict two-way validation before melt
             self._validate_wide_annotation(df, ann)
 
-            id_vars = [c for c in df.columns if c not in filenames]
+            if not self.signal_key:
+                raise ValueError(
+                    "Wide input with annotation: dataset.signal_column must be set "
+                    "(for FragPipe this is typically 'Intensity')."
+                )
+
+            # Annotation filenames are *labels* (e.g. '030_gm_003_D25'), but wide columns
+            # are typically '<LABEL> {signal_key}' (e.g. '030_gm_003_D25 Intensity').
+            # Accept both forms for backwards compatibility.
+            df_cols = set(df.columns)
+            value_vars: list[str] = []
+            missing: list[str] = []
+            for fn in filenames:
+                if fn in df_cols:
+                    value_vars.append(fn)
+                    continue
+                cand = f"{fn} {self.signal_key}"
+                if cand in df_cols:
+                    value_vars.append(cand)
+                    continue
+                missing.append(fn)
+
+            if missing:
+                preview = ", ".join(missing[:10])
+                tail = " ..." if len(missing) > 10 else ""
+                raise ValueError(
+                    "Wide + annotation: some annotation FILENAME entries do not match any wide signal column.\n"
+                    f"Expected either '<FILENAME>' or '<FILENAME> {self.signal_key}'.\n"
+                    f"First missing: {preview}{tail}"
+                )
+
+            id_vars = [c for c in df.columns if c not in value_vars]
+
             if not id_vars:
                 raise ValueError(
                     "No identifier columns left after selecting filenames; "
@@ -578,12 +669,17 @@ class DataHarmonizer:
 
             long_df = df.melt(
                 id_vars=id_vars,
-                value_vars=filenames,
+                value_vars=value_vars,
                 variable_name="FILENAME",
                 value_name="SIGNAL",
             ).with_columns(
                 pl.col("FILENAME").cast(pl.Utf8),
                 pl.col("SIGNAL").cast(pl.Float64, strict=False),
+            ).with_columns(
+                # Convert '<LABEL> {signal_key}' back to '<LABEL>' so it matches annotation FILENAME.
+                pl.col("FILENAME")
+                .str.replace(rf"\s+{re.escape(self.signal_key)}$", "")
+                .alias("FILENAME")
             )
 
             alias_map = {}
@@ -906,7 +1002,7 @@ class DataHarmonizer:
         if (self.analysis_type == "proteomics") and ("INDEX" not in df.columns):
             if "UNIPROT" in df.columns:
                 log_info(
-                    "Proteomics input has no 'INDEX' column after harmonization → "
+                    "Proteomics input has no 'INDEX' column after harmonization -> "
                     "using 'UNIPROT' as 'INDEX'."
                 )
                 df = df.with_columns(
