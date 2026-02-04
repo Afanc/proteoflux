@@ -660,6 +660,13 @@ class Preprocessor:
             "filtered_final_censored"
         ]  # long format, post filter
 
+        if "INDEX" not in df_full.columns:
+            raise ValueError(
+                "Protein metadata extraction requires column 'INDEX'. "
+                "Your input did not produce it during harmonization. "
+                "For wide proteomics inputs, set dataset.index_column or ensure UNIPROT is available for fallback."
+            )
+
         keep_cols = {
             "INDEX",
             "FASTA_HEADERS",

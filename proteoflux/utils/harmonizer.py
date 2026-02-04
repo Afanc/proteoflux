@@ -901,6 +901,23 @@ class DataHarmonizer:
         df = self._standardize_then_inject(df)
         df = self._coerce_meta_floats(df)
 
+        # Proteomics: INDEX may not be explicitly provided (e.g. wide FragPipe tables).
+        # If missing, fall back to UNIPROT as the feature identifier.
+        if (self.analysis_type == "proteomics") and ("INDEX" not in df.columns):
+            if "UNIPROT" in df.columns:
+                log_info(
+                    "Proteomics input has no 'INDEX' column after harmonization → "
+                    "using 'UNIPROT' as 'INDEX'."
+                )
+                df = df.with_columns(
+                    pl.col("UNIPROT").cast(pl.Utf8, strict=False).alias("INDEX")
+                )
+            else:
+                raise ValueError(
+                    "Proteomics input is missing required column 'INDEX' and no 'UNIPROT' column is available "
+                    "to use as a fallback. Provide dataset.index_column (preferred) or dataset.uniprot_column."
+                )
+
         if self.analysis_type == "phospho":
             df = self._build_phospho_index(df)
         elif self.analysis_type == "peptidomics":
