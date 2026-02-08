@@ -45,10 +45,8 @@ preprocessing:
     random_state: 42
 
 analysis:
-  sign_threshold: 0.05
-  clustering_max: 8000
   only_against: null
-  only_contrasts: null
+  only_contrasts:
   exports:
     export_plot: true
     export_table: false
@@ -58,6 +56,8 @@ analysis:
     path_h5ad: "data/proteoflux_results.h5ad"
     umap_n_neighbors: 15
     volcano_top_annotated: 20
+    volcano_sign_threshold: 0.01
+    volcano_annotate_infinite: false
   title: "Proteoflux Analysis Report"
   intro_text: |
     This report summarizes the proteomic analysis pipeline applied to your dataset.

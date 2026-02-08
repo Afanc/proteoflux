@@ -841,6 +841,7 @@ class ReportPlotter:
             )
         )
         volcano_top_annotated = int(exports_cfg.get("volcano_top_annotated", 10))
+        volcano_annotate_infinite = bool(exports_cfg.get("volcano_annotate_infinite", False))
 
         for i, name in enumerate(self.contrast_names):
             logfc = self.log2fc[:, i]
@@ -859,13 +860,34 @@ class ReportPlotter:
             color = np.full(logfc.shape[0], "gray", dtype=object)
 
             def plot_panel(ax, qvals_for_y, qvals_for_pick, title):
-                mask = ~(missing_a | missing_b)
+                # Points:
+                # - "finite": observed in both groups (not fully imputed in either group)
+                # - "semi-infinite": missing in exactly one group (fully imputed in >=1 group)
+                # - "both-missing": missing in both groups (drop)
+                finite_mask = ~(missing_a | missing_b)
+                semi_inf_mask = (~both_missing) & (~finite_mask)
 
-                base_color = color[mask]
-                base_logfc = logfc[mask]
-                base_q = qvals_for_y.iloc[mask]
+                # Avoid NaNs killing the y-axis transform
+                qy = qvals_for_y.fillna(1.0)
+                qp = qvals_for_pick.fillna(1.0)
+
+                # Base scatter: finite points as circles
+                base_color = color[finite_mask]
+                base_logfc = logfc[finite_mask]
+                base_q = qy.iloc[finite_mask]
                 ax.scatter(base_logfc, -np.log10(base_q), c=base_color, alpha=0.7, s=10)
 
+                # If we include semi-infinite points, overplot them with a distinct marker.
+                if volcano_annotate_infinite and np.any(semi_inf_mask):
+                    q_semi = qy.iloc[semi_inf_mask]
+                    ax.scatter(
+                        logfc[semi_inf_mask],
+                        -np.log10(q_semi),
+                        c="gray",
+                        alpha=0.5,
+                        s=12,
+                        marker="^",
+                    )
 
                 ax.axhline(-np.log10(sign_threshold), color="black", linestyle="--", linewidth=0.8)
                 ax.axvline(0, color="black", linestyle="--", linewidth=0.8)
@@ -873,16 +895,20 @@ class ReportPlotter:
                 # annotate top hits, excluding any protein missing in either group
                 for direction in ["up", "down"]:
                     dir_mask = (logfc > 0) if direction == "up" else (logfc < 0)
-                    sig_mask = mask & dir_mask & (qvals_for_pick < sign_threshold)
+
+                    # If enabled, allow annotating semi-infinite points too (but never both-missing).
+                    annot_mask = (~both_missing) if volcano_annotate_infinite else finite_mask
+                    sig_mask = annot_mask & dir_mask & (qp < sign_threshold)
 
                     # pick top by smallest q-value
-                    top_idx = np.argsort(qvals_for_pick[sig_mask])[:volcano_top_annotated]
+                    top_idx = np.argsort(qp[sig_mask])[:volcano_top_annotated]
+
                     selected = np.where(sig_mask)[0][top_idx]
 
                     for j in selected:
                         ax.text(
                             logfc[j],
-                            -np.log10(qvals_for_y.iloc[j]),
+                            -np.log10(qy.iloc[j]),
                             self.protein_names.iloc[j],
                             fontsize=6,
                             ha="right" if logfc[j] > 0 else "left",

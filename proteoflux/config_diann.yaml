@@ -1,5 +1,5 @@
 dataset:
-  input_file: "data/ecoli_diann181.tsv"
+  input_file: "data/ecoli_diann220.parquet"
   input_layout: "long"
   analysis_type: "proteomics"
   annotation_file: "data/annotation_diann.tsv"

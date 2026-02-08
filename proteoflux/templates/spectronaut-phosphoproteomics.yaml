@@ -86,6 +86,7 @@ analysis:
     path_h5ad: "proteoflux_results.h5ad"
     volcano_top_annotated: 20
     volcano_sign_threshold: 0.05
+    volcano_annotate_infinite: false
   title: "Proteoflux Analysis Report"
   intro_text: |
     This report summarizes the proteomic analysis pipeline applied to your dataset.
