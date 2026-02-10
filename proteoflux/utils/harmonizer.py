@@ -68,9 +68,9 @@ class DataHarmonizer:
         # normalize policy aliases
         if self.phospho_multisite_policy in {"explode", "duplicate"}:
             self.phospho_multisite_policy = "explode"
-        if self.phospho_multisite_policy not in {"duplicate", "explode", "keep"}:
+        if self.phospho_multisite_policy not in {"duplicate", "explode", "retain"}:
             raise ValueError(
-                f"[PHOSPHO] multisite_collapse_policy must be one of: ['explode','keep'] "
+                f"[PHOSPHO] multisite_collapse_policy must be one of: ['explode','retain'] "
                 f"(got {self.phospho_multisite_policy!r})."
             )
 
@@ -158,12 +158,6 @@ class DataHarmonizer:
             raise ValueError(
                 f"Annotation file {self.annotation_file!r}: Replicate could not be inferred for some rows."
             )
-        #ann = ann.with_columns(
-        #    pl.col("Condition").cast(pl.Utf8).str.strip_chars(),
-        #    pl.col("Replicate").cast(pl.Int64, strict=False),
-        #)
-        #if ann.select(pl.col("Replicate").is_null().any()).item():
-        #    raise ValueError(f"Annotation file {self.annotation_file!r}: Replicate contains non-integer or null values.")
 
         return ann
 
@@ -925,7 +919,7 @@ class DataHarmonizer:
         )
 
         # KEEP policy: do NOT explode multisites; build a single INDEX per peptide-row.
-        if policy == "keep":
+        if policy == "retain":
             dfk = df.with_columns(
                 pl.col("PTM_PROTEINLOCATIONS")
                   .cast(pl.Utf8)
@@ -1011,7 +1005,7 @@ class DataHarmonizer:
                 pl.lit("PHOSPHO").alias("ASSAY"),
             )
 
-            log_info(f"Unique phosphosites (keep policy): {dfk.select('INDEX').n_unique()}")
+            log_info(f"Unique phosphosites (retain policy): {dfk.select('INDEX').n_unique()}")
             if dfk.filter(pl.col("INDEX").is_null()).height > 0:
                 raise ValueError("[PHOSPHO] Null INDEX produced — phospho indexing is broken.")
             return dfk.drop(
