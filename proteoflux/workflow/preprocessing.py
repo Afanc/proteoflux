@@ -1153,10 +1153,10 @@ class Preprocessor:
             ]
         )
 
-        log_info(
-            "Zeros after pivot: "
-            f"{int(out.select([(pl.col(c) == 0).sum().alias(c) for c, dt in zip(out.columns, out.dtypes) if c != protein_col and dt in pl.NUMERIC_DTYPES]).to_numpy().sum())}"
-        )
+        #log_info(
+        #    "Zeros after pivot: "
+        #    f"{int(out.select([(pl.col(c) == 0).sum().alias(c) for c, dt in zip(out.columns, out.dtypes) if c != protein_col and dt in pl.NUMERIC_DTYPES]).to_numpy().sum())}"
+        #)
 
         return out
 
