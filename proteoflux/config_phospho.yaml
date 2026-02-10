@@ -48,9 +48,9 @@ preprocessing:
   directlfq_cores: 8
   directlfq_min_nonan: 2
   phospho:
-    multisite_collapse_policy: "duplicate"
+    multisite_collapse_policy: "explode"
     localization_filter_mode: "soft"
-    localization_filter_threshold: 0.75
+    localization_filter_threshold: 0.95
     covariate_protein_rollup_method: "directlfq"
   filtering:
     qvalue: 0.01
