@@ -1001,8 +1001,7 @@ class DataHarmonizer:
                   .list.eval(pl.element().cast(pl.Utf8))
                   .list.join(",")
                   .alias("_site_pos_joined"),
-                # scalar LOC_PROB for downstream: use the MIN across kept sites.
-                #pl.col("_prob_list_aligned").list.min().alias("LOC_PROB"),
+                # scalar LOC_PROB for downstream: use the MAX across kept sites.
                 pl.col("_prob_list_aligned").list.max().alias("LOC_PROB"),
             ).with_columns(
                 (pl.col("PEP_SEQUENCE") + pl.lit("|p") + pl.col("_site_pos_joined")).alias("PEPTIDE_INDEX"),
