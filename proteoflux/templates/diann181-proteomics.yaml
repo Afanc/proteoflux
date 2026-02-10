@@ -2,16 +2,20 @@ dataset:
   input_file: "your_inputfile.tsv"
   input_layout: "long"
   analysis_type: "proteomics"
-  annotation_file: null
+  convert_numeric_ptms: true
+
   exclude_runs: null
+  annotation_file: null
+  condition_column: null
+  replicate_column: null
+  filename_column: "Run"
+
   index_column: "Protein.Group"
   signal_column: "Precursor.Quantity"
   qvalue_column: "PG.Q.Value"
   charge_column: "Precursor.Charge"
+
   pep_column: "PEP"
-  condition_column: null
-  replicate_column: null
-  filename_column: "Run"
   spectral_counts_column: null
   precursors_exp_column: null
   ibaq_column: null

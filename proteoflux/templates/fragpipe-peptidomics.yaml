@@ -2,6 +2,7 @@ dataset:
   input_file: "yourfile_combined_ion.tsv"
   input_layout: "wide"
   analysis_type: "peptidomics"
+  convert_numeric_ptms: true
 
   exclude_runs: null
   annotation_file: null
