@@ -1,12 +1,11 @@
 import re
 import polars as pl
-from typing import Dict, List
+from typing import Dict, List, Optional
 from proteoflux.utils.utils import log_time, logger, log_info, log_warning
 from proteoflux.utils.ptm_map import PTM_MAP
 from proteoflux.utils.sequence_ops import (
     strip_mods as _strip_mods_impl,
     convert_numeric_ptms as _convert_numeric_ptms_impl,
-    #normalize_peptido_index_seq as _normalize_peptido_index_seq_impl,
     normalize_peptide_index_seq as _normalize_peptide_index_seq_impl,
 )
 
@@ -30,7 +29,7 @@ class DataHarmonizer:
         "precursors_exp_column": "PRECURSORS_EXP",
         "ibaq_column": "IBAQ",
         "peptide_seq_column": "PEPTIDE_LSEQ",
-        "uniprot_column": "UNIPROT", #this should be default, and then index_column is redefined as additional to that
+        "uniprot_column": "UNIPROT",
         "charge_column": "CHARGE",
         "peptide_start_column": "PEPTIDE_START",
         "ptm_proteinlocations_column": "PTM_PROTEINLOCATIONS",
@@ -56,6 +55,7 @@ class DataHarmonizer:
         self.convert_numeric_ptms = bool(column_config.get("convert_numeric_ptms", True))
         self.collapse_met_oxidation = bool(column_config.get("collapse_met_oxidation", True))
         self.collapse_all_ptms = bool(column_config.get("collapse_all_ptms", False))
+        self.phospho_multisite_policy = (column_config.get("phospho_multisite_collapse_policy", "explode") or "explode").strip().lower()
 
         raw_excl = column_config.get("exclude_runs")
         self.exclude_runs = set()
@@ -64,6 +64,15 @@ class DataHarmonizer:
                 self.exclude_runs = {raw_excl.strip()} if raw_excl.strip() else set()
             else:
                 self.exclude_runs = {str(x).strip() for x in raw_excl if str(x).strip()}
+
+        # normalize policy aliases
+        if self.phospho_multisite_policy in {"explode", "duplicate"}:
+            self.phospho_multisite_policy = "explode"
+        if self.phospho_multisite_policy not in {"duplicate", "explode", "keep"}:
+            raise ValueError(
+                f"[PHOSPHO] multisite_collapse_policy must be one of: ['explode','keep'] "
+                f"(got {self.phospho_multisite_policy!r})."
+            )
 
         for config_key, std_name in self.DEFAULT_COLUMN_MAP.items():
             original_col = column_config.get(config_key)
@@ -740,6 +749,32 @@ class DataHarmonizer:
         except Exception:
             return None
 
+    @staticmethod
+    def _coerce_scalar_int(v):
+        """Coerce semicolon-delimited or list-like values to a single int (deterministic)."""
+        if v is None:
+            return None
+        if isinstance(v, list):
+            if not v:
+                return None
+            v = v[0]
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return None
+            if ";" in s:
+                s = s.split(";", 1)[0].strip()
+            if not s:
+                return None
+            try:
+                return int(float(s))
+            except ValueError:
+                return None
+        try:
+            return int(float(v))
+        except Exception:
+            return None
+
     def _coerce_meta_floats(self, df: pl.DataFrame) -> pl.DataFrame:
         """Normalize known protein-group float columns that can appear as list/semicolon strings."""
         cols = [c for c in ("IBAQ", "PROTEIN_WEIGHT") if c in df.columns]
@@ -832,6 +867,7 @@ class DataHarmonizer:
     @log_time("Building Phospho Index")
     def _build_phospho_index(self, df: pl.DataFrame) -> pl.DataFrame:
         df = self._assert_required_phospho_columns(df)
+        policy = getattr(self, "phospho_multisite_policy", "duplicate")
 
         # ------------------------------------------------------------------
         # 1) Gate phospho rows
@@ -848,6 +884,8 @@ class DataHarmonizer:
         # ------------------------------------------------------------------
         # 2) Parse peptide-local candidate positions + probabilities
         # ------------------------------------------------------------------
+        df = df.with_row_index(name="_ROW_ID")
+
         df = df.with_columns(
             pl.col("PTM_POSITIONS_STR")
               .cast(pl.Utf8)
@@ -872,7 +910,6 @@ class DataHarmonizer:
             .alias("_prob_list")
         )
 
-        # Align probabilities to positions (or nulls if vendor gave nonsense)
         df = df.with_columns(
             pl.when(pl.col("_prob_list").list.len() == pl.col("_ptmpos_list").list.len())
               .then(pl.col("_prob_list"))
@@ -880,7 +917,120 @@ class DataHarmonizer:
               .alias("_prob_list_aligned")
         )
 
-        # Explode peptide-local candidates
+        # Protein groups may encode PEPTIDE_START as '471;471' etc → coerce deterministically.
+        df = df.with_columns(
+            pl.col("PEPTIDE_START")
+              .map_elements(self._coerce_scalar_int, return_dtype=pl.Int64)
+              .alias("_PEPTIDE_START_I")
+        )
+
+        # KEEP policy: do NOT explode multisites; build a single INDEX per peptide-row.
+        if policy == "keep":
+            dfk = df.with_columns(
+                pl.col("PTM_PROTEINLOCATIONS")
+                  .cast(pl.Utf8)
+                  .str.extract_all(r"[STY]\d+")
+                  .alias("_prot_sites_list")
+            ).with_columns(
+                pl.col("_prot_sites_list")
+                  .list.eval(pl.element().str.extract(r"(\d+)").cast(pl.Int64))
+                  .alias("_abs_pos_list")
+            )
+
+            dfk = dfk.with_columns(
+                pl.struct(["_abs_pos_list", "_PEPTIDE_START_I"])
+                  .map_elements(
+                      lambda s: (
+                          []
+                          if (s["_abs_pos_list"] is None)
+                          else [
+                              (int(x) - int(s["_PEPTIDE_START_I"]) + 1)
+                              for x in s["_abs_pos_list"]
+                              if x is not None and s["_PEPTIDE_START_I"] is not None
+                          ]
+                      ),
+                      return_dtype=pl.List(pl.Int64),
+                  )
+                  .alias("_site_pos_list")
+            )
+
+            dfk = dfk.with_columns(
+                pl.struct(["_site_pos_list", "_ptmpos_list"])
+                  .map_elements(
+                      lambda s: (
+                          []
+                          if (s["_site_pos_list"] is None)
+                          else [
+                              (pos in (s["_ptmpos_list"] or []))
+                              for pos in (s["_site_pos_list"] or [])
+                          ]
+                      ),
+                      return_dtype=pl.List(pl.Boolean),
+                  )
+                  .alias("_keep_mask_list")
+
+            )
+            dfk = dfk.with_columns(
+                pl.struct(["_prot_sites_list", "_site_pos_list", "_keep_mask_list"])
+                  .map_elements(
+                      lambda s: (
+                          [],
+                          [],
+                      )
+                      if not s or s.get("_keep_mask_list") is None
+                      else (
+                          [v for v, m in zip((s.get("_prot_sites_list") or []), (s.get("_keep_mask_list") or [])) if m],
+                          [v for v, m in zip((s.get("_site_pos_list") or []), (s.get("_keep_mask_list") or [])) if m],
+                      ),
+                      return_dtype=pl.Struct(
+                          [
+                              pl.Field("_prot_sites_kept", pl.List(pl.Utf8)),
+                              pl.Field("_site_pos_kept", pl.List(pl.Int64)),
+                          ]
+                      ),
+                  )
+                  .alias("_kept_struct")
+            ).with_columns(
+                pl.col("_kept_struct").struct.field("_prot_sites_kept").alias("_prot_sites_kept"),
+                pl.col("_kept_struct").struct.field("_site_pos_kept").alias("_site_pos_kept"),
+            ).drop("_kept_struct", strict=False).filter(
+                pl.col("_prot_sites_kept").list.len() > 0
+            ).with_columns(
+                pl.col("_prot_sites_kept").list.join(",").alias("_prot_sites_joined"),
+                pl.col("_site_pos_kept")
+                  .list.eval(pl.element().cast(pl.Utf8))
+                  .list.join(",")
+                  .alias("_site_pos_joined"),
+                # scalar LOC_PROB for downstream: use the MIN across kept sites.
+                #pl.col("_prob_list_aligned").list.min().alias("LOC_PROB"),
+                pl.col("_prob_list_aligned").list.max().alias("LOC_PROB"),
+            ).with_columns(
+                (pl.col("PEP_SEQUENCE") + pl.lit("|p") + pl.col("_site_pos_joined")).alias("PEPTIDE_INDEX"),
+                (pl.col("UNIPROT") + pl.lit("|") + pl.col("_prot_sites_joined")).alias("INDEX"),
+                pl.col("UNIPROT").alias("PARENT_PROTEIN"),
+                pl.col("PEP_SEQUENCE").alias("PARENT_PEPTIDE_ID"),
+                pl.lit("PHOSPHO").alias("ASSAY"),
+            )
+
+            log_info(f"Unique phosphosites (keep policy): {dfk.select('INDEX').n_unique()}")
+            if dfk.filter(pl.col("INDEX").is_null()).height > 0:
+                raise ValueError("[PHOSPHO] Null INDEX produced — phospho indexing is broken.")
+            return dfk.drop(
+                [
+                    "_ROW_ID",
+                    "_prot_sites_list",
+                    "_abs_pos_list",
+                    "_site_pos_list",
+                    "_keep_mask_list",
+                    "_prot_sites_kept",
+                    "_site_pos_kept",
+                    "_prot_sites_joined",
+                    "_site_pos_joined",
+                ],
+                strict=False,
+            )
+
+        # EXPLODE policy (legacy): explode candidates into one row per site
         df2 = (
             df.with_columns(
                 pl.int_ranges(pl.lit(0), pl.col("_ptmpos_list").list.len()).alias("_idx")

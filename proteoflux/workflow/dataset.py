@@ -5,15 +5,15 @@ optionally injects additional runs (including covariates), and assembles an
 AnnData object with layers and metadata for downstream analysis.
 """
 
-from copy import deepcopy
 from typing import Optional, Tuple, Union, List
 import warnings
+from copy import deepcopy
+import copy
 
 import anndata as ad
 import numpy as np
 import pandas as pd
 import polars as pl
-#import pyarrow.csv as pv_csv
 import pyarrow.parquet as pv_parquet
 import csv
 
@@ -55,12 +55,18 @@ class Dataset:
         # PTMs
         collapse_met_oxidation = bool(preprocessing_cfg.get("collapse_met_oxidation", True))
         collapse_all_ptms = bool(preprocessing_cfg.get("collapse_all_ptms", False))
+        phospho_cfg = deepcopy(preprocessing_cfg.get("phospho", {}) or {})
+        self.phospho_multisite_collapse_policy = str(
+            phospho_cfg.get("multisite_collapse_policy", "explode")
+        ).strip().lower()
 
         # Harmonizer setup
         eff_dataset_cfg = deepcopy(dataset_cfg) or {}
         eff_dataset_cfg["analysis_type"] = self.analysis_type
         eff_dataset_cfg["collapse_met_oxidation"] = collapse_met_oxidation
         eff_dataset_cfg["collapse_all_ptms"] = collapse_all_ptms
+        eff_dataset_cfg["phospho_multisite_collapse_policy"] = self.phospho_multisite_collapse_policy
+
 
         self.harmonizer = DataHarmonizer(eff_dataset_cfg)
 
@@ -703,6 +709,13 @@ class Dataset:
             "normalization": self.preprocessor.normalization,
             "imputation": self.preprocessor.imputation,
         }
+
+        # Phospho-specific preprocessing knobs used by the viewer summary.
+        if self.is_phospho:
+            self.adata.uns["preprocessing"].setdefault("phospho", {})
+            self.adata.uns["preprocessing"]["phospho"]["multisite_collapse_policy"] = (
+                self.phospho_multisite_collapse_policy
+            )
 
     def _attach_uns_drilldown_peptides(
         self,
