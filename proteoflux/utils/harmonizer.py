@@ -1140,6 +1140,11 @@ class DataHarmonizer:
         df = self._standardize_then_inject(df)
         df = self._coerce_meta_floats(df)
 
+        if self.convert_numeric_ptms and ("PEPTIDE_LSEQ" in df.columns):
+            df = df.with_columns(
+                pl.col("PEPTIDE_LSEQ").map_elements(self._convert_numeric_ptms, return_dtype=pl.Utf8)
+            )
+
         # Proteomics: INDEX may not be explicitly provided (e.g. wide FragPipe tables).
         # If missing, fall back to UNIPROT as the feature identifier.
         if (self.analysis_type == "proteomics") and ("INDEX" not in df.columns):
