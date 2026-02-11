@@ -280,7 +280,8 @@ class ReportPlotter:
 
         self.analysis_type = self.dataset_config.get("analysis_type", "")
 
-        self.export_config = self.analysis_config.get("exports")
+        self.export_config = (config.get("exports") or self.analysis_config.get("exports") or {}) #backward comp
+
         self.adata = adata
         self.protein_labels = adata.var.get(protein_label_key, adata.var_names)
         self.protein_names = adata.var["GENE_NAMES"] #TODO option ? 
@@ -308,7 +309,13 @@ class ReportPlotter:
     @log_time("Preparing Pdf Report")
     def plot_all(self):
         """Create the full PDF report to the configured path."""
-        with PdfPages(self.export_config.get("path_plot")) as pdf:
+
+        path_pdf = self.export_config.get("path_pdf_report")
+        if not path_pdf:
+            log_info("PDF export skipped (exports.path_pdf_report is null).")
+            return
+
+        with PdfPages(path_pdf) as pdf:
             self.pdf = pdf
 
             # first blank page
@@ -337,9 +344,10 @@ class ReportPlotter:
         )
 
         # Fetch text from config
-        title       = self.analysis_config.get("title", "")
-        intro       = self.analysis_config.get("intro_text", "")
-        footer_text = self.analysis_config.get("footer_text", "")
+        pdf_cfg     = self.export_config.get("pdf_report", {}) or {}
+        title       = pdf_cfg.get("title", self.analysis_config.get("title", ""))
+        intro       = pdf_cfg.get("intro_text", self.analysis_config.get("intro_text", ""))
+        footer_text = pdf_cfg.get("footer_text", self.analysis_config.get("footer_text", ""))
         preproc     = self.config.get("preprocessing", {})
         filtering   = preproc.get("filtering", {})
         quantification_method = preproc.get("pivot_signal_method", "sum")
@@ -348,8 +356,8 @@ class ReportPlotter:
         de_method   = self.analysis_config.get("ebayes_method", "limma")
         input_layout = self.dataset_config.get("input_layout", "")
         analysis_type = self.dataset_config.get("analysis_type", "proteomics")
-        xlsx_export = os.path.basename(self.analysis_config.get('exports').get('path_table'))
-        h5ad_export = os.path.basename(self.analysis_config.get('exports').get('path_h5ad'))
+        xlsx_export = os.path.basename(self.export_config.get("path_table") or "")
+        h5ad_export = os.path.basename(self.export_config.get("path_h5ad") or "")
 
         # Layout parameters
         line_height = 0.03
@@ -392,8 +400,9 @@ class ReportPlotter:
         fig.text(x0, y, "Output files:", ha="left", va="top",
                  fontsize=12, weight="semibold")
         y -= 0.8 * line_height
-        fig.text(x0+0.05, y, f"- {xlsx_export} (full data table)", ha="left", va="top", fontsize=12)
-        y -= 0.8 * line_height
+        if xlsx_export:
+            fig.text(x0+0.05, y, f"- {xlsx_export} (full data table)", ha="left", va="top", fontsize=12)
+            y -= 0.8 * line_height
         fig.text(x0+0.05, y, f"- {h5ad_export} (compressed, viewable in ProteoViewer)", ha="left", va="top", fontsize=12)
         y -= line_height
 
@@ -833,15 +842,16 @@ class ReportPlotter:
     def _plot_volcano_plots(self):
         """Volcano plots (one per contrast). eBayes-only; skip in pilot mode."""
 
-        exports_cfg = self.analysis_config.get("exports", {}) or {}
+        pdf_cfg = self.export_config.get("pdf_report", {}) or {}
+
         sign_threshold = float(
-            exports_cfg.get(
+            pdf_cfg.get(
                 "volcano_sign_threshold",
                 self.analysis_config.get("sign_threshold", 0.05),
             )
         )
-        volcano_top_annotated = int(exports_cfg.get("volcano_top_annotated", 10))
-        volcano_annotate_infinite = bool(exports_cfg.get("volcano_annotate_infinite", False))
+        volcano_top_annotated = int(pdf_cfg.get("volcano_top_annotated", 10))
+        volcano_annotate_infinite = bool(pdf_cfg.get("volcano_annotate_infinite", False))
 
         for i, name in enumerate(self.contrast_names):
             logfc = self.log2fc[:, i]

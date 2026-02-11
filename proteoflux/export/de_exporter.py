@@ -27,7 +27,7 @@ class DEExporter:
     ):
         """Excel/CSV and .h5ad exporter for a processed `AnnData`."""
         self.adata = adata
-        self.output_path = Path(output_path)
+        self.output_path = None if (output_path is None) else Path(output_path)
         self.use_xlsx = use_xlsx
         self.sig_threshold = sig_threshold
         self.annotate_matrix = False  # enforced off from version 1.7 on
@@ -515,6 +515,7 @@ class DEExporter:
                 self.adata.var[col] = self.adata.var[col].astype("category")
 
         meta = self.adata.uns.get("proteoflux", {})
+
         if not isinstance(meta, dict):
             meta = {}
         try:

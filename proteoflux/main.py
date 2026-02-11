@@ -14,20 +14,33 @@ def run_pipeline(config: dict):
     adata = clustering_pipeline(adata, config)
 
     analysis_config = config.get("analysis", {})
-    if analysis_config.get("export_plot", True):
+    export_config = config.get("exports") or analysis_config.get("exports") #backward comp
+    if not export_config:
+        raise ValueError(
+            "Missing exports block. Expected config.exports (new) or config.analysis.exports (legacy)."
+        )
+
+    path_pdf = export_config.get("path_pdf_report")
+    path_table = export_config.get("path_table")
+    path_h5ad = export_config.get("path_h5ad")
+
+    # --- PDF export
+    if path_pdf:
         plotter = ReportPlotter(adata, config)
         plotter.plot_all()
 
-    export_config = analysis_config.get("exports")
-    if not export_config:
-        raise ValueError("Missing config.analysis.exports block (required for export paths).")
-    exporter = DEExporter(adata,
-                          output_path=export_config.get("path_table"),
-                          sig_threshold=analysis_config.get("sign_threshold"),
-                          annotate_matrix=export_config.get("annotate_matrix"),
-                          )
+    # --- H5AD export
+    if not path_h5ad:
+        raise ValueError("exports.path_h5ad must not be null.")
 
-    exporter.export_adata(export_config.get("path_h5ad"))
+    exporter = DEExporter(
+        adata,
+        output_path=path_table,
+        sig_threshold=analysis_config.get("sign_threshold"),
+        config=config,
+    )
+    exporter.export_adata(path_h5ad)
 
-    if analysis_config.get("export_table", True):
+    # --- Table export
+    if path_table:
         exporter.export()
