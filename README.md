@@ -107,16 +107,7 @@ The `.h5ad` output preserves raw, normalized, and imputed matrices, statistical 
 
 ## Viewing results
 
-Results can be explored interactively using **ProteoViewer**.
-
-- Windows: use the standalone `ProteoViewer.exe`
-- Linux/macOS:
-
-```bash
-python app.py
-```
-
-Then open the browser interface and load the `.h5ad` file.
+Results can be explored interactively using **ProteoViewer** (see https://github.com/afanc/proteoviewer).
 
 ---
 
