@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+title: ProteoFlux
+version: 1.8.5
+doi: 10.5281/zenodo.18640999
+authors:
+  - family-names: Mollet
+    given-names: Dariush
+    orcid: https://orcid.org/0009-0003-9911-025X
+  - family-names: Schmidt
+    given-names: Alexander
+    orcid: https://orcid.org/0000-0002-3149-2381
