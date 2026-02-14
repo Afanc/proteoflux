@@ -34,7 +34,7 @@ inject_runs:
 
 ---
 
-# 2. Column Mapping Keys
+## Column Mapping Keys
 
 | Key | Description |
 |------|------------|
@@ -51,7 +51,7 @@ inject_runs:
 
 ---
 
-# 3. PTM / Indexing Controls
+## PTM / Indexing Controls
 
 | Key | Description |
 |------|------------|
@@ -62,7 +62,7 @@ inject_runs:
 
 ---
 
-# 4. Preprocessing
+# 2. Preprocessing
 
 ## Filtering
 
@@ -107,7 +107,7 @@ Supported methods:
 
 ---
 
-# 5. Analysis
+# 3. Analysis
 
 | Key | Description |
 |------|------------|
@@ -117,7 +117,7 @@ Supported methods:
 
 ---
 
-# 6. Export Section
+# 4. Export Section
 
 | Key | Description |
 |------|------------|
