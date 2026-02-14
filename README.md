@@ -1,4 +1,5 @@
 # ProteoFlux
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18640999.svg)](https://doi.org/10.5281/zenodo.18640999)
 
 ProteoFlux is an open-source Python framework for transparent, reproducible downstream analysis of quantitative proteomics data.
 
@@ -126,6 +127,9 @@ MIT License.
 
 ## Citation
 
-A formal publication is in preparation.
+If you use ProteoFlux in your work, please cite:
 
-Please cite the repository release (Zenodo DOI will be added upon publication).
+ProteoFlux v1.8.5.  
+Zenodo. https://doi.org/10.5281/zenodo.18640999
+
+A peer-reviewed publication is currently under submission.
