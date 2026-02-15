@@ -2,10 +2,10 @@
 *.pdf
 *.xlsx
 *.h5ad
-*.tsv
 *.fasta
 output/
 data/
 __pycache__/
 *.pyc
+proteoflux/data
 
