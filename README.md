@@ -24,7 +24,7 @@ ProteoFlux takes a single YAML configuration file and produces:
 
 - Harmonized and preprocessed quantification data
 - Differential expression results using a limma-based empirical Bayes framework
-- PCA, MDS, and hierarchical clustering
+- Principal component analysis (PCA), multidimensional scaling (MDS), and hierarchical clustering
 - A structured multi-page PDF report
 - Portable `.h5ad` files compatible with ProteoViewer
 - Summary tables in Excel or CSV format
@@ -116,6 +116,23 @@ High-level sections:
 Full parameter reference:
 
 See `docs/CONFIGURATION.md`
+
+---
+
+## Examples
+
+Runnable, reduced example datasets and matching configs are provided under `examples/`:
+
+- `examples/searle_small/`: small DIA proteomics example (Spectronaut export subset)
+- `examples/phospho_small/`: phosphoproteomics example with an injected flow-through covariate run
+
+Each example folder contains a `README.md` with a minimal command to run the pipeline (typically `proteoflux run --config <config>.yaml`) and the required input files (data + annotation, if applicable).
+
+---
+
+## Paper
+
+The JOSS manuscript source is provided as `paper.md` (with references managed separately during submission preparation).
 
 ---
 
