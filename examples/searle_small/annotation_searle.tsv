@@ -1,0 +1,10 @@
+#	Reference	Run Label	Condition	Fraction	Replicate	Quantity Correction Factor	Label	Color	File Name
+1	True	194_KaForAll_DIA_B22	HEK	NA	1	1	NA	#1F77B4	194_KaForAll_DIA_B22
+2	True	195_KaForAll_DIA_B22	HEK	NA	2	1	NA	#1F77B4	195_KaForAll_DIA_B22
+3	True	196_KaForAll_DIA_B22	HEK	NA	3	1	NA	#1F77B4	196_KaForAll_DIA_B22
+4	False	197_KaForAll_DIA_B22	EC_low	NA	1	1	NA	#1F77B4	197_KaForAll_DIA_B22
+5	False	198_KaForAll_DIA_B22	EC_low	NA	2	1	NA	#1F77B4	198_KaForAll_DIA_B22
+6	False	199_KaForAll_DIA_B22	EC_low	NA	3	1	NA	#1F77B4	199_KaForAll_DIA_B22
+7	False	200_KaForAll_DIA_B22	EC_high	NA	1	1	NA	#FF7F0E	200_KaForAll_DIA_B22
+8	False	201_KaForAll_DIA_B22	EC_high	NA	2	1	NA	#FF7F0E	201_KaForAll_DIA_B22
+9	False	202_KaForAll_DIA_B22	EC_high	NA	3	1	NA	#FF7F0E	202_KaForAll_DIA_B22

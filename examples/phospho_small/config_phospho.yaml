@@ -2,7 +2,7 @@ dataset:
   input_file: "data_phospho.tsv"
   input_layout: "long"
   analysis_type: "phospho"
-  annotation_file: "annot_phospho.tsv"
+  annotation_file: "annotation_phospho.tsv"
   exclude_runs: null
 
   inject_runs:
