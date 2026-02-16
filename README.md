@@ -20,14 +20,16 @@ ProteoFlux emphasizes:
 
 ## Overview
 
+![ProteoFlux overview](assets/proteoflux_overview.png)
+
 ProteoFlux takes a single YAML configuration file and produces:
 
 - Harmonized and preprocessed quantification data
 - Differential expression results using a limma-based empirical Bayes framework
 - Principal component analysis (PCA), multidimensional scaling (MDS), and hierarchical clustering
 - A structured multi-page PDF report
-- Portable `.h5ad` files compatible with ProteoViewer
-- Summary tables in Excel or CSV format
+- Portable `.h5ad` files compatible with [ProteoViewer](https://github.com/Afanc/proteoviewer)
+- Summary tables in Excel
 
 ---
 
@@ -61,7 +63,7 @@ Create a template:
 proteoflux init spectronaut-proteomics --path config.yaml
 ```
 
-Run the full pipeline:
+Edit the file and then run the full pipeline:
 
 ```bash
 proteoflux run --config config.yaml
@@ -77,6 +79,8 @@ proteoflux run --config config.yaml
 | `*.xlsx` | Differential expression summary table |
 | `*.pdf` | Multi-page QC and analysis report |
 
+The `.h5ad` files are compatible with [ProteoViewer](https://github.com/Afanc/proteoviewer), an interactive visualization tool for ProteoFlux outputs.
+
 ---
 
 ## Using ProteoFlux as a Python Library
@@ -87,7 +91,7 @@ ProteoFlux can also be used programmatically:
 import yaml
 from proteoflux.main import run_pipeline
 
-config = yaml.safe_load(open("config.yaml"))
+config = yaml.safe_load(open("config.yaml")) #or use a dict
 run_pipeline(config)
 ```
 
@@ -104,18 +108,16 @@ All behavior is controlled by the same YAML schema used by the CLI.
 
 ## Configuration
 
-All parameters are defined in a single YAML configuration file.
+All parameters are defined in a single YAML configuration file. We recommend starting with a template:
 
-High-level sections:
-
-- `dataset`
-- `preprocessing`
-- `analysis`
-- `exports`
+```bash
+proteoflux templates
+proteoflux init TEMPLATE_NAME
+```
 
 Full parameter reference:
 
-See `docs/CONFIGURATION.md`
+See the configuration guide [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ---
 
@@ -124,7 +126,7 @@ See `docs/CONFIGURATION.md`
 Runnable, reduced example datasets and matching configs are provided under `examples/`:
 
 - `examples/searle_small/`: small DIA proteomics example (Spectronaut export subset)
-- `examples/phospho_small/`: phosphoproteomics example with an injected flow-through covariate run
+- `examples/phospho_small/`: phosphoproteomics example with an injected flow-through covariate run (Spectronaut export subsets)
 
 Each example folder contains a `README.md` with a minimal command to run the pipeline (typically `proteoflux run --config <config>.yaml`) and the required input files (data + annotation, if applicable).
 
@@ -132,13 +134,13 @@ Each example folder contains a `README.md` with a minimal command to run the pip
 
 ## Paper
 
-The JOSS manuscript source is provided as `paper.md` (with references managed separately during submission preparation).
+The JOSS manuscript source is provided as [paper.md](paper.md).
 
 ---
 
 ## License
 
-MIT License.
+ProteoViewer is released under the MIT License. See the LICENSE file for details.
 
 ---
 
