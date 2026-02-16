@@ -10,11 +10,11 @@ This document describes all available configuration parameters.
 
 | Key | Description |
 |------|------------|
-| `input_file` | Path to quantitative (fragment group/precursor level) input table. Support .tsv, .csv and .parquet. |
-| `input_layout` | `long` or `wide` |
 | `analysis_type` | `proteomics`, `peptidomics`, or `phospho` |
+| `input_file` | Path to quantitative (fragment group/precursor level) input table. Support .tsv, .csv and .parquet. |
+| `input_layout` | `long` (one precursor per run per row) or `wide` (rows: precursors. columns: runs. ) |
 | `annotation_file` | Path to .tsv with sample metadata. Optional (but recommended). File should have the following columns : Filename, Condition, Replicate. |
-| `exclude_runs` | String or list of run identifiers (filenames). Optional. |
+| `exclude_runs` | String or list of run identifiers (filenames) to exclude from the analysis. Optional. |
 | `inject_runs` | Additional datasets to inject. Optional. |
 
 ---
@@ -90,7 +90,7 @@ Can be used to inject an additional .tsv/.csv/.parquet dataset.
 |------|------------|
 | `protein_rollup_method` | Protein rollup method. Accepts `sum`, `directlfq`, `median`, `top3`, `min`, `max`, `count`, `mean` or null |
 | `peptide_rollup_method` | Peptide rollup method. `sum`, `mean`, `median` |
-| `directlfq_cores` | Number of cores used in DirectLFQ. |
+| `directlfq_cores` | Number of cores used in DirectLFQ. Default: 8. |
 | `directlfq_min_nonan` | Min number of shared to compute DirectLFQ, outputs NA (-> imputed) if below. Default: 1. |
 
 ---
@@ -112,9 +112,9 @@ Can be used to inject an additional .tsv/.csv/.parquet dataset.
 
 | Key | Description |
 |------|------------|
-| `phospho.multisite_collapse_policy` | `explode` or `retain` |
+| `phospho.multisite_collapse_policy` | `explode` (site-centric) or `retain` (peptide-centric) |
 | `phospho.localization_filter_mode` | `soft` (max across samples) or `strict` (min across samples) |
-| `phospho.localization_filter_threshold` | Default: 0.75 |
+| `phospho.localization_filter_threshold` | Localization score filter threshold. Default: 0.75 (class I). |
 | `phospho.covariate_protein_rollup_method` | `directlfq` or `sum` |
 
 ---
@@ -123,7 +123,7 @@ Can be used to inject an additional .tsv/.csv/.parquet dataset.
 
 | Key | Description |
 |------|------------|
-| `normalization.method` | List of normalization steps. Options include log2, median_equalization, median_equalization_by_tag, quantile, global_linear, global_loess, local_linear, local_loess. Data should be always log2 normalized first. |
+| `normalization.method` | List of normalization steps. Options include log2, median_equalization, median_equalization_by_tag, quantile, global_linear, global_loess, local_linear, local_loess. Data should be always log2 transformed first. |
 | `normalization.reference_tag` | tag for median_normalization_by_tag. Default: null. |
 | `normalization.loess_span` | LOESS smoothing span for loess normalizations. Default: 0.9. |
 
@@ -162,9 +162,9 @@ Can be used to inject an additional .tsv/.csv/.parquet dataset.
 
 | Key | Description |
 |------|------------|
-| `only_contrasts` | Restrict comparisons |
-| `only_against` | Restrict reference |
-| `clustering_max` | Max number features for clustering |
+| `only_contrasts` | Restrict analysis to list of contrasts. Syntax "A_v_B" or "A_vs_B". Optional. |
+| `only_against` | Restrict to comparisons against this condition. Optional. |
+| `clustering_max` | Max number features for clustering. Default: 8000. |
 
 ---
 
