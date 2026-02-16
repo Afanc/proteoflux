@@ -844,12 +844,17 @@ class DataHarmonizer:
               .alias("_INDEX_SEQ"),
         ).drop(["_seq_candidate"], strict=False)
 
-        df = df.with_columns(
-            pl.col("STRIPPED_SEQ").alias("PARENT_PEPTIDE_ID"),
+        parent_protein_expr = (
             pl.when(pl.col("UNIPROT").is_not_null())
               .then(pl.col("UNIPROT"))
               .otherwise(None)
-              .alias("PARENT_PROTEIN"),
+              if "UNIPROT" in df.columns
+              else pl.lit(None)
+        ).alias("PARENT_PROTEIN")
+
+        df = df.with_columns(
+            pl.col("STRIPPED_SEQ").alias("PARENT_PEPTIDE_ID"),
+            parent_protein_expr,
             pl.col("_INDEX_SEQ").alias("INDEX"),
         ).drop(["_INDEX_SEQ"], strict=False)
 

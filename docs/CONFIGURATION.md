@@ -41,14 +41,14 @@ Can be used to inject an additional .tsv/.csv/.parquet dataset.
 
 | Key | Description |
 |------|------------|
-| `index_column` | Feature identifier. Optional (if wide, peptidomics or phospho). |
+| `index_column` | Feature identifier. Optional (if wide, peptidomics or phospho: feature IDs are derived from sequence or site annotations). |
 | `signal_column` | Intensity column. If wide, can be a suffix to match against. |
-| `peptide_seq_column` | (PTM-Labeled) precursor sequence column. Used for peptide rollup. |
+| `peptide_seq_column` | (PTM-Labeled) precursor sequence column. Used for peptide rollup and peptidomics feature IDs. |
 | `charge_column` | Precursor charge column. Used for peptide rollup. |
 | `qvalue_column` | q-value column, for filtering. Optional. |
 | `pep_column` | PEP column, for filtering. Optional. |
 | `precursors_exp_column` | Number of precursors (experiment-wide)/Run Evidence count, for filtering. Optional. |
-| `uniprot_column` | UniProt accession. Used for protein rollup. Optional (if peptidomics or phospho). |
+| `uniprot_column` | UniProt accession. Optional (if proteomics). Used to derive parent protein in phospho with flowthrough adjustment. |
 | `condition_column` | Biological condition. Optional (if annotation provided). |
 | `replicate_column` | Replicate number. Optional (if annotation provided). |
 | `filename_column` | Run identifier. Optional (if wide). |

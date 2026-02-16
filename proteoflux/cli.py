@@ -10,7 +10,10 @@ _TEMPLATES: Dict[str, str] = {
     "spectronaut-proteomics": "spectronaut-proteomics.yaml",
     "spectronaut-peptidomics": "spectronaut-peptidomics.yaml",
     "spectronaut-phosphoproteomics": "spectronaut-phosphoproteomics.yaml",
+    "diann-proteomics": "diann-proteomics.yaml",
+    "diann-peptidomics": "diann-peptidomics.yaml",
     "fragpipe-peptidomics": "fragpipe-peptidomics.yaml",
+    "fragpipe-proteomics": "fragpipe-proteomics.yaml",
 }
 
 def _write_template(template_name: str, path: Path) -> None:
