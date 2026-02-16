@@ -6,9 +6,10 @@ dataset:
   exclude_runs: null
   index_column: "PG.ProteinGroups"
   signal_column: "FG.MS2RawQuantity"
-  qvalue_column: "PG.Qvalue"
+  qvalue_column: "PG.QValue (Run-Wise)"
+  pep_column: "PG.PEP (Run-Wise)"
+  peptide_seq_column: "FG.LabeledSequence"
   charge_column: "FG.Charge"
-  pep_column: "PG.PEP"
   condition_column: "R.Condition"
   replicate_column: "R.Replicate"
   filename_column: "R.FileName"
@@ -19,7 +20,6 @@ dataset:
   protein_weight_column: "PG.MolecularWeight"
   protein_descriptions_column: "PG.ProteinDescriptions"
   gene_names_column: "PG.Genes"
-  peptide_seq_column: "FG.LabeledSequence"
 
 preprocessing:
   collapse_met_oxidation: true
