@@ -58,6 +58,9 @@ proteoflux = "proteoflux.cli:app"
 [tool.setuptools.package-data]
 "proteoflux.templates" = ["*.yaml"]
 
+[tool.setuptools]
+packages = ["proteoflux"]
+
 [project.urls]
 Repository = "https://github.com/afanc/proteoflux"
 Issues = "https://github.com/afanc/proteoflux/issues"
