@@ -578,7 +578,7 @@ class ReportPlotter:
         y -= line_height
 
         fig.text(x0, y,
-            "This analysis was performed using Proteoflux. \nFor full pipeline details, definitions, and citation instructions, see: [doi.org/xxx]",
+            "This analysis was performed using Proteoflux. \nFor full pipeline details, definitions, and citation instructions, see: https://doi.org/10.5281/zenodo.18640999",
             ha="left", va="bottom", fontsize=12)
 
         # footer
