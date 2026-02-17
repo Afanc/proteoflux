@@ -2,9 +2,10 @@
 title: 'ProteoFlux: a modality-aware framework for downstream analysis of quantitative proteomics data'
 tags:
   - Python
+  - Bioinformatics
   - Proteomics
   - Phosphoproteomics
-  - Peptidomics
+  - Differential Expression
 authors:
   - name: Dariush Mollet
     affiliation: 1
