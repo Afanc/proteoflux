@@ -94,7 +94,7 @@ Fully imputed contrasts are detected on a per-feature, per-contrast basis using 
 
 ProteoFlux computes principal component analysis (PCA), multidimensional scaling (MDS), and hierarchical clustering on normalized expression matrices during analysis and stores embeddings and linkage structures directly in the AnnData object. Missingness-based clustering is computed separately to capture structure driven by data completeness.
 
-For unsupervised analysis, matrices are fully imputed using a conservative, context-independent left-censoring strategy to ensure numerical stability of distance calculations and eigendecomposition. This imputation layer is used exclusively for clustering and embedding and does not affect differential testing.
+For unsupervised analysis, matrices are fully imputed using a conservative, context-independent left-censoring strategy to rovide a contrast-independent representation suitable for quality control and exploratory visualization. This imputation layer is used exclusively for clustering and embedding and does not affect differential testing.
 
 ## Outputs and provenance
 
