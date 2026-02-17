@@ -6,6 +6,13 @@ on:
       - paper.md
       - paper.bib
       - assets/**
+      - .github/workflows/draft-pdf.yml
+  pull_request:
+    paths:
+      - paper.md
+      - paper.bib
+      - assets/**
+      - .github/workflows/draft-pdf.yml
 
 jobs:
   paper:

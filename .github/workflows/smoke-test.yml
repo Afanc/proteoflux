@@ -2,8 +2,15 @@ name: Smoke Test
 
 on:
   push:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "assets/**"
   pull_request:
-
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "assets/**"
 jobs:
   smoke-test:
     runs-on: ubuntu-latest
