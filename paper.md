@@ -4,7 +4,7 @@ tags:
   - Python
   - Bioinformatics
   - Proteomics
-  - Phosphoproteomics
+  - Mass spectrometry
   - Differential Expression
 authors:
   - name: Dariush Mollet
