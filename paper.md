@@ -138,7 +138,7 @@ ProteoFlux is used for routine downstream analysis within a proteomics core faci
 
 Analyses are configured via reusable templates enabling semi-automated generation of experiment-specific configurations while maintaining consistent preprocessing and statistical assumptions.
 
-The software is applied to approximately 200 experiments per year, corresponding to 10’000 samples across diverse study designs. ProteoFlux-generated outputs are shared with internal and external collaborators, supporting reproducible re-analysis and downstream visualization without re-running the pipeline.
+ProteoFlux-generated outputs are distributed to internal and external collaborators in standardized formats, enabling reproducible re-analysis and downstream visualization without re-running the computational pipeline.
 
 # AI Usage Disclosure
 
