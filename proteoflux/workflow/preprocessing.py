@@ -1595,7 +1595,8 @@ class Preprocessor:
             elif m == "median_equalization":
                 global_median = np.nanmedian(mat)
                 medians = np.nanmedian(mat, axis=0, keepdims=True)
-                mat = mat * (global_median / medians)
+                shift = global_median - medians
+                mat = mat + np.where(np.isfinite(medians), shift, 0.0)
             elif m == "quantile":
                 qt = sklearn.preprocessing.QuantileTransformer(random_state=42)
                 mat = qt.fit_transform(mat)
@@ -1699,12 +1700,13 @@ class Preprocessor:
                     )
                     ref_global = np.nanmedian(ref_sub)
 
-                    scale = np.where(
+                    # normalization . data should always be log transformed.
+                    shift = np.where(
                         np.isfinite(ref_col_meds),
-                        ref_global / ref_col_meds,
-                        1.0,
+                        ref_global - ref_col_meds,
+                        0.0,
                     )
-                    mat = mat * scale
+                    mat = mat + shift
 
                     self.normalization["tag_matches"] = n_ref
                     log_info(
