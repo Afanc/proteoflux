@@ -445,6 +445,7 @@ class Preprocessor:
             .cast(pl.Utf8, strict=False)
             .str.split(";")
             .list.eval(pl.element().str.strip_chars())
+            .list.eval(pl.element().str.replace(r"^REV_", ""))
             .list.eval(pl.element().is_in(contaminants_list))
             .list.any()
         )
@@ -1700,7 +1701,7 @@ class Preprocessor:
                     )
                     ref_global = np.nanmedian(ref_sub)
 
-                    # normalization . data should always be log transformed.
+                    # data should always be log transformed.
                     shift = np.where(
                         np.isfinite(ref_col_meds),
                         ref_global - ref_col_meds,
