@@ -1,5 +1,6 @@
 from proteoflux.workflow.dataset import Dataset
 from proteoflux.analysis.limma_pipeline import run_limma_pipeline, clustering_pipeline
+from proteoflux.analysis.validation import validate_analysis_input
 from proteoflux.export.pdf_report_exporter import ReportPlotter
 from proteoflux.export.de_exporter import DEExporter
 from proteoflux.utils.utils import debug_protein_view, logger, log_time
@@ -10,6 +11,7 @@ def run_pipeline(config: dict):
     dataset = Dataset(**config)
 
     adata = dataset.get_anndata()
+    validate_analysis_input(adata)
     adata = run_limma_pipeline(adata, config)
     adata = clustering_pipeline(adata, config)
 
