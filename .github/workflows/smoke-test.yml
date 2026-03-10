@@ -4,11 +4,13 @@ on:
   push:
     paths-ignore:
       - "**/*.md"
+      - "**/*.bib"
       - "docs/**"
       - "assets/**"
   pull_request:
     paths-ignore:
       - "**/*.md"
+      - "**/*.bib"
       - "docs/**"
       - "assets/**"
 jobs:
