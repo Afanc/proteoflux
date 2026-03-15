@@ -24,8 +24,8 @@ LOG = logging.getLogger(__name__)
 # "statsmodels" : conservative reference path
 # "numpy_irls"  : specialized NumPy IRLS implementation
 # ---------------------------------------------------------------------
-#ROBUST_REGRESSION_BACKEND = "numpy_irls"
-ROBUST_REGRESSION_BACKEND = "statsmodels"
+ROBUST_REGRESSION_BACKEND = "numpy_irls"
+#ROBUST_REGRESSION_BACKEND = "statsmodels"
 
 RR_DEBUG = os.getenv("PROTEOFLUX_RR_DEBUG", "0").strip().lower() in {
     "1",
