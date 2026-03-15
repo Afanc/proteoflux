@@ -159,6 +159,64 @@ def _build_consistency_peptides(
 
         self.intermediate_results.add_df("consistent_peptides_per_condition", cons_df)
 
+def build_proteomics_peptide_wide(
+    self: "Preprocessor",
+    df: pl.DataFrame,
+) -> Optional[pl.DataFrame]:
+    """
+    Build the proteomics peptide-wide table once, using the existing
+    preprocessing peptide rollup logic.
+
+    Output columns:
+      - PEPTIDE_ID
+      - INDEX
+      - PEPTIDE_SEQ
+      - one column per sample
+    """
+    needed = {"INDEX", "FILENAME", "SIGNAL", "PEPTIDE_LSEQ"}
+    if not needed.issubset(df.columns):
+        return None
+
+    seq_clean = expr_peptide_index_seq(
+        "PEPTIDE_LSEQ",
+        collapse_met_oxidation=getattr(self, "collapse_met_oxidation", True),
+        collapse_all_ptms=getattr(self, "collapse_all_ptms", False),
+    ).alias("PEPTIDE_SEQ")
+
+    base = (
+        df.select(
+            pl.col("INDEX"),
+            pl.col("FILENAME"),
+            pl.col("SIGNAL"),
+            seq_clean,
+        ).with_columns(
+            (
+                pl.col("INDEX").cast(pl.Utf8)
+                + pl.lit("|")
+                + pl.col("PEPTIDE_SEQ")
+            ).alias("PEPTIDE_ID")
+        )
+    )
+
+    pep_pivot = self._pivot_df(
+        df=base.select(["PEPTIDE_ID", "FILENAME", "SIGNAL"]),
+        sample_col="FILENAME",
+        protein_col="PEPTIDE_ID",
+        values_col="SIGNAL",
+        aggregate_fn=self.peptide_rollup_method,
+    )
+
+    id_map = base.select(["PEPTIDE_ID", "INDEX", "PEPTIDE_SEQ"]).unique()
+
+    pep_wide = pep_pivot.join(id_map, on="PEPTIDE_ID", how="left")
+
+    sample_cols = [
+        c
+        for c in pep_wide.columns
+        if c not in ("PEPTIDE_ID", "INDEX", "PEPTIDE_SEQ")
+    ]
+
+    return pep_wide.select(["PEPTIDE_ID", "INDEX", "PEPTIDE_SEQ", *sample_cols])
 def build_peptide_tables(
     self: "Preprocessor",
 ) -> Optional[Tuple[pl.DataFrame, pl.DataFrame]]:
@@ -352,18 +410,11 @@ def build_peptide_tables(
             prec_per_prot["N_PREC_PER_PROT"].to_numpy(),
         )
 
-    # 3) Peptide-wide matrices (sum duplicates)
+    # 3) Peptide-wide matrices (shared helper; same rollup logic)
     if not precursor_only:
-        pep_pivot = self._pivot_df(
-            df=base.select(["PEPTIDE_ID", "FILENAME", "SIGNAL"]),
-            sample_col="FILENAME",
-            protein_col="PEPTIDE_ID",
-            values_col="SIGNAL",
-            aggregate_fn=self.peptide_rollup_method,
-        )
-
-        id_map = base.select(["PEPTIDE_ID", "INDEX", "PEPTIDE_SEQ"]).unique()
-        pep_wide = pep_pivot.join(id_map, on="PEPTIDE_ID", how="left")
+        pep_wide = build_proteomics_peptide_wide(self, df)
+        if pep_wide is None:
+            return None
 
         sample_cols = [
             c
@@ -372,6 +423,26 @@ def build_peptide_tables(
         ]
 
         pep_centered = _center_by_rowmean(pep_wide, sample_cols)
+    # 3) Peptide-wide matrices (sum duplicates)
+    #if not precursor_only:
+    #    pep_pivot = self._pivot_df(
+    #        df=base.select(["PEPTIDE_ID", "FILENAME", "SIGNAL"]),
+    #        sample_col="FILENAME",
+    #        protein_col="PEPTIDE_ID",
+    #        values_col="SIGNAL",
+    #        aggregate_fn=self.peptide_rollup_method,
+    #    )
+
+    #    id_map = base.select(["PEPTIDE_ID", "INDEX", "PEPTIDE_SEQ"]).unique()
+    #    pep_wide = pep_pivot.join(id_map, on="PEPTIDE_ID", how="left")
+
+    #    sample_cols = [
+    #        c
+    #        for c in pep_wide.columns
+    #        if c not in ("PEPTIDE_ID", "INDEX", "PEPTIDE_SEQ")
+    #    ]
+
+    #    pep_centered = _center_by_rowmean(pep_wide, sample_cols)
 
     # 4) Precursor-wide matrices (peptidomics/phospho: same feature + charge)
     if analysis == "phospho":

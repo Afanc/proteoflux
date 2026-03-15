@@ -597,6 +597,7 @@ class ReportPlotter:
         # prepare data
         df_raw = pd.DataFrame(self.adata.layers['raw'], index=self.adata.obs_names, columns=self.adata.var_names)
         counts = df_raw.notna().sum(axis=1)
+        counts = counts.sort_index()
         raw_conds = (self.adata.obs['CONDITION'].cat.categories
                      if hasattr(self.adata.obs['CONDITION'], 'cat')
                      else self.adata.obs['CONDITION'].unique())
@@ -650,7 +651,10 @@ class ReportPlotter:
 
         # barplot or table (keep the same space on page)
         if not use_table:
-            sample_colors = [color_map.get(c, color_map["Total"]) for c in self.adata.obs["CONDITION"]]
+            sample_colors = [
+                color_map.get(self.adata.obs.loc[s, "CONDITION"], color_map["Total"])
+                for s in counts.index
+            ]
             ax_bar.grid(axis="y", which="both", visible=True)
             ax_bar.bar(counts.index, counts.values, color=sample_colors)
             ax_bar.set_xticks(range(len(counts.index)))

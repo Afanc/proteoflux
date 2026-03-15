@@ -42,7 +42,11 @@ from proteoflux.utils.sequence_ops import (
     expr_strip_bracket_mods,
     expr_strip_underscores,
 )
-from proteoflux.workflow.peptide_tables import build_peptide_tables
+from proteoflux.workflow.peptide_tables import (
+    build_peptide_tables,
+    build_proteomics_peptide_wide,
+)
+from proteoflux.workflow.robust_regression import pivot_df_robust_regression
 from proteoflux.utils.analysis_type import normalize_analysis_type
 
 from proteoflux.utils.directlfq import estimate_protein_intensities
@@ -106,7 +110,18 @@ class Preprocessor:
                 "Config error: both 'protein_rollup_method' and legacy "
                 "'pivot_signal_method' are set. Use only 'protein_rollup_method'."
             )
-        allowed_protein_rollup_methods = ["sum", "mean", "median", "top3", "directlfq", "min", "max", "count", None]
+        allowed_protein_rollup_methods = [
+            "sum",
+            "mean",
+            "median",
+            "top3",
+            "directlfq",
+            "robust_regression",
+            "min",
+            "max",
+            "count",
+            None
+        ]
         if protein_rollup_method not in allowed_protein_rollup_methods:
             raise ValueError(
                 "Invalid protein_rollup_method "
@@ -165,6 +180,30 @@ class Preprocessor:
         self.covariate_protein_rollup_method = phospho_cfg.get(
             "covariate_protein_rollup_method", "directlfq"
         ).lower()
+
+        self.robust_regression_cores = config.get(
+            "robust_regression_cores",
+            self.directlfq_cores,
+        )
+        self.robust_regression_min_nonan = int(
+            config.get("robust_regression_min_nonan", 1)
+        )
+
+        # Huber tuning constant. 1.345 is the standard Huber default.
+        self.robust_regression_huber_t = float(
+            config.get(
+                "robust_regression_huber_t",
+                config.get("robust_regression_huber_k", 1.345),
+            )
+        )
+
+        # Keep these explicit/configurable.
+        self.robust_regression_max_iter = int(
+            config.get("robust_regression_max_iter", 20)
+        )
+        self.robust_regression_tol = float(
+            config.get("robust_regression_tol", 1e-8)
+        )
 
         # Covariates: list of assay labels to extract & center after imputation
         cov_cfg = config.get("covariates") or {}
@@ -1346,6 +1385,36 @@ class Preprocessor:
                 protein_col="INDEX",
                 values_col="SIGNAL",
                 ion_col="PEPTIDE_LSEQ",
+            )
+        elif method == "robust_regression":
+            if self.analysis_type != "proteomics":
+                raise ValueError(
+                    "protein_rollup_method='robust_regression' is currently "
+                    "implemented only for proteomics (peptide -> protein)."
+                )
+            pep_wide = build_proteomics_peptide_wide(self, df)
+            if pep_wide is None:
+                raise ValueError(
+                    "robust_regression requires peptide-wide input columns "
+                    "INDEX, FILENAME, SIGNAL, PEPTIDE_LSEQ."
+                )
+
+            sample_cols = [
+                c
+                for c in pep_wide.columns
+                if c not in ("PEPTIDE_ID", "INDEX", "PEPTIDE_SEQ")
+            ]
+
+            intensity = pivot_df_robust_regression(
+                pep_wide=pep_wide.select(["INDEX", "PEPTIDE_ID", *sample_cols]),
+                protein_col="INDEX",
+                peptide_col="PEPTIDE_ID",
+                sample_cols=sample_cols,
+                num_cores=self.robust_regression_cores,
+                huber_t=self.robust_regression_huber_t,
+                max_iter=self.robust_regression_max_iter,
+                tol=self.robust_regression_tol,
+                min_nonan=self.robust_regression_min_nonan,
             )
         elif method in {"top3", "top_3"}:
             intensity = self._pivot_df_top_n(
