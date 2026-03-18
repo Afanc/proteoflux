@@ -997,6 +997,36 @@ class Preprocessor:
 
         return pivot_df
 
+    def _pivot_native_spectral_counts(
+        self,
+        df: pl.DataFrame,
+    ) -> Optional[pl.DataFrame]:
+        """
+        Build ProteoFlux-native spectral counts as the number of unique
+        precursor keys (PEPTIDE_LSEQ/CHARGE) per (INDEX, FILENAME).
+
+        Returns a protein × sample pivot, or None if the required columns
+        are not available.
+        """
+        required = {"INDEX", "FILENAME", "PEPTIDE_LSEQ", "CHARGE"}
+        if not required.issubset(df.columns):
+            return None
+
+        df_sc = (
+            df.select(["INDEX", "FILENAME", "PEPTIDE_LSEQ", "CHARGE"])
+            .drop_nulls(["PEPTIDE_LSEQ", "CHARGE"])
+            .with_columns(
+                pl.concat_str(
+                    [pl.col("PEPTIDE_LSEQ"), pl.lit("/"), pl.col("CHARGE").cast(pl.Utf8)]
+                ).alias("PREC_KEY")
+            )
+            .unique(subset=["INDEX", "FILENAME", "PREC_KEY"], maintain_order=True)
+            .group_by(["INDEX", "FILENAME"], maintain_order=True)
+            .agg(pl.len().alias("N_UNIQ_PREC"))
+        )
+        return self._pivot_df(df_sc, "FILENAME", "INDEX", "N_UNIQ_PREC", "max").fill_nan(0)
+
+
     @log_time("Top 3")
     def _pivot_df_top_n(
         self,
@@ -1440,22 +1470,7 @@ class Preprocessor:
         if "PEP" in df.columns:
             pp = self._pivot_df(df, "FILENAME", "INDEX", "PEP", "mean")
 
-        if self.analysis_type == "phospho":
-            df_prec = (
-                df.select(["INDEX", "FILENAME", "PEPTIDE_LSEQ", "CHARGE"])
-                .drop_nulls(["PEPTIDE_LSEQ", "CHARGE"])
-                .with_columns(
-                    pl.concat_str(
-                        [pl.col("PEPTIDE_LSEQ"), pl.lit("/"), pl.col("CHARGE").cast(pl.Utf8)]
-                    ).alias("PREC_KEY")
-                )
-                .unique(subset=["INDEX", "FILENAME", "PREC_KEY"], maintain_order=True)
-                .group_by(["INDEX", "FILENAME"], maintain_order=True)
-                .agg(pl.len().alias("N_UNIQ_PREC"))
-            )
-            sc = self._pivot_df(df_prec, "FILENAME", "INDEX", "N_UNIQ_PREC", "max").fill_nan(0)
-        elif "SPECTRAL_COUNTS" in df.columns:
-            sc = self._pivot_df(df, "FILENAME", "INDEX", "SPECTRAL_COUNTS", "max")
+        sc = self._pivot_native_spectral_counts(df)
 
         if "PRECURSORS_EXP" in df.columns:
             if self.analysis_type == "phospho":
