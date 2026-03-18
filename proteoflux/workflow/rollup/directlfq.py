@@ -6,7 +6,7 @@ import numpy as np
 import directlfq.normalization as lfqnorm
 import multiprocess
 import itertools
-import proteoflux.utils.directlfq_config as config
+import proteoflux.workflow.rollup.directlfq_config as config
 from proteoflux.utils.utils import log_info
 from tqdm import tqdm
 
