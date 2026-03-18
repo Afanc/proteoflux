@@ -143,6 +143,7 @@ class DEExporter:
         log2fc = self._get_dataframe("log2fc")
         q_ebayes = self._get_dataframe("q_ebayes")
         p_ebayes = self._get_dataframe("p_ebayes")
+        nrsc = self._get_dataframe("nrsc")
         q_raw = self._get_dataframe("q_raw")
         p_raw = self._get_dataframe("p_raw")
 
@@ -210,7 +211,7 @@ class DEExporter:
         has_contrasts = bool(self.contrasts) and (log2fc is not None)
 
         # Contrast-specific statistics
-        log2fc_pref = pval_pref = qval_pref = None
+        log2fc_pref = pval_pref = qval_pref = nrsc_pref = None
         if has_contrasts:
             if is_phospho:
                 # Phospho: expose BOTH raw and adjusted statistics with explicit prefixes.
@@ -259,6 +260,8 @@ class DEExporter:
                 if (q_ebayes is not None) and (p_ebayes is not None):
                     qval_pref = q_ebayes.add_prefix("QVALUE_")
                     pval_pref = p_ebayes.add_prefix("PVALUE_")
+                if nrsc is not None:
+                    nrsc_pref = nrsc.add_prefix("NRSC_")
 
         # Processed & Raw intensities integrated
         log2_int_cols = X.add_prefix("Processed_log2_Intensities") if X is not None else None
@@ -273,6 +276,8 @@ class DEExporter:
             blocks.append(qval_pref)
         if pval_pref is not None:
             blocks.append(pval_pref)
+        if nrsc_pref is not None:
+            blocks.append(nrsc_pref)
 
         if observed_df is not None:
             blocks.append(observed_df)
@@ -478,10 +483,10 @@ class DEExporter:
         readme = (
             "ProteoFlux Differential Expression Export\n\n"
             "Sheet Descriptions:\n"
-            "- Summary: metadata, Log2FC, intensities, Q/P-values, missingness.\n"
+            "- Summary: metadata, Log2FC, NRSC, intensities, Q/P-values, missingness.\n"
             "- Identification Qvalue: PSM-level q-values (from search engine), if available.\n"
             "- Identification PEP: Posterior error probability (from search engine), if available.\n"
-            "- Spectral Counts: mean run-evidence counts per (protein x sample), if available.\n"
+            "- Spectral Counts: run-evidence counts per (protein x sample).\n"
             "- IBAQ Values: Intensity based absolute quantification per (protein x sample), if available"
             "- Peptides (raw): wide peptide-by-sample matrix.\n"
         )

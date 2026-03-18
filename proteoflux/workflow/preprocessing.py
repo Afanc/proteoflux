@@ -20,6 +20,7 @@ from typing import Optional, List, Tuple, Dict
 import numpy as np
 import polars as pl
 import pandas as pd
+from enum import Enum
 
 import sklearn.impute
 import sklearn.preprocessing
@@ -46,13 +47,11 @@ from proteoflux.workflow.peptide_tables import (
     build_peptide_tables,
     build_proteomics_peptide_wide,
 )
-from proteoflux.workflow.robust_regression import pivot_df_robust_regression
 from proteoflux.utils.analysis_type import normalize_analysis_type
 
-from proteoflux.utils.directlfq import estimate_protein_intensities
-import proteoflux.utils.directlfq_config as dlcfg
-from enum import Enum
-
+from proteoflux.workflow.rollup.robust_regression import pivot_df_robust_regression
+from proteoflux.workflow.rollup.directlfq import estimate_protein_intensities
+import proteoflux.workflow.rollup.directlfq_config as dlcfg
 
 class Block(str, Enum):
     MAIN = "main"
