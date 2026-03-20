@@ -88,10 +88,15 @@ Can be used to inject an additional .tsv/.csv/.parquet dataset.
 
 | Key | Description |
 |------|------------|
-| `protein_rollup_method` | Protein rollup method. Accepts `sum`, `directlfq`, `median`, `top3`, `min`, `max`, `count`, `mean` or null |
+| `protein_rollup_method` | Protein rollup method. Accepts `sum`, `directlfq`, `robust_regression`, `median`, `top3`, `min`, `max`, `count`, `mean` or null |
 | `peptide_rollup_method` | Peptide rollup method. `sum`, `mean`, `median` |
 | `directlfq_cores` | Number of cores used in DirectLFQ. Default: 8. |
 | `directlfq_min_nonan` | Min number of shared to compute DirectLFQ, outputs NA (-> imputed) if below. Default: 1. |
+| `robust_regression_cores` | Number of cores used for robust regression summarization. Default: same as `directlfq_cores` if not set explicitly (8). |
+| `robust_regression_huber_t` | Huber tuning constant used in the IRLS robust regression. Default: `1.345`. |
+| `robust_regression_max_iter` | Maximum number of IRLS iterations for robust regression summarization. Default: `20`. |
+| `robust_regression_tol` | Convergence tolerance for robust regression summarization. Default: `1e-8`. |
+| `robust_regression_min_nonan` | Minimum number of observed peptide-level values required in a sample to report a protein quantity for that sample. Below this threshold, the output is set to `NA`. Default: `1`. |
 
 ---
 
