@@ -1007,12 +1007,17 @@ class Preprocessor:
         Returns a protein × sample pivot, or None if the required columns
         are not available.
         """
-        required = {"INDEX", "FILENAME", "PEPTIDE_LSEQ", "CHARGE"}
+        required = {"INDEX", "FILENAME", "PEPTIDE_LSEQ", "CHARGE", "SIGNAL"}
         if not required.issubset(df.columns):
             return None
 
         df_sc = (
-            df.select(["INDEX", "FILENAME", "PEPTIDE_LSEQ", "CHARGE"])
+            df.select(["INDEX", "FILENAME", "PEPTIDE_LSEQ", "CHARGE", "SIGNAL"])
+            .filter(
+                pl.col("SIGNAL").is_not_null()
+                & ~pl.col("SIGNAL").is_nan()
+                & (pl.col("SIGNAL") > 0)
+            )
             .drop_nulls(["PEPTIDE_LSEQ", "CHARGE"])
             .with_columns(
                 pl.concat_str(
