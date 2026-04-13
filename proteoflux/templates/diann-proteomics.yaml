@@ -16,7 +16,6 @@ dataset:
   charge_column: "Precursor.Charge"
 
   pep_column: "PEP"
-  spectral_counts_column: null
   precursors_exp_column: null
   ibaq_column: null
   fasta_column: "Protein.Names"

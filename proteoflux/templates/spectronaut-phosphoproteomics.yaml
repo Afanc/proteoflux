@@ -24,7 +24,6 @@ dataset:
   filename_column: "R.FileName"
   condition_column: "R.Condition"
   replicate_column: "R.Replicate"
-  spectral_counts_column: "PEP.RunEvidenceCount"
 
   precursors_exp_column: null
   ibaq_column: null

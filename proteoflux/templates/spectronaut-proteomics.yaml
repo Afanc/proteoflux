@@ -13,7 +13,6 @@ dataset:
   condition_column: "R.Condition"
   replicate_column: "R.Replicate"
   filename_column: "R.FileName"
-  spectral_counts_column: "PG.RunEvidenceCount"
   precursors_exp_column: "PG.NrOfPrecursorsIdentified (Experiment-wide)"
   ibaq_column: "PG.IBAQ"
   fasta_column: "PG.FastaHeaders"

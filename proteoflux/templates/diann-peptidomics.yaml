@@ -17,7 +17,6 @@ dataset:
   charge_column: "Precursor.Charge"
 
   pep_column: "PEP"
-  spectral_counts_column: null
   precursors_exp_column: null
   ibaq_column: null
   fasta_column: "Protein.Names"
@@ -29,7 +28,7 @@ dataset:
 preprocessing:
   collapse_met_oxidation: true
   collapse_all_ptms: false
-  protein_rollup_method: "directlfq"
+  protein_rollup_method: null
   peptide_rollup_method: "sum"
   directlfq_cores: 8
   directlfq_min_nonan: 1
@@ -65,7 +64,7 @@ exports:
     volcano_annotate_infinite: false
     title: "Proteoflux Analysis Report"
     intro_text: |
-      This report summarizes the proteomic analysis pipeline applied to your dataset.
+      This report summarizes the peptidomic analysis pipeline applied to your dataset.
       We performed filtering to remove low-confidence identifications and contaminants, normalized intensities,
       imputed missing values, and finally ran Differential Expression analysis using limma.
     footer_text: "Proteomics Core Facility - Biozentrum - University of Basel"
