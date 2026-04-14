@@ -15,5 +15,16 @@ PTM_MAP = {
     # C-terminal amidation (Unimod:2), -0.984016
     "-0.9840": "Amidated (C-term)",
     "-0.984016": "Amidated (C-term)",
+
+    # Methylation (Unimod:34), +14.01565
+    "14.0156": "Methyl",
+    "14.01565": "Methyl",
+
+    # Dimethylation (Unimod:36), +28.0313
+    "28.0313": "Dimethyl",
+
+    # Trimethylation (Unimod:37), +42.04695
+    "42.0470": "Trimethyl",
+    "42.04695": "Trimethyl",
 }
 

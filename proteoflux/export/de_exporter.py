@@ -144,6 +144,7 @@ class DEExporter:
         q_ebayes = self._get_dataframe("q_ebayes")
         p_ebayes = self._get_dataframe("p_ebayes")
         nrsc = self._get_dataframe("nrsc")
+        nrsc_misalignment = self._get_dataframe("nrsc_misalignment")
         q_raw = self._get_dataframe("q_raw")
         p_raw = self._get_dataframe("p_raw")
 
@@ -262,6 +263,8 @@ class DEExporter:
                     pval_pref = p_ebayes.add_prefix("PVALUE_")
                 if nrsc is not None:
                     nrsc_pref = nrsc.add_prefix("NRSC_")
+                if nrsc_misalignment is not None:
+                    nrsc_misalignment_pref = nrsc_misalignment.add_prefix("NRSC_MISALIGNMENT_")
 
         # Processed & Raw intensities integrated
         log2_int_cols = X.add_prefix("Processed_log2_Intensities") if X is not None else None
@@ -278,6 +281,8 @@ class DEExporter:
             blocks.append(pval_pref)
         if nrsc_pref is not None:
             blocks.append(nrsc_pref)
+        if nrsc_misalignment_pref is not None:
+            blocks.append(nrsc_misalignment_pref)
 
         if observed_df is not None:
             blocks.append(observed_df)
@@ -483,7 +488,7 @@ class DEExporter:
         readme = (
             "ProteoFlux Differential Expression Export\n\n"
             "Sheet Descriptions:\n"
-            "- Summary: metadata, Log2FC, NRSC, intensities, Q/P-values, missingness.\n"
+            "- Summary: metadata, Log2FC, NRSC, NRSC misalignment, intensities, Q/P-values, missingness.\n"
             "- Identification Qvalue: PSM-level q-values (from search engine), if available.\n"
             "- Identification PEP: Posterior error probability (from search engine), if available.\n"
             "- Spectral Counts: run-evidence counts per (protein x sample).\n"

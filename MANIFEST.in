@@ -1,4 +1,27 @@
 include README.md
 include LICENSE
 include pyproject.toml
+
 recursive-include proteoflux/templates *.yaml
+
+prune dist
+prune tests
+prune docs
+prune assets
+prune examples
+
+global-exclude __pycache__/*
+global-exclude *.py[cod]
+global-exclude *.so
+global-exclude .DS_Store
+
+exclude README.md.bak
+exclude preview.pdf
+exclude regression_normalization_FIXED.py
+
+recursive-exclude proteoflux *.h5ad
+recursive-exclude proteoflux *.pdf
+recursive-exclude proteoflux *.bak
+recursive-exclude proteoflux *.xlsx
+recursive-exclude proteoflux *.csv
+recursive-exclude proteoflux *.tsv

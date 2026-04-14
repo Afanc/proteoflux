@@ -17,7 +17,7 @@ from proteoflux.utils.utils import log_time, log_warning, log_info
 from proteoflux.analysis.clustering import run_clustering, run_clustering_missingness
 from proteoflux.analysis.stats_ops import raw_stats_from_fit, bh_qvalues, two_sided_t_pvalue
 from proteoflux.analysis.missingness import compute_missingness
-from proteoflux.analysis.nrsc import compute_nrsc
+from proteoflux.analysis.nrsc import compute_nrsc, compute_nrsc_misalignment
 from proteoflux.analysis.adata_schema import (
     # .uns
     UNS_CONTRAST_NAMES,
@@ -325,9 +325,11 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     out.uns[UNS_MISSINGNESS_RULE] = "nan-is-missing"
     out.uns[UNS_HAS_COVARIATE] = False
 
-    nrsc = compute_nrsc(adata, contrast_names)
+    nrsc = compute_nrsc(out, contrast_names)
     if nrsc is not None:
         out.varm["nrsc"] = nrsc
+        nrsc_misalignment = compute_nrsc_misalignment(out, contrast_names, nrsc=nrsc)
+        out.varm["nrsc_misalignment"] = nrsc_misalignment
 
     return out
 
@@ -681,8 +683,10 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     # Describe decomposition rule once for the viewer
     out.uns["decomposition_rule"] = "raw_log2fc ≈ log2fc (adjusted) + cov_part"
 
-    nrsc = _compute_nrsc_from_adata(adata, contrast_names)
+    nrsc = compute_nrsc(out, contrast_names)
     if nrsc is not None:
         out.varm["nrsc"] = nrsc
+        nrsc_misalignment = compute_nrsc_misalignment(out, contrast_names, nrsc=nrsc)
+        out.varm["nrsc_misalignment"] = nrsc_misalignment
 
     return out
