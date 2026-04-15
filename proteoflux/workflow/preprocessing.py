@@ -75,13 +75,29 @@ class Preprocessor:
     available_normalization = ["zscore", "vst", "linear"]
     available_imputation = ["mean", "median", "knn", "randomforest"]
 
-    def __init__(self, config: Optional[dict] = None):
+    def __init__(
+        self,
+        config: Optional[dict] = None,
+        batch_effect_columns: Optional[list[str]] = None,
+    ):
         """Initialize from a config dict mirroring `config.yaml` sections."""
 
         self.intermediate_results = IntermediateResults()
         self.analysis_type = normalize_analysis_type((config or {}).get("analysis_type"))
 
         config = config or {}
+
+        self.batch_effect_columns = batch_effect_columns or []
+        if isinstance(self.batch_effect_columns, str):
+            self.batch_effect_columns = [self.batch_effect_columns]
+        self.batch_effect_columns = [
+            str(c).strip() for c in self.batch_effect_columns if str(c).strip()
+        ]
+        if len(self.batch_effect_columns) != len(set(self.batch_effect_columns)):
+            raise ValueError(
+                "analysis.batch_effect_columns contains duplicates: "
+                f"{self.batch_effect_columns!r}"
+            )
 
         # Filtering
         self.filtering = config.get("filtering") or {}
@@ -812,6 +828,20 @@ class Preprocessor:
         if "IS_COVARIATE" in df.columns:
             base_cols.append("IS_COVARIATE")
 
+        col_lookup = {str(c).casefold(): c for c in df.columns}
+        resolved_batch_effect_columns: list[str] = []
+        for col in self.batch_effect_columns:
+            actual = col_lookup.get(str(col).casefold())
+            if actual is None:
+                raise ValueError(
+                    f"analysis.batch_effect_columns contains {col!r}, but that column "
+                    "is not present after harmonization/annotation injection "
+                    f"(available columns: {list(df.columns)!r})."
+                )
+            resolved_batch_effect_columns.append(actual)
+            if actual not in base_cols:
+                base_cols.append(actual)
+
         condition_mapping = (
             df.select(base_cols)
             .unique()
@@ -821,19 +851,21 @@ class Preprocessor:
 
         # aggregate IS_COVARIATE per Sample if present
         if "IS_COVARIATE" in condition_mapping.columns:
+            agg_exprs = [
+                pl.first("CONDITION"),
+                pl.first("REPLICATE"),
+            ]
+            if "ASSAY" in condition_mapping.columns:
+                agg_exprs.append(pl.first("ASSAY").alias("ASSAY"))
+            for col in resolved_batch_effect_columns:
+                if col in condition_mapping.columns:
+                    agg_exprs.append(pl.first(col).alias(col))
+            agg_exprs.append(pl.col("IS_COVARIATE").max().alias("IS_COVARIATE"))
+
             condition_mapping = (
                 condition_mapping.group_by(
                     "Sample", maintain_order=True
-                ).agg(
-                    [
-                        pl.first("CONDITION"),
-                        pl.first("REPLICATE"),
-                        pl.first("ASSAY").alias("ASSAY")
-                        if "ASSAY" in condition_mapping.columns
-                        else pl.lit(None).alias("ASSAY"),
-                        pl.col("IS_COVARIATE").max().alias("IS_COVARIATE"),
-                    ]
-                )
+                ).agg(agg_exprs)
             )
 
         def _sanitize_condition(s: str) -> str:

@@ -524,6 +524,12 @@ class DEExporter:
             if col in self.adata.var.columns:
                 self.adata.var[col] = self.adata.var[col].astype("category")
 
+        for col in self.adata.uns.get("batch_effect_columns", []) or []:
+            if col in self.adata.obs.columns:
+                series = self.adata.obs[col]
+                if not pd.api.types.is_numeric_dtype(series):
+                    self.adata.obs[col] = series.astype("category")
+
         meta = self.adata.uns.get("proteoflux", {})
 
         if not isinstance(meta, dict):

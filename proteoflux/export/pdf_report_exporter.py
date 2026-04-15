@@ -552,6 +552,18 @@ class ReportPlotter:
                      ha="left", va="top", fontsize=12)
         y -= line_height
 
+        batch_cols = self.adata.uns.get("batch_effect_columns", []) or []
+        if batch_cols:
+            fig.text(
+                x0 + 0.02,
+                y,
+                f"- Batch/covariate adjustment: {', '.join(map(str, batch_cols))}",
+                ha="left",
+                va="top",
+                fontsize=12,
+            )
+            y -= line_height
+
         # Package versions
         fig.text(x0, y, "Key package versions:", ha="left", va="top",
                  fontsize=14, weight="semibold")

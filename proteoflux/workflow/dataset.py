@@ -88,7 +88,13 @@ class Dataset:
             cov_block["assays"] = sorted(prev)
         preprocessing_cfg["covariates"] = cov_block
 
-        self.preprocessor = Preprocessor(preprocessing_cfg)
+        analysis_cfg = deepcopy(kwargs.get("analysis", {}) or {})
+        batch_effect_columns = analysis_cfg.get("batch_effect_columns") or []
+
+        self.preprocessor = Preprocessor(
+            preprocessing_cfg,
+            batch_effect_columns=batch_effect_columns,
+        )
 
         # Process
         self._load_and_process()
