@@ -169,6 +169,7 @@ Can be used to inject an additional .tsv/.csv/.parquet dataset.
 |------|------------|
 | `only_contrasts` | Restrict analysis to list of contrasts. Syntax "A_v_B" or "A_vs_B". Optional. |
 | `only_against` | Restrict to comparisons against this condition. Optional. |
+| `batch_effect_columns` | List of annotation columns to include as covariates in the design matrix (e.g. `["sex", "age"]`). Optional. |
 | `clustering_max` | Max number features for clustering. Default: 8000. |
 
 ---

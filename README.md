@@ -1,5 +1,5 @@
 # ProteoFlux
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18640999.svg)](https://doi.org/10.5281/zenodo.18640999)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18640999.svg)](https://doi.org/10.5281/zenodo.18640998)
 
 ProteoFlux is an open-source Python framework for transparent, reproducible downstream analysis of quantitative proteomics data.
 
@@ -148,7 +148,7 @@ ProteoViewer is released under the MIT License. See the LICENSE file for details
 
 If you use ProteoFlux in your work, please cite:
 
-ProteoFlux v1.8.5.  
-Zenodo. https://doi.org/10.5281/zenodo.18640999
+ProteoFlux (latest version).  
+Zenodo. https://doi.org/10.5281/zenodo.18640998
 
 A peer-reviewed publication is currently under submission.
