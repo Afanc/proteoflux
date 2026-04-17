@@ -53,7 +53,9 @@ preprocessing:
 analysis:
   only_against: null
   only_contrasts: null
+  batch_effect_columns: null
   clustering_max: 8000
+
 exports:
   path_h5ad: "proteoflux_results.h5ad"
   path_table: "proteoflux_table.xlsx"
