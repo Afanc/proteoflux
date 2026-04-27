@@ -212,7 +212,7 @@ class DEExporter:
         has_contrasts = bool(self.contrasts) and (log2fc is not None)
 
         # Contrast-specific statistics
-        log2fc_pref = pval_pref = qval_pref = nrsc_pref = None
+        log2fc_pref = pval_pref = qval_pref = nrsc_pref = nrsc_misalignment_pref = None
         if has_contrasts:
             if is_phospho:
                 # Phospho: expose BOTH raw and adjusted statistics with explicit prefixes.
@@ -524,7 +524,8 @@ class DEExporter:
             if col in self.adata.var.columns:
                 self.adata.var[col] = self.adata.var[col].astype("category")
 
-        for col in self.adata.uns.get("batch_effect_columns", []) or []:
+        analysis_meta = self.adata.uns.get("analysis", {}) or {}
+        for col in analysis_meta.get("batch_effect_columns", []) or []:
             if col in self.adata.obs.columns:
                 series = self.adata.obs[col]
                 if not pd.api.types.is_numeric_dtype(series):
