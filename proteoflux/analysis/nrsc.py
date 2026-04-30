@@ -39,3 +39,53 @@ def compute_nrsc(
         ok = denom > 0
         out[ok, j] = ((a[ok] - b[ok]) / denom[ok]).astype(np.float32, copy=False)
     return out
+
+def compute_nrsc_misalignment(
+    adata: ad.AnnData,
+    contrast_names: list[str],
+    nrsc: Optional[np.ndarray] = None,
+) -> Optional[np.ndarray]:
+    """
+    Compute per-feature, per-contrast nrSC misalignment:
+
+        nrSC_misalignment = sign(logFC) * nrSC + 1
+
+    Range:
+        [0, 2] when nrSC is in [-1, 1]
+
+    Interpretation:
+        - 2: fully misaligned with logfc
+        - 1: neutral (including logFC == 0)
+        - 0: fully aligned with logfc
+
+    Returns a (n_vars x n_contrasts) float32 array, or None when either nrSC
+    or log2fc is unavailable.
+    """
+
+    if nrsc is None:
+        if "nrsc" not in adata.varm:
+            raise ValueError(
+                "compute_nrsc_misalignment: nrsc not provided and missing from adata.varm['nrsc']"
+            )
+        nrsc = adata.varm["nrsc"]
+
+    if "log2fc" not in adata.varm:
+        raise ValueError(
+            "compute_nrsc_misalignment: missing adata.varm['log2fc'] required for alignment"
+        )
+
+    log2fc = np.asarray(adata.varm["log2fc"], dtype=np.float32)
+    nrsc = np.asarray(nrsc, dtype=np.float32)
+
+    expected_shape = (adata.n_vars, len(contrast_names))
+    if log2fc.shape != expected_shape:
+        raise ValueError(
+            f"Unexpected log2fc shape {log2fc.shape}, expected {expected_shape}"
+        )
+    if nrsc.shape != expected_shape:
+        raise ValueError(
+            f"Unexpected nrsc shape {nrsc.shape}, expected {expected_shape}"
+        )
+
+    out = (1.0 - (np.sign(log2fc) * nrsc)).astype(np.float32, copy=False)
+    return out

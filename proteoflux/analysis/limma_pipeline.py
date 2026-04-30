@@ -17,7 +17,7 @@ from proteoflux.utils.utils import log_time, log_warning, log_info
 from proteoflux.analysis.clustering import run_clustering, run_clustering_missingness
 from proteoflux.analysis.stats_ops import raw_stats_from_fit, bh_qvalues, two_sided_t_pvalue
 from proteoflux.analysis.missingness import compute_missingness
-from proteoflux.analysis.nrsc import compute_nrsc
+from proteoflux.analysis.nrsc import compute_nrsc, compute_nrsc_misalignment
 from proteoflux.analysis.adata_schema import (
     # .uns
     UNS_CONTRAST_NAMES,
@@ -57,14 +57,122 @@ def _genes_by_samples_df(X_like: np.ndarray, obs_names, var_names) -> pd.DataFra
     return pd.DataFrame(X_like, index=obs_names, columns=var_names).T
 
 
-def _design_no_intercept(obs: pd.DataFrame, levels: list[str]) -> patsy.DesignMatrix:
-    """Patsy design matrix: 0 + levelA + levelB + ... (mechanical shared helper)."""
-    tmp = obs.copy()
-    for lvl in levels:
-        tmp[lvl] = (tmp["CONDITION"] == lvl).astype(int)
-    formula = "0 + " + " + ".join(levels)
-    return patsy.dmatrix(formula, tmp)
+def _design_with_optional_covariates(
+    obs: pd.DataFrame,
+    levels: list[str],
+    cfg: dict,
+) -> patsy.DesignMatrix:
+    """
+    Patsy design matrix built from pre-encoded numeric columns:
+      - condition columns are explicit bare names (EC_high, EC_low, ...)
+      - categorical batch/covariates are dummy-encoded with drop_first=True
+      - numeric batch/covariates are added as numeric columns
 
+    This preserves contrast names while keeping a native Patsy design matrix.
+    """
+    if len(levels) < 2:
+        raise ValueError(f"Need ≥2 conditions for design; found {levels}")
+
+    tmp = obs.copy()
+    tmp["CONDITION"] = tmp["CONDITION"].astype(str)
+
+    # Keep legacy/manual condition coding so contrast names remain valid.
+    cond_df = pd.DataFrame(index=tmp.index)
+    for lvl in levels:
+        tmp[lvl] = (tmp["CONDITION"] == lvl).astype(float)
+
+    analysis_cfg = (cfg or {}).get("analysis", {}) or {}
+    batch_cols_cfg = analysis_cfg.get("batch_effect_columns") or []
+    if isinstance(batch_cols_cfg, str):
+        batch_cols_cfg = [batch_cols_cfg]
+    batch_cols_cfg = [str(c).strip() for c in batch_cols_cfg if str(c).strip()]
+
+    if len(batch_cols_cfg) != len(set(batch_cols_cfg)):
+        raise ValueError(
+            "analysis.batch_effect_columns contains duplicates: "
+            f"{batch_cols_cfg!r}"
+        )
+
+    col_lookup = {str(c).casefold(): c for c in tmp.columns}
+    resolved_batch_cols: list[str] = []
+    design_terms: list[str] = list(levels)
+    batch_term_kinds: list[str] = []
+
+    for col in batch_cols_cfg:
+        actual = col_lookup.get(str(col).casefold())
+        if actual is None:
+            raise ValueError(
+                f"analysis.batch_effect_columns contains {col!r}, but that column "
+                f"is not present in adata.obs (available columns: {list(tmp.columns)!r})."
+            )
+
+        s = tmp[actual]
+        nonnull = s.dropna()
+        if nonnull.empty:
+            raise ValueError(
+                f"analysis.batch_effect_columns: column {actual!r} contains only null values."
+            )
+
+        n_unique = pd.Series(nonnull).nunique(dropna=True)
+        if n_unique < 2:
+            raise ValueError(
+                f"analysis.batch_effect_columns: column {actual!r} must contain at least "
+                f"2 distinct non-null values, got {n_unique}."
+            )
+
+        s_num = pd.to_numeric(s, errors="coerce")
+        numeric_like = bool(s_num.notna().sum() == s.notna().sum())
+
+        if numeric_like:
+            tmp[actual] = s_num.astype(float)
+            design_terms.append(f"Q('{actual}')")
+            batch_term_kinds.append(f"{actual} (numeric)")
+        else:
+            tmp[actual] = s.astype(str)
+            dummies = pd.get_dummies(tmp[actual], prefix=actual, prefix_sep="__", drop_first=True)
+            if dummies.shape[1] == 0:
+                raise ValueError(
+                    f"analysis.batch_effect_columns: categorical column {actual!r} "
+                    "produced no design columns after dummy coding."
+                )
+            for dummy_col in dummies.columns:
+                tmp[dummy_col] = dummies[dummy_col].astype(float)
+                design_terms.append(f"Q('{dummy_col}')")
+            batch_term_kinds.append(f"{actual} (categorical)")
+
+        resolved_batch_cols.append(actual)
+
+    if batch_term_kinds:
+        log_info(
+            "Including batch/covariate terms in design matrix: "
+            + ", ".join(batch_term_kinds)
+        )
+
+    formula = "0 + " + " + ".join(design_terms)
+    design_dm = patsy.dmatrix(formula, tmp)
+
+    rank = int(np.linalg.matrix_rank(np.asarray(design_dm, dtype=float)))
+
+    if rank < design_dm.shape[1]:
+        raise ValueError(
+            "Design matrix is rank-deficient. This usually means one or more "
+            "batch_effect_columns are confounded with CONDITION or with each other. "
+            f"shape={design_dm.shape}, rank={rank}, columns={list(design_dm.design_info.column_names)!r}."
+        )
+
+    n_samples = int(design_dm.shape[0])
+    df_resid = n_samples - rank
+    if df_resid <= 0:
+        raise ValueError(
+            "Design matrix leaves no residual degrees of freedom. "
+            f"n_samples={n_samples}, rank={rank}, residual_df={df_resid}. "
+            "Reduce the number of batch/covariate terms."
+        )
+
+    design_dm.attrs = {}
+    design_dm.attrs["proteoflux_formula"] = formula
+    design_dm.attrs["proteoflux_batch_effect_columns"] = resolved_batch_cols
+    return design_dm
 
 def _fit_limma_with_contrasts(
     *,
@@ -116,6 +224,7 @@ def _fit_limma_with_contrasts(
         "t_raw": t_raw,
         "p_raw": p_raw,
         "q_raw": q_raw,
+        "sigma": sigma,
         "se_ebayes": se_ebayes,
         "t_ebayes": t_ebayes,
         "p_ebayes": p_ebayes,
@@ -265,7 +374,7 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     if len(levels) < 2:
         raise ValueError(f"Need ≥2 conditions for contrasts; found {levels}")
 
-    design_dm = _design_no_intercept(obs, levels)
+    design_dm = _design_with_optional_covariates(obs, levels, config)
 
     # Expression: genes × samples
     df_X = _genes_by_samples_df(adata.X, adata.obs_names, adata.var_names)
@@ -286,8 +395,7 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     )
 
     # Residual variance (from the raw lmFit, matching prior behavior)
-    fit_for_var = imo.lmFit(df_X, design=design_dm)
-    resid_var = np.asarray(fit_for_var.sigma, dtype=np.float32) ** 2
+    resid_var = np.asarray(limma_res["sigma"], dtype=np.float32) ** 2
     adata.uns[UNS_RESIDUAL_VARIANCE] = resid_var
 
     # Assemble into AnnData
@@ -324,10 +432,15 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     out.uns[UNS_MISSINGNESS_SOURCE] = miss_source
     out.uns[UNS_MISSINGNESS_RULE] = "nan-is-missing"
     out.uns[UNS_HAS_COVARIATE] = False
+    out.uns["design_formula"] = design_dm.attrs.get("proteoflux_formula")
+    out.uns["batch_effect_columns"] = design_dm.attrs.get("proteoflux_batch_effect_columns", [])
+    out.uns["design_columns"] = list(design_dm.design_info.column_names)
 
-    nrsc = compute_nrsc(adata, contrast_names)
+    nrsc = compute_nrsc(out, contrast_names)
     if nrsc is not None:
         out.varm["nrsc"] = nrsc
+        nrsc_misalignment = compute_nrsc_misalignment(out, contrast_names, nrsc=nrsc)
+        out.varm["nrsc_misalignment"] = nrsc_misalignment
 
     return out
 
@@ -521,7 +634,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     R_df = pd.DataFrame(R, index=Y_df.index, columns=Y_df.columns)  # (G×N)
 
     # Stage 2: limma on residuals
-    design2 = _design_no_intercept(obs, levels)
+    design2 = _design_with_optional_covariates(obs, levels, config)
     contr   = _make_contrasts(levels, design2, config)
 
     contrast_names = list(contr.columns)
@@ -633,8 +746,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         out.varm[VARM_Q_EBAYES] = limma_resid["q_ebayes"]
 
         # Residual variance from stage-2 limma (adjusted model)
-        fit_resid = imo.lmFit(R_df, design=design2)
-        resid_var = np.asarray(fit_resid.sigma, dtype=np.float32) ** 2
+        resid_var = np.asarray(limma_resid["sigma"], dtype=np.float32) ** 2
         out.uns[UNS_RESIDUAL_VARIANCE] = resid_var
 
     # Raw model (same contrasts) - for decomposition display
@@ -667,6 +779,10 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     out.uns[UNS_HAS_COVARIATE] = True
     out.uns[UNS_PILOT_MODE] = bool(pilot_mode)
 
+    out.uns["design_formula"] = design2.attrs.get("proteoflux_formula")
+    out.uns["batch_effect_columns"] = design2.attrs.get("proteoflux_batch_effect_columns", [])
+    out.uns["design_columns"] = list(design2.design_info.column_names)
+
     if (not pilot_mode) and (fully is not None):
         _neutralize_fully_imputed_contrasts(out=out, fully=fully)
         out.uns[UNS_N_FULLY_IMPUTED_CELLS] = int(np.count_nonzero(fully))
@@ -681,8 +797,10 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     # Describe decomposition rule once for the viewer
     out.uns["decomposition_rule"] = "raw_log2fc ≈ log2fc (adjusted) + cov_part"
 
-    nrsc = _compute_nrsc_from_adata(adata, contrast_names)
+    nrsc = compute_nrsc(out, contrast_names)
     if nrsc is not None:
         out.varm["nrsc"] = nrsc
+        nrsc_misalignment = compute_nrsc_misalignment(out, contrast_names, nrsc=nrsc)
+        out.varm["nrsc_misalignment"] = nrsc_misalignment
 
     return out

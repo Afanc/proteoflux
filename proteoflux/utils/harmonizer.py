@@ -366,12 +366,17 @@ class DataHarmonizer:
         self._validate_long_annotation(df, ann)
 
         # Join
-        #df = df.join(ann, on="FILENAME", how="left")
+        extra_ann_cols = [
+            c for c in ann.columns
+            if c not in {"FILENAME", "Condition", "Replicate"}
+        ]
+
         ann_join = ann.select(
             [
                 pl.col("FILENAME"),
                 pl.col("Condition").alias("_ANN_CONDITION"),
                 pl.col("Replicate").alias("_ANN_REPLICATE"),
+                *[pl.col(c) for c in extra_ann_cols],
             ]
         )
 

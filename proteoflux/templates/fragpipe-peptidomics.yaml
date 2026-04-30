@@ -53,7 +53,9 @@ preprocessing:
 analysis:
   only_against: null
   only_contrasts: null
+  batch_effect_columns: null
   clustering_max: 8000
+
 exports:
   path_h5ad: "proteoflux_results.h5ad"
   path_table: "proteoflux_table.xlsx"
@@ -64,7 +66,7 @@ exports:
     volcano_annotate_infinite: false
     title: "Proteoflux Analysis Report"
     intro_text: |
-      This report summarizes the proteomic analysis pipeline applied to your dataset.
+      This report summarizes the peptidomic analysis pipeline applied to your dataset.
       We performed filtering to remove low-confidence identifications and contaminants, normalized intensities,
       imputed missing values, and finally ran Differential Expression analysis using limma.
     footer_text: "Proteomics Core Facility - Biozentrum - University of Basel"

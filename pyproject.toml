@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "proteoflux"
-version = "1.8.7"
+version = "1.8.8"
 description = "Transparent and reproducible proteomics analysis pipeline"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -63,6 +63,9 @@ where = ["."]
 include = ["proteoflux*"]
 exclude = ["assets*", "docs*", "tests*"]
 namespaces = false
+
+[tool.setuptools.exclude-package-data]
+"*" = ["*.h5ad", "*.pdf", "*.bak", "*.xlsx", "*.csv", "*.tsv"]
 
 [project.urls]
 Repository = "https://github.com/afanc/proteoflux"
