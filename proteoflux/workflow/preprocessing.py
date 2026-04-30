@@ -358,7 +358,7 @@ class Preprocessor:
 
         signal_present_filter = pl.lit(True)
 
-        if at == "peptidomics":
+        if at in {"peptidomics", "pelsa"}:
             signal_present_filter = (
                 pl.col("SIGNAL").is_not_null()
                 & ~pl.col("SIGNAL").is_nan()
@@ -823,6 +823,10 @@ class Preprocessor:
 
         df = self.intermediate_results.dfs["filtered_final_censored"]
         base_cols = ["FILENAME", "CONDITION", "REPLICATE"]
+
+        if self.analysis_type == "pelsa":
+            base_cols.append("Concentration")
+
         if "ASSAY" in df.columns:
             base_cols.append("ASSAY")
         if "IS_COVARIATE" in df.columns:
@@ -855,6 +859,8 @@ class Preprocessor:
                 pl.first("CONDITION"),
                 pl.first("REPLICATE"),
             ]
+            if "Concentration" in condition_mapping.columns:
+                agg_exprs.append(pl.first("Concentration").alias("Concentration"))
             if "ASSAY" in condition_mapping.columns:
                 agg_exprs.append(pl.first("ASSAY").alias("ASSAY"))
             for col in resolved_batch_effect_columns:
@@ -1347,8 +1353,10 @@ class Preprocessor:
         ir.add_df("ibaq", ibaq_pivot)
         ir.dfs["peptides_wide"] = raw_pep_pivot
         ir.dfs["peptides_centered"] = centered_pep_pivot
-        ir.add_metadata("quantification", "method", self.protein_rollup_method)
         ir.add_metadata("quantification", "directlfq_min_nonan", self.directlfq_min_nonan)
+        ir.add_metadata("quantification", "peptide_rollup_method", self.peptide_rollup_method)
+        if self.analysis_type not in {"peptidomics", "pelsa"}:
+            ir.add_metadata("quantification", "protein_rollup_method", self.protein_rollup_method)
 
         # Covariate pivots and broadcast
         with log_indent():
@@ -1442,8 +1450,15 @@ class Preprocessor:
 
     def _pivot_main_block(self, df: pl.DataFrame) -> Dict[str, Optional[pl.DataFrame]]:
         """Mechanical extraction of the original per-block pivot logic."""
-        method = (self.protein_rollup_method or "sum").lower()
-        log_info(f"Quantification using {method}")
+        if self.analysis_type in {"peptidomics", "pelsa"}:
+            method = self.peptide_rollup_method
+            log_info(
+                f"Peptide quantification using {method} "
+            )
+        else:
+            method = (self.protein_rollup_method or "sum").lower()
+            log_info(f"Protein quantification using {method}")
+
         if method == "directlfq":
             intensity = self._pivot_df_LFQ(
                 df=df,

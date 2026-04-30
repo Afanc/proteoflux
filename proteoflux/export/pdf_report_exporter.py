@@ -516,6 +516,9 @@ class ReportPlotter:
         # Imputation
         imp = preproc.get("imputation", {})
         imp_method = imp.get("method", [])
+        if imp_method is None:
+            imp_method = []
+
         if "knn" in imp_method:
             extras = []
             if "knn_k" in imp:
@@ -606,6 +609,11 @@ class ReportPlotter:
     def _plot_IDs_and_metrics(self):
         """Bar: IDs per sample; Violin: %CV/%rMAD per condition (single page)."""
 
+        # Data cleaner, just in case
+        def _finite_metric_array(x):
+            x = np.asarray(x, dtype=float)
+            return x[np.isfinite(x)]
+
         # prepare data
         df_raw = pd.DataFrame(self.adata.layers['raw'], index=self.adata.obs_names, columns=self.adata.var_names)
         counts = df_raw.notna().sum(axis=1)
@@ -623,15 +631,15 @@ class ReportPlotter:
         # metrics
         mat_all = self.adata.X.T
         res_all = compute_metrics(mat_all, metrics=["CV","RMAD"])
-        data_cv = [res_all["CV"]]
-        data_rmad = [res_all["RMAD"]]
+        data_cv = [_finite_metric_array(res_all["CV"])]
+        data_rmad = [_finite_metric_array(res_all["RMAD"])]
         if not single_condition:
             for cond in raw_conds:
                 mask = self.adata.obs['CONDITION'] == cond
                 mat = self.adata.X[mask.values,:].T
                 res = compute_metrics(mat, metrics=["CV","RMAD"])
-                data_cv.append(res["CV"])
-                data_rmad.append(res["RMAD"])
+                data_cv.append(_finite_metric_array(res["CV"]))
+                data_rmad.append(_finite_metric_array(res["RMAD"]))
 
         # plotting
         n_samples = int(len(counts.index))
@@ -706,29 +714,44 @@ class ReportPlotter:
             _plot_ids_table_multi_column(ax_bar, df_ids, cond_color_map=color_map)
 
         # violins
-        parts_rm = ax_rm.violinplot(data_rmad,positions=range(len(conds)),showmeans=False,showextrema=False,showmedians=True)
-        parts_cv = ax_cv.violinplot(data_cv,positions=range(len(conds)),showmeans=False,showextrema=False,showmedians=True)
+        data_rmad = [np.asarray(x, dtype=float) for x in data_rmad]
+        data_cv = [np.asarray(x, dtype=float) for x in data_cv]
+        data_rmad = [x[np.isfinite(x)] for x in data_rmad]
+        data_cv = [x[np.isfinite(x)] for x in data_cv]
+        keep_violin = [
+            i for i, (rm, cv) in enumerate(zip(data_rmad, data_cv))
+            if len(rm) > 1 and len(cv) > 1
+        ]
+
+        conds_v = [conds[i] for i in keep_violin]
+        data_rmad_v = [data_rmad[i] for i in keep_violin]
+        data_cv_v = [data_cv[i] for i in keep_violin]
+
+        parts_rm = ax_rm.violinplot(data_rmad_v,positions=range(len(conds_v)),showmeans=False,showextrema=False,showmedians=True)
+        parts_cv = ax_cv.violinplot(data_cv_v,positions=range(len(conds_v)),showmeans=False,showextrema=False,showmedians=True)
+
+
         for i,body in enumerate(parts_rm['bodies']):
-            body.set_facecolor(color_map[conds[i]]);
+            body.set_facecolor(color_map[conds_v[i]]);
             body.set_edgecolor('black'); body.set_alpha(0.7)
         for i,body in enumerate(parts_cv['bodies']):
-            body.set_facecolor(color_map[conds[i]]);
+            body.set_facecolor(color_map[conds_v[i]]);
             body.set_edgecolor('black'); body.set_alpha(0.7)
-        ax_rm.set_xticks(range(len(conds))); ax_rm.set_xticklabels(conds,rotation=45,ha='right')
+        ax_rm.set_xticks(range(len(conds_v))); ax_rm.set_xticklabels(conds_v,rotation=45,ha='right')
         ax_rm.set_ylabel('%rMAD'); ax_rm.set_title('%rMAD per Condition')
         ax_rm.grid(axis='y', which='both', visible=True)
-        ax_cv.set_xticks(range(len(conds))); ax_cv.set_xticklabels(conds,rotation=45,ha='right')
+        ax_cv.set_xticks(range(len(conds_v))); ax_cv.set_xticklabels(conds_v,rotation=45,ha='right')
         ax_cv.set_ylabel('%CV'); ax_cv.set_title('%CV per Condition')
         ax_cv.grid(axis='y', which='both', visible=True)
-        for i, arr in enumerate(data_rmad):
+        for i, arr in enumerate(data_rmad_v):
             med = np.nanmedian(arr)
             ax_rm.text(i, med, f'{med:.1f}',
                        ha='center', va='bottom', fontsize=8)
 
-        ax_cv.set_xticks(range(len(conds)))
-        ax_cv.set_xticklabels(conds, rotation=45, ha='right')
+        ax_cv.set_xticks(range(len(conds_v)))
+        ax_cv.set_xticklabels(conds_v, rotation=45, ha='right')
         ax_cv.set_ylabel('%CV'); ax_cv.set_title('%CV per Condition')
-        for i, arr in enumerate(data_cv):
+        for i, arr in enumerate(data_cv_v):
             med = np.nanmedian(arr)
             ax_cv.text(i, med, f'{med:.1f}',
                        ha='center', va='bottom', fontsize=8)

@@ -108,6 +108,21 @@ class DataHarmonizer:
                 "Provide canonical columns: Condition (Replicate optional)."
             )
 
+        if self.analysis_type == "pelsa":
+            if "Concentration" not in ann.columns:
+                raise ValueError(
+                    "PELSA analysis requires annotation_file with a numeric "
+                    "'Concentration' column."
+                )
+            ann = ann.with_columns(
+                pl.col("Concentration").cast(pl.Float64, strict=False)
+            )
+            if ann.select(pl.col("Concentration").is_null().any()).item():
+                raise ValueError(
+                    "PELSA annotation column 'Concentration' contains null or "
+                    "non-numeric values after casting to float."
+                )
+
         if join_col != "FILENAME":
             # Rename only the chosen column to avoid creating duplicates
             ann = ann.rename({join_col: "FILENAME"})
@@ -1174,7 +1189,7 @@ class DataHarmonizer:
 
         if self.analysis_type == "phospho":
             df = self._build_phospho_index(df)
-        elif self.analysis_type == "peptidomics":
+        elif self.analysis_type in {"peptidomics", "pelsa"}:
             df = self._build_peptido_index(df)
 
         return df

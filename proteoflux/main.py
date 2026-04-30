@@ -1,5 +1,6 @@
 from proteoflux.workflow.dataset import Dataset
 from proteoflux.analysis.limma_pipeline import run_limma_pipeline, clustering_pipeline
+from proteoflux.analysis.pelsa_pipeline import run_pelsa_pipeline
 from proteoflux.analysis.validation import validate_analysis_input
 from proteoflux.export.pdf_report_exporter import ReportPlotter
 from proteoflux.export.de_exporter import DEExporter
@@ -12,7 +13,12 @@ def run_pipeline(config: dict):
 
     adata = dataset.get_anndata()
     validate_analysis_input(adata)
-    adata = run_limma_pipeline(adata, config)
+
+    if dataset.analysis_type == "pelsa":
+         adata = run_pelsa_pipeline(adata, config)
+    else:
+         adata = run_limma_pipeline(adata, config)
+
     adata = clustering_pipeline(adata, config)
 
     analysis_config = config.get("analysis", {})

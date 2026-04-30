@@ -119,7 +119,11 @@ class Dataset:
 
     @property
     def is_peptidomics(self) -> bool:
-        return self.analysis_type == "peptidomics"
+        return self.analysis_type in {"peptidomics", "pelsa"}
+
+    @property
+    def is_pelsa(self) -> bool:
+        return self.analysis_type == "pelsa"
 
     @property
     def is_phospho(self) -> bool:
@@ -631,9 +635,15 @@ class Dataset:
 
         # Analysis parameters
         self.adata.uns["analysis"] = {
-            "de_method": "limma_ebayes",
             "analysis_type": self.analysis_type,
+            "analysis_method": (
+                "pelsa_curve_fit"
+                if self.analysis_type == "pelsa"
+                else "limma_ebayes"
+            ),
         }
+        if self.analysis_type != "pelsa":
+            self.adata.uns["analysis"]["de_method"] = "limma_ebayes"
 
         # Per-condition consistency payload in .uns
         if consistent_payload is not None:

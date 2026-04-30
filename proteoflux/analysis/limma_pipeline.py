@@ -432,9 +432,9 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     out.uns[UNS_MISSINGNESS_SOURCE] = miss_source
     out.uns[UNS_MISSINGNESS_RULE] = "nan-is-missing"
     out.uns[UNS_HAS_COVARIATE] = False
-    out.uns["design_formula"] = design_dm.attrs.get("proteoflux_formula")
-    out.uns["batch_effect_columns"] = design_dm.attrs.get("proteoflux_batch_effect_columns", [])
-    out.uns["design_columns"] = list(design_dm.design_info.column_names)
+    out.uns["analysis"]["design_formula"] = design_dm.attrs.get("proteoflux_formula")
+    out.uns["analysis"]["batch_effect_columns"] = design_dm.attrs.get("proteoflux_batch_effect_columns", [])
+    out.uns["analysis"]["design_columns"] = list(design_dm.design_info.column_names)
 
     nrsc = compute_nrsc(out, contrast_names)
     if nrsc is not None:
@@ -779,9 +779,9 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     out.uns[UNS_HAS_COVARIATE] = True
     out.uns[UNS_PILOT_MODE] = bool(pilot_mode)
 
-    out.uns["design_formula"] = design2.attrs.get("proteoflux_formula")
-    out.uns["batch_effect_columns"] = design2.attrs.get("proteoflux_batch_effect_columns", [])
-    out.uns["design_columns"] = list(design2.design_info.column_names)
+    out.uns["analysis"]["design_formula"] = design2.attrs.get("proteoflux_formula")
+    out.uns["analysis"]["batch_effect_columns"] = design2.attrs.get("proteoflux_batch_effect_columns", [])
+    out.uns["analysis"]["design_columns"] = list(design2.design_info.column_names)
 
     if (not pilot_mode) and (fully is not None):
         _neutralize_fully_imputed_contrasts(out=out, fully=fully)

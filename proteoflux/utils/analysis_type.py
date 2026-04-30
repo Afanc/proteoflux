@@ -16,6 +16,7 @@ def normalize_analysis_type(raw: Optional[str]) -> str:
       - proteomics
       - peptidomics
       - phospho
+      - pelsa
 
     Accepted aliases:
       - DIA, DDA, proteo, protein, proteins, proteomics -> proteomics
@@ -40,6 +41,7 @@ def normalize_analysis_type(raw: Optional[str]) -> str:
         "peptidomics": "peptidomics",
         "phosphoproteomics": "phospho",
         "phospho": "phospho",
+        "pelsa": "pelsa",
     }
 
     if key in alias_map:
@@ -54,6 +56,6 @@ def normalize_analysis_type(raw: Optional[str]) -> str:
 
     raise ValueError(
         f"Unsupported analysis_type={s!r}. "
-        "Use one of: 'proteomics', 'peptidomics', 'phospho'."
+        "Use one of: 'proteomics', 'peptidomics', 'phospho', 'pelsa'."
     )
 

@@ -19,6 +19,9 @@ def get_imputer(**kwargs) -> Any:
     """
     method = kwargs.pop("method", None)
 
+    if method is None:
+        return None
+
     if method == "mean":
         from proteoflux.workflow.imputers.simpleimputers import RowMeanImputer
         return RowMeanImputer()
@@ -79,6 +82,6 @@ def get_imputer(**kwargs) -> Any:
             clip_to_quantile=kwargs.get("lc_clip", True),
         )
     else:
-        raise ValueError(f"Invalid imputation method: {method}. And one is needed...\n"
+        raise ValueError(f"Invalid imputation method: {method}. "
                            "Options: lc_conmed, mean, median, knn, tnknn, mindet, minprob, randomforest")
 
