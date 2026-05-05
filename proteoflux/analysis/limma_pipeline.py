@@ -280,6 +280,22 @@ def _make_contrasts(levels: list[str], design_dm, cfg: dict) -> pd.DataFrame:
     contrast_df.columns = [c.replace(" - ", "_vs_") for c in contrast_df.columns]
     return contrast_df
 
+def _pilot_log2fc_matrix(adata: ad.AnnData, contrast_names: list[str]) -> np.ndarray:
+    """Compute contrast log2FCs as condition mean differences, without fitting limma."""
+    X = np.asarray(adata.X, dtype=float)
+    cond = adata.obs["CONDITION"].astype(str).to_numpy()
+    out = np.zeros((adata.n_vars, len(contrast_names)), dtype=float)
+
+    for j, cname in enumerate(contrast_names):
+        if "_vs_" not in cname:
+            raise ValueError(f"Contrast name {cname!r} does not match expected '<A>_vs_<B>'")
+        A, B = cname.split("_vs_", 1)
+        mask_a = cond == A
+        mask_b = cond == B
+        out[:, j] = np.nanmean(X[mask_a, :], axis=0) - np.nanmean(X[mask_b, :], axis=0)
+
+    return out
+
 
 def _fully_imputed_mask_from_layer(
     adata: ad.AnnData,
@@ -368,6 +384,32 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
             "Pilot study mode: at least one condition has only 1 replicate, no statistical analysis done. "
         )
 
+        contrast_defs = _contrast_defs_from_cfg(levels, config)
+        contrast_names = [c.replace(" - ", "_vs_") for c in contrast_defs]
+
+        out = adata.copy()
+        out.varm[VARM_LOG2FC] = _pilot_log2fc_matrix(out, contrast_names)
+
+        out.uns[UNS_CONTRAST_NAMES] = contrast_names
+        out.uns[UNS_PILOT_MODE] = True
+        out.uns[UNS_HAS_COVARIATE] = False
+
+        missing_df, miss_source = _compute_missingness_payload(adata)
+        out.uns[UNS_MISSINGNESS] = missing_df
+        out.uns[UNS_MISSINGNESS_SOURCE] = miss_source
+        out.uns[UNS_MISSINGNESS_RULE] = "nan-is-missing"
+
+        out.uns["analysis"]["design_formula"] = None
+        out.uns["analysis"]["batch_effect_columns"] = []
+        out.uns["analysis"]["design_columns"] = []
+
+        nrsc = compute_nrsc(out, contrast_names)
+        if nrsc is not None:
+            out.varm["nrsc"] = nrsc
+            nrsc_misalignment = compute_nrsc_misalignment(out, contrast_names, nrsc=nrsc)
+            out.varm["nrsc_misalignment"] = nrsc_misalignment
+
+        return out
     if has_covariate_cfg:
         return run_limma_pipeline_covariate(adata, config, pilot_mode)
 
