@@ -243,7 +243,7 @@ def build_peptide_tables(
         return None
 
     analysis = self.analysis_type
-    precursor_only = analysis in {"peptidomics", "phospho"}
+    precursor_only = analysis in {"peptidomics", "phospho", "pelsa"}
 
     #seq_clean = expr_clean_peptide_seq("PEPTIDE_LSEQ").alias("PEPTIDE_SEQ")
     seq_clean = expr_peptide_index_seq(
@@ -255,6 +255,7 @@ def build_peptide_tables(
     # 1) Clean peptide sequence
     pep_wide = None
     pep_centered = None
+    sample_cols = None
     if not precursor_only:
         base = (
             df.select(
@@ -554,7 +555,7 @@ def build_peptide_tables(
         for cond in conditions
     }
 
-    if analysis in ["peptidomics", "phospho"]:
+    if precursor_only:
         _build_consistency_precursors(
             self=self,
             df=df,
@@ -562,6 +563,9 @@ def build_peptide_tables(
         )
 
     else:
+        if pep_wide is None or sample_cols is None:
+            raise ValueError("Proteomics peptide consistency requires pep_wide and sample_cols.")
+
         _build_consistency_peptides(
             self=self,
             pep_wide=pep_wide,
