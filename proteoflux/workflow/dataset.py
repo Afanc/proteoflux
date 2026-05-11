@@ -185,7 +185,7 @@ class Dataset:
                 "fasta_column",
                 "protein_descriptions_column",
                 "gene_names_column",
-                "protein_weight",
+                "protein_weight_column",
                 "peptide_seq_column",
                 "uniprot_column",
                 "charge_column",

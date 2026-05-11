@@ -149,11 +149,33 @@ class DEExporter:
         p_raw = self._get_dataframe("p_raw")
 
         # Metadata (rename PRECURSORS_EXP → NUM_PRECURSORS; add NUM_UNIQUE_PEPTIDES placeholder if proteomics)
-        meta_cols = [c for c in ["GENE_NAMES", "FASTA_HEADERS", "PROTEIN_DESCRIPTIONS", "PRECURSORS_EXP", "PARENT_PROTEIN"] if c in ad.var.columns]
+        meta_cols = [
+            c
+            for c in [
+                "GENE_NAMES",
+                "FASTA_HEADERS",
+                "PROTEIN_DESCRIPTIONS",
+                "PRECURSORS_EXP",
+                "PARENT_PROTEIN",
+                "PROTEIN_WEIGHT",
+                "PROTEIN_LENGTH_ESTIMATE_AA",
+                "PEPTIDE_START",
+                "PEPTIDE_END",
+                "PEPTIDE_LENGTH",
+            ]
+            if c in ad.var.columns
+        ]
+
         meta_df = ad.var[meta_cols].copy() if meta_cols else pd.DataFrame(index=ad.var.index)
 
+        rename_map = {}
+
         if "PRECURSORS_EXP" in meta_df.columns:
-            meta_df = meta_df.rename(columns={"PRECURSORS_EXP": "NUM_PRECURSORS", "INDEX": "PHOSPHOSITE", "PARENT_PROTEIN": "PARENT_PROTEIN_UNIPROT_AC"})
+            rename_map["PRECURSORS_EXP"] = "NUM_PRECURSORS"
+        if is_phospho and "PARENT_PROTEIN" in meta_df.columns:
+            rename_map["PARENT_PROTEIN"] = "PARENT_PROTEIN_UNIPROT_AC"
+        if rename_map:
+            meta_df = meta_df.rename(columns=rename_map)
 
         # Phospho export : drop precursor counts column.
         if is_phospho and "NUM_PRECURSORS" in meta_df.columns:
@@ -516,7 +538,7 @@ class DEExporter:
     @log_time("Exporting .h5ad")
     def export_adata(self, h5ad_path: str) -> None:
         """Write a compact .h5ad with categorical metadata and summarized preprocessing config."""
-        for col in ["CONDITION", "GENE_NAMES", "PROTEIN_WEIGHT", "PROTEIN_DESCRIPTIONS",
+        for col in ["CONDITION", "GENE_NAMES", "PROTEIN_DESCRIPTIONS",
                     "FASTA_HEADERS", "ASSAY", "PARENT_PEPTIDE_ID", "PARENT_PROTEIN",
                     "CONDITION_ORIG", "ALIGN_KEY", "UNIPROT"]:
             if col in self.adata.obs.columns:

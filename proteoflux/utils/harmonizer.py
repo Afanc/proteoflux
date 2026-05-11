@@ -803,6 +803,15 @@ class DataHarmonizer:
             ]
         )
 
+    def _coerce_peptide_positions(self, df: pl.DataFrame) -> pl.DataFrame:
+        cols = [c for c in ("PEPTIDE_START") if c in df.columns]
+        if not cols:
+            return df
+        return df.with_columns([
+            pl.col(c).map_elements(self._coerce_scalar_int, return_dtype=pl.Int64).alias(c)
+            for c in cols
+        ])
+
     def _assert_required_phospho_columns(self, df: pl.DataFrame) -> pl.DataFrame:
         # For phospho indexing we need both:
         # - peptide-local PTM positions (Spectronaut: "EG.PTMPositions [Phospho (STY)]")
@@ -864,12 +873,47 @@ class DataHarmonizer:
               .alias("_INDEX_SEQ"),
         ).drop(["_seq_candidate"], strict=False)
 
+        #parent_protein_expr = (
+        #    pl.when(pl.col("UNIPROT").is_not_null())
+        #      .then(pl.col("UNIPROT"))
+        #      .otherwise(None)
+        #      if "UNIPROT" in df.columns
+        #      else pl.lit(None)
+        #).alias("PARENT_PROTEIN")
+
+        parent_candidates = []
+
+        if "UNIPROT" in df.columns:
+            parent_candidates.append(
+                pl.col("UNIPROT")
+                .cast(pl.Utf8, strict=False)
+                .str.strip_chars()
+                .replace(["", "NA", "NaN", "nan"], None)
+            )
+
+        # PELSA starts from peptide-level rows, but dataset.index_column still
+        # carries the parent protein group before INDEX is replaced by the
+        # peptide identity below. Preserve it as the parent-protein fallback.
+        if self.analysis_type == "pelsa" and "INDEX" in df.columns:
+            parent_candidates.append(
+                pl.col("INDEX")
+                .cast(pl.Utf8, strict=False)
+                .str.strip_chars()
+                .replace(["", "NA", "NaN", "nan"], None)
+            )
+
+        if self.analysis_type == "pelsa" and not parent_candidates:
+            raise ValueError(
+                "[PELSA] Cannot build parent-protein metadata: neither UNIPROT "
+                "nor the original INDEX column is available before peptide indexing. "
+                "Map dataset.index_column to the protein group column, or provide "
+                "dataset.uniprot_column."
+            )
+
         parent_protein_expr = (
-            pl.when(pl.col("UNIPROT").is_not_null())
-              .then(pl.col("UNIPROT"))
-              .otherwise(None)
-              if "UNIPROT" in df.columns
-              else pl.lit(None)
+            pl.coalesce(parent_candidates)
+            if parent_candidates
+            else pl.lit(None, dtype=pl.Utf8)
         ).alias("PARENT_PROTEIN")
 
         df = df.with_columns(
@@ -1164,6 +1208,7 @@ class DataHarmonizer:
 
         df = self._standardize_then_inject(df)
         df = self._coerce_meta_floats(df)
+        df = self._coerce_peptide_positions(df)
 
         if self.convert_numeric_ptms and ("PEPTIDE_LSEQ" in df.columns):
             df = df.with_columns(

@@ -722,6 +722,30 @@ class Preprocessor:
                 "For wide proteomics inputs, set dataset.index_column or ensure UNIPROT is available for fallback."
             )
 
+        if self.analysis_type == "pelsa" and "PEPTIDE_START" in df_full.columns:
+            if "PARENT_PEPTIDE_ID" not in df_full.columns:
+                raise ValueError(
+                    "PELSA peptide-position metadata requires PARENT_PEPTIDE_ID when PEPTIDE_START is present."
+                )
+            df_full = df_full.with_columns(
+                pl.col("PARENT_PEPTIDE_ID")
+                .cast(pl.Utf8, strict=False)
+                .str.replace_all(r"[^A-Za-z]", "")
+                .str.len_chars()
+                .cast(pl.Int64, strict=False)
+                .alias("PEPTIDE_LENGTH")
+            )
+            df_full = df_full.with_columns(
+                pl.col("PEPTIDE_START")
+                .cast(pl.Int64, strict=False)
+                .alias("PEPTIDE_START")
+            )
+            df_full = df_full.with_columns(
+                (pl.col("PEPTIDE_START") + pl.col("PEPTIDE_LENGTH") - 1)
+                .cast(pl.Int64, strict=False)
+                .alias("PEPTIDE_END")
+            )
+
         keep_cols = {
             "INDEX",
             "FASTA_HEADERS",
@@ -731,8 +755,10 @@ class Preprocessor:
             "IBAQ",
             "PRECURSORS_EXP",
         }
-        if self.analysis_type == "phospho":
+        if self.analysis_type in {"phospho", "pelsa"}:
             keep_cols.update({"PARENT_PEPTIDE_ID", "PARENT_PROTEIN"})
+        if self.analysis_type == "pelsa":
+            keep_cols.update({"PEPTIDE_START", "PEPTIDE_END", "PEPTIDE_LENGTH"})
         if self.analysis_type != "proteomics":
             keep_cols.update({"UNIPROT"})
 
@@ -744,6 +770,11 @@ class Preprocessor:
             .agg([pl.first(c).alias(c) for c in existing if c != "INDEX"])
             .sort("INDEX")
         )
+
+        if self.analysis_type == "pelsa" and "PARENT_PROTEIN" not in base_meta.columns and "UNIPROT" in base_meta.columns:
+            base_meta = base_meta.with_columns(
+                pl.col("UNIPROT").cast(pl.Utf8, strict=False).alias("PARENT_PROTEIN")
+            )
 
         # Fill missing/blank gene names with UniProt ID (INDEX)
         if "GENE_NAMES" in base_meta.columns:
@@ -802,7 +833,14 @@ class Preprocessor:
             casts.append(pl.col("IBAQ").cast(pl.Float64, strict=False))
         if "PROTEIN_WEIGHT" in base_meta.columns:
             casts.append(
-                pl.col("PROTEIN_WEIGHT").cast(pl.Float64, strict=False)
+                #pl.col("PROTEIN_WEIGHT").cast(pl.Float64, strict=False)
+                pl.col("PROTEIN_WEIGHT")
+                .cast(pl.Utf8, strict=False)
+                .str.split(";")
+                .list.eval(pl.element().cast(pl.Float64, strict=False))
+                .list.mean()
+                .fill_nan(None)
+                .alias("PROTEIN_WEIGHT")
             )
         if "PRECURSORS_EXP" in base_meta.columns:
             casts.append(
@@ -815,6 +853,21 @@ class Preprocessor:
 
         if casts:
             base_meta = base_meta.with_columns(casts)
+
+        # gotta convert SN weights into protein length
+        if self.analysis_type == "pelsa" and "PROTEIN_WEIGHT" in base_meta.columns:
+            protein_weight = (
+                pl.col("PROTEIN_WEIGHT")
+                .cast(pl.Float64, strict=False)
+                .fill_nan(None)
+            )
+
+            base_meta = base_meta.with_columns(
+                pl.when(protein_weight.is_not_null())
+                .then((protein_weight / 110.0).round(0).cast(pl.Int64, strict=False))
+                .otherwise(None)
+                .alias("PROTEIN_LENGTH_ESTIMATE_AA")
+            )
 
         self.intermediate_results.add_df("protein_metadata", base_meta)
 
