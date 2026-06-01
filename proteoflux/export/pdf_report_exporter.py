@@ -63,6 +63,26 @@ def get_color_map(
         out[lbl] = palette[i % len(palette)]
     return out
 
+def _label_as_str(x) -> str:
+    try:
+        v = float(x)
+        if np.isfinite(v):
+            return f"{v:g}"
+    except Exception:
+        pass
+    return str(x)
+
+
+def _sort_labels_numeric_aware(labels) -> list[str]:
+    labels_s = [_label_as_str(x) for x in labels]
+    head = [x for x in labels_s if x == "Total"]
+    rest = [x for x in labels_s if x != "Total"]
+    try:
+        rest = [x for _, x in sorted((float(x), x) for x in rest)]
+    except Exception:
+        rest = sorted(rest)
+    return head + rest
+
 def _shorten_labels_smart(names: List[str], max_len: int = 28, min_common: int = 5) -> List[str]:
     """
     Produce compact labels that preserve the differing part of similar sample names.
@@ -279,6 +299,7 @@ class ReportPlotter:
         self.analysis_config = config.get("analysis", {})
 
         self.analysis_type = self.dataset_config.get("analysis_type", "")
+        self.is_pelsa = str(self.analysis_type).lower() == "pelsa"
 
         self.export_config = (config.get("exports") or self.analysis_config.get("exports") or {}) #backward comp
 
@@ -328,7 +349,9 @@ class ReportPlotter:
             self._plot_hclust_heatmap_matplotlib(tag = "intensity")
 
             # volcanoes
-            if self._has_contrasts and (self.q_ebayes is not None):
+            if self.is_pelsa:
+                self._plot_pelsa_volcano()
+            elif self._has_contrasts and (self.q_ebayes is not None):
                 self._plot_volcano_plots()
 
     def _plot_title_page(self):
@@ -541,8 +564,20 @@ class ReportPlotter:
                  ha="left", va="top", fontsize=12)
         y -= line_height
 
-        # Differential Expression
-        if self.pilot_mode and not self._has_contrasts:
+        # Statistical analysis / curve fitting
+        if self.is_pelsa:
+            pelsa_cfg = self.analysis_config.get("pelsa", {}) or {}
+            fig.text(
+                x0 + 0.02,
+                y,
+                f"- Curve fitting: PELSA 4PL torch "
+                f"(steps={pelsa_cfg.get('torch_steps', 'n/a')}, "
+                f"n_starts={pelsa_cfg.get('torch_n_starts', 'n/a')})",
+                ha="left",
+                va="top",
+                fontsize=12,
+            )
+        elif self.pilot_mode and not self._has_contrasts:
             fig.text(x0 + 0.02, y,
                      f"- Pilot study: single-condition run, statistical testing skipped",
                      ha="left", va="top", fontsize=12)
@@ -618,9 +653,24 @@ class ReportPlotter:
         df_raw = pd.DataFrame(self.adata.layers['raw'], index=self.adata.obs_names, columns=self.adata.var_names)
         counts = df_raw.notna().sum(axis=1)
         counts = counts.sort_index()
-        raw_conds = (self.adata.obs['CONDITION'].cat.categories
-                     if hasattr(self.adata.obs['CONDITION'], 'cat')
-                     else self.adata.obs['CONDITION'].unique())
+        group_key = "CONDITION"
+        group_label = "Condition"
+        group_series = self.adata.obs[group_key].astype(str)
+        if self.is_pelsa:
+            concentration_col = str(self.adata.uns.get("pelsa", {}).get("concentration_column", "Concentration"))
+            if concentration_col not in self.adata.obs.columns:
+                raise KeyError(f"PELSA PDF report requires adata.obs[{concentration_col!r}].")
+            group_label = "Concentration"
+            conc = pd.to_numeric(self.adata.obs[concentration_col], errors="raise")
+            group_series = conc.map(lambda x: f"{x:g}").astype(str)
+
+        raw_conds = (
+            _sort_labels_numeric_aware(group_series.dropna().unique().tolist())
+            if self.is_pelsa else
+            (self.adata.obs[group_key].cat.categories
+             if hasattr(self.adata.obs[group_key], 'cat')
+             else self.adata.obs[group_key].unique())
+        )
         # If only one condition, show Total-only violins
         single_condition = (len(list(raw_conds)) == 1)
         conds = ['Total'] if single_condition else (['Total'] + list(raw_conds))
@@ -635,7 +685,7 @@ class ReportPlotter:
         data_rmad = [_finite_metric_array(res_all["RMAD"])]
         if not single_condition:
             for cond in raw_conds:
-                mask = self.adata.obs['CONDITION'] == cond
+                mask = group_series.astype(str) == str(cond)
                 mat = self.adata.X[mask.values,:].T
                 res = compute_metrics(mat, metrics=["CV","RMAD"])
                 data_cv.append(_finite_metric_array(res["CV"]))
@@ -672,7 +722,7 @@ class ReportPlotter:
         # barplot or table (keep the same space on page)
         if not use_table:
             sample_colors = [
-                color_map.get(self.adata.obs.loc[s, "CONDITION"], color_map["Total"])
+                color_map.get(str(group_series.loc[s]), color_map["Total"])
                 for s in counts.index
             ]
             ax_bar.grid(axis="y", which="both", visible=True)
@@ -685,7 +735,7 @@ class ReportPlotter:
             ax_bar.set_xticklabels(sample_names_short, rotation=45, ha="right")
 
             id_txt = "Protein IDs per Sample"
-            if self.analysis_type == "peptidomics":
+            if self.analysis_type in {"peptidomics", "pelsa"}:
                 id_txt = "Peptide IDs per Sample"
             elif self.analysis_type == "phosphoproteomics":
                 id_txt = "Phosphosite IDs per Sample"
@@ -702,15 +752,15 @@ class ReportPlotter:
             # Black/white table: Sample, Condition, #IDs
             sample_names = list(counts.index)
             sample_names_short = _shorten_labels_smart(sample_names, max_len=28, min_common=5)
-            cond_series = self.adata.obs.loc[sample_names, "CONDITION"].astype(str).to_numpy()
+            cond_series = group_series.loc[sample_names].astype(str).to_numpy()
             df_ids = pd.DataFrame(
                 {
                     "Sample": sample_names_short,
-                    "Condition": cond_series,
+                    group_label: cond_series,
                     "IDs": [int(x) for x in counts.values],
                 }
             )
-            ax_bar.set_title("Protein IDs per Sample")
+            ax_bar.set_title("Peptide IDs per Sample" if self.is_pelsa else "Protein IDs per Sample")
             _plot_ids_table_multi_column(ax_bar, df_ids, cond_color_map=color_map)
 
         # violins
@@ -738,10 +788,10 @@ class ReportPlotter:
             body.set_facecolor(color_map[conds_v[i]]);
             body.set_edgecolor('black'); body.set_alpha(0.7)
         ax_rm.set_xticks(range(len(conds_v))); ax_rm.set_xticklabels(conds_v,rotation=45,ha='right')
-        ax_rm.set_ylabel('%rMAD'); ax_rm.set_title('%rMAD per Condition')
+        ax_rm.set_ylabel('%rMAD'); ax_rm.set_title(f'%rMAD per {group_label}')
         ax_rm.grid(axis='y', which='both', visible=True)
         ax_cv.set_xticks(range(len(conds_v))); ax_cv.set_xticklabels(conds_v,rotation=45,ha='right')
-        ax_cv.set_ylabel('%CV'); ax_cv.set_title('%CV per Condition')
+        ax_cv.set_ylabel('%CV'); ax_cv.set_title(f'%CV per {group_label}')
         ax_cv.grid(axis='y', which='both', visible=True)
         for i, arr in enumerate(data_rmad_v):
             med = np.nanmedian(arr)
@@ -750,7 +800,7 @@ class ReportPlotter:
 
         ax_cv.set_xticks(range(len(conds_v)))
         ax_cv.set_xticklabels(conds_v, rotation=45, ha='right')
-        ax_cv.set_ylabel('%CV'); ax_cv.set_title('%CV per Condition')
+        ax_cv.set_ylabel('%CV'); ax_cv.set_title(f'%CV per {group_label}')
         for i, arr in enumerate(data_cv_v):
             med = np.nanmedian(arr)
             ax_cv.text(i, med, f'{med:.1f}',
@@ -759,7 +809,7 @@ class ReportPlotter:
         # shared legend
         if not use_table:
             handles = [mpatches.Patch(color=color_map[c],label=c) for c in conds]
-            ax_bar.legend(handles=handles,title='Condition',bbox_to_anchor=(1.05,1),loc='upper left')
+            ax_bar.legend(handles=handles,title=group_label,bbox_to_anchor=(1.05,1),loc='upper left')
         self.pdf.savefig(fig)
         plt.close(fig)
 
@@ -875,6 +925,43 @@ class ReportPlotter:
         fig.colorbar(im, cax=ax_cbar)
         ax_cbar.set_ylabel("Log Intensity")
 
+        self.pdf.savefig(fig)
+        plt.close(fig)
+
+    def _plot_pelsa_volcano(self):
+        pelsa = self.adata.uns.get("pelsa", {})
+        curves = pelsa.get("curve_results")
+        if curves is None:
+            return
+
+        df = pd.DataFrame(curves).copy()
+        if df.empty:
+            return
+
+        x = pd.to_numeric(df["curve_fold_change_log2"], errors="coerce")
+        q = pd.to_numeric(df["curve_q_value"], errors="coerce").fillna(1.0)
+        y = -np.log10(np.clip(q.to_numpy(dtype=float), 1e-300, 1.0))
+
+        ok = pd.to_numeric(df.get("fit_success", False), errors="coerce").fillna(False).astype(bool).to_numpy()
+        finite = ok & np.isfinite(x.to_numpy(dtype=float)) & np.isfinite(y)
+
+        sign_threshold = float(
+            (self.export_config.get("pdf_report", {}) or {}).get(
+                "volcano_sign_threshold",
+                self.analysis_config.get("sign_threshold", 0.05),
+            )
+        )
+
+        xv = x.to_numpy(dtype=float)
+
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+        ax.scatter(xv[finite], y[finite], c="gray", alpha=0.65, s=10)
+        ax.axhline(-np.log10(sign_threshold), color="black", linestyle="--", linewidth=0.8)
+        ax.axvline(0, color="black", linestyle="--", linewidth=0.8)
+        ax.set_xlabel("Curve range log2 ratio")
+        ax.set_ylabel("-log10(curve q-value)")
+        ax.set_title("PELSA Volcano")
+        fig.tight_layout()
         self.pdf.savefig(fig)
         plt.close(fig)
 

@@ -88,6 +88,40 @@ class DEExporter:
 
         return raw_df, centered_df
 
+    def _pelsa_curve_summary(self) -> Optional[pd.DataFrame]:
+        pelsa = self.adata.uns.get("pelsa", {})
+        curves = pelsa.get("curve_results")
+        if curves is None:
+            return None
+
+        df = pd.DataFrame(curves).copy()
+        if df.empty or "peptide_id" not in df.columns:
+            return None
+
+        df["peptide_id"] = df["peptide_id"].astype(str)
+        df = df.set_index("peptide_id", drop=True)
+
+        keep = [
+            "fit_success",
+            "curve_fold_change_log2",
+            "curve_p_value",
+            "curve_q_value",
+            "ec50",
+            "slope",
+            "front",
+            "back",
+            "rmse",
+            "r2",
+            "sse_curve",
+            "sse_null",
+            "curve_f_value",
+        ]
+        keep = [c for c in keep if c in df.columns]
+        out = df[keep].copy()
+        out.index.name = "PEPTIDE"
+        return out.add_prefix("PELSA_")
+
+
     def _export_excel(self, tables: Dict[str, Optional[pd.DataFrame]], readme: str) -> None:
         """Write selected tables to a single XLSX with a README sheet."""
         out_file = self.output_path.with_suffix(".xlsx")
@@ -137,6 +171,7 @@ class DEExporter:
         preproc = ad.uns.get("preprocessing", {})
         analysis_type = str(preproc.get("analysis_type", "proteomics")).lower()
         is_phospho = analysis_type == "phospho"
+        is_pelsa = analysis_type == "pelsa"
         pilot_mode = bool(ad.uns.get("pilot_study_mode", False))
 
         # Core statistics
@@ -196,7 +231,7 @@ class DEExporter:
         spectral_counts = pd.DataFrame(ad.layers.get("spectral_counts"), index=ad.obs_names, columns=ad.var_names).T if "spectral_counts" in ad.layers else None
 
         ibaq = None
-        if not is_phospho and "ibaq" in ad.layers:
+        if (not is_phospho) and (not is_pelsa) and "ibaq" in ad.layers:
             ibaq = pd.DataFrame(ad.layers.get("ibaq"), index=ad.obs_names, columns=ad.var_names).T
 
         # Observed counts per condition
@@ -306,7 +341,7 @@ class DEExporter:
         if nrsc_misalignment_pref is not None:
             blocks.append(nrsc_misalignment_pref)
 
-        if observed_df is not None:
+        if (observed_df is not None) and (not is_pelsa):
             blocks.append(observed_df)
             blocks.append(max_observed_col)
 
@@ -346,9 +381,13 @@ class DEExporter:
             if ft_cols:
                 ft_observed_contrast_df = pd.DataFrame(ft_cols, index=ad.var_names)
 
-        if consistent_df is not None:
+        if (consistent_df is not None) and (not is_pelsa):
             blocks.append(consistent_df)
             blocks.append(max_consistent_col)
+
+        pelsa_curves = self._pelsa_curve_summary() if is_pelsa else None
+        if pelsa_curves is not None:
+            blocks.append(pelsa_curves)
 
         if log2_int_cols is not None:
             blocks.append(log2_int_cols)
@@ -356,7 +395,7 @@ class DEExporter:
             blocks.append(raw_int_cols)
 
         # Append observed-per-contrast as trailing columns (Summary “tail”).
-        if observed_contrast_df is not None:
+        if (observed_contrast_df is not None) and (not is_pelsa):
             blocks.append(observed_contrast_df)
 
         # Phospho-specific: add FT_* (if flowthrough exists) & LocScores per sample; Covariate part columns
@@ -406,7 +445,7 @@ class DEExporter:
                 if ft_observed_contrast_df is not None:
                     blocks.append(ft_observed_contrast_df)
 
-        idx_name = "PHOSPHOSITE" if is_phospho else "UNIPROT_AC"
+        idx_name = "PEPTIDE" if is_pelsa else ("PHOSPHOSITE" if is_phospho else "UNIPROT_AC")
         summary_df = pd.concat([b for b in blocks if b is not None], axis=1)
 
         # Ensure phospho gets PARENT_PEPTIDE_ID column and preferred metadata order
@@ -477,7 +516,7 @@ class DEExporter:
             summary_df = summary_df[preferred + remaining]
 
         # Index header A1
-        summary_df.index.name = "PHOSPHOSITE" if is_phospho else "UNIPROT_AC"
+        summary_df.index.name = idx_name
 
         # Compute NUM_UNIQUE_PEPTIDES for proteomics by var-position
         if analysis_type == "proteomics":
@@ -506,16 +545,34 @@ class DEExporter:
             if df_ is not None:
                 df_.index.name = idx_name
 
-        # Prepare README reflecting new layout
+        # Prepare README reflecting exported workbook layout.
+        if is_pelsa:
+            readme_title = "ProteoFlux PELSA Curve Fitting Export"
+            summary_desc = (
+                "- Summary: peptide metadata, intensities, and PELSA 4PL curve "
+                "parameters/statistics.\n"
+            )
+            spectral_counts_desc = (
+                "- Spectral Counts: run-evidence counts per peptide x sample.\n"
+            )
+        else:
+            readme_title = "ProteoFlux Differential Expression Export"
+            summary_desc = (
+                "- Summary: metadata, Log2FC, NRSC, NRSC misalignment, intensities, "
+                "Q/P-values, and missingness.\n"
+            )
+            spectral_counts_desc = (
+                "- Spectral Counts: run-evidence counts per protein x sample.\n"
+            )
+
         readme = (
-            "ProteoFlux Differential Expression Export\n\n"
+            f"{readme_title}\n\n"
             "Sheet Descriptions:\n"
-            "- Summary: metadata, Log2FC, NRSC, NRSC misalignment, intensities, Q/P-values, missingness.\n"
-            "- Identification Qvalue: PSM-level q-values (from search engine), if available.\n"
-            "- Identification PEP: Posterior error probability (from search engine), if available.\n"
-            "- Spectral Counts: run-evidence counts per (protein x sample).\n"
-            "- IBAQ Values: Intensity based absolute quantification per (protein x sample), if available"
-            "- Peptides (raw): wide peptide-by-sample matrix.\n"
+            f"{summary_desc}"
+            "- Identification Qvalue: PSM-level q-values from the search engine, if available.\n"
+            "- Identification PEP: posterior error probability from the search engine, if available.\n"
+            f"{spectral_counts_desc}"
+            "- Peptides (raw): wide peptide-by-sample matrix, if available.\n"
         )
 
         # Tables to export
@@ -525,7 +582,11 @@ class DEExporter:
             "Identification PEP": id_pep if id_pep is not None else None,
             "Spectral Counts": spectral_counts if spectral_counts is not None else None,
             "IBAQ Values": ibaq if ibaq is not None else None,
-            "Peptides (raw)": (None if (str(preproc.get("analysis_type", "proteomics")).lower()=="phospho") else pep_wide_df),
+            "Peptides (raw)": (
+                None
+                if str(preproc.get("analysis_type", "proteomics")).lower() in {"phospho", "pelsa"}
+                else pep_wide_df
+            ),
         }
 
         if self.use_xlsx:
