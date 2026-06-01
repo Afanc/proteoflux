@@ -42,7 +42,7 @@ class TorchFitConfig:
 class PelsaBounds:
     """Global and feature-wise bounds used for constrained fitting."""
 
-    pec50_margin_log10: float = 2.0
+    pec50_margin_log10: float = 0.0
     slope: tuple[float, float] = (0.01, 10.0)
     front: tuple[float, float] = (-15.0, 15.0)
     back: tuple[float, float] = (-15.0, 15.0)
