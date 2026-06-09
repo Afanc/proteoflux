@@ -347,6 +347,7 @@ class DataHarmonizer:
                 raise ValueError("CONDITION contains nulls after standardization. Fix input; refusing to proceed.")
             if df.select(pl.col("REPLICATE").is_null().any()).item():
                 raise ValueError("REPLICATE contains nulls after standardization. Fix input; refusing to proceed.")
+            df = self._apply_exclude_runs(df)
             return df
 
         log_info("Injecting annotation")

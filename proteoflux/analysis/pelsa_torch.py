@@ -33,8 +33,6 @@ class TorchFitConfig:
     loss: str = "mse"
     dtype_name: str = "float32"
     huber_delta: float = 1.0
-    transition_leverage_lambda: float = 0.05
-    transition_leverage_eps: float = 1e-6
     num_threads: int | None = None
 
 
@@ -206,66 +204,52 @@ def estimate_pec50_ci_batch(
 
 
 def parse_torch_fit_config(pelsa_cfg: dict) -> TorchFitConfig:
-    betas = tuple(pelsa_cfg.get("torch_betas", (0.9, 0.999)))
+    betas = tuple(pelsa_cfg.get("fit_betas", (0.9, 0.999)))
     if len(betas) != 2:
-        raise ValueError("PELSA torch_betas must contain exactly two values.")
+        raise ValueError("PELSA fit_betas must contain exactly two values.")
 
     cfg = TorchFitConfig(
-        steps=int(pelsa_cfg.get("torch_steps", TorchFitConfig.steps)),
-        lr=float(pelsa_cfg.get("torch_lr", TorchFitConfig.lr)),
-        batch_size=int(pelsa_cfg.get("torch_batch_size", TorchFitConfig.batch_size)),
-        n_starts=int(pelsa_cfg.get("torch_n_starts", TorchFitConfig.n_starts)),
+        steps=int(pelsa_cfg.get("fit_steps", TorchFitConfig.steps)),
+        lr=float(pelsa_cfg.get("fit_lr", TorchFitConfig.lr)),
+        batch_size=int(pelsa_cfg.get("fit_batch_size", TorchFitConfig.batch_size)),
+        n_starts=int(pelsa_cfg.get("fit_n_starts", TorchFitConfig.n_starts)),
         betas=(float(betas[0]), float(betas[1])),
-        eps=float(pelsa_cfg.get("torch_eps", TorchFitConfig.eps)),
+        eps=float(pelsa_cfg.get("fit_eps", TorchFitConfig.eps)),
         weight_decay=float(
-            pelsa_cfg.get("torch_weight_decay", TorchFitConfig.weight_decay)
+            pelsa_cfg.get("fit_weight_decay", TorchFitConfig.weight_decay)
         ),
-        loss=str(pelsa_cfg.get("torch_loss", TorchFitConfig.loss)).lower(),
-        dtype_name=str(pelsa_cfg.get("torch_dtype", TorchFitConfig.dtype_name)),
+        loss=str(pelsa_cfg.get("fit_loss", TorchFitConfig.loss)).lower(),
+        dtype_name=str(pelsa_cfg.get("fit_dtype", TorchFitConfig.dtype_name)),
         huber_delta=float(
-            pelsa_cfg.get("torch_huber_delta", TorchFitConfig.huber_delta)
+            pelsa_cfg.get("fit_huber_delta", TorchFitConfig.huber_delta)
         ),
-        transition_leverage_lambda=float(
-            pelsa_cfg.get(
-                "torch_transition_leverage_lambda",
-                TorchFitConfig.transition_leverage_lambda,
-            )
-        ),
-        transition_leverage_eps=float(
-            pelsa_cfg.get("torch_transition_leverage_eps", TorchFitConfig.transition_leverage_eps)
-        ),
-        num_threads=pelsa_cfg.get("torch_num_threads"),
+        num_threads=pelsa_cfg.get("fit_num_threads"),
     )
 
     if cfg.steps < 1:
-        raise ValueError("PELSA torch_steps must be >= 1.")
+        raise ValueError("PELSA fit_steps must be >= 1.")
     if cfg.lr <= 0:
-        raise ValueError("PELSA torch_lr must be > 0.")
+        raise ValueError("PELSA fit_lr must be > 0.")
     if cfg.batch_size < 1:
-        raise ValueError("PELSA torch_batch_size must be >= 1.")
+        raise ValueError("PELSA fit_batch_size must be >= 1.")
     if cfg.n_starts < 1:
-        raise ValueError("PELSA torch_n_starts must be >= 1.")
+        raise ValueError("PELSA fit_n_starts must be >= 1.")
     valid_losses = {
         "mse",
         "huber",
-        "mse_transition_support",
-        "huber_transition_support",
+        "L1",
     }
     if cfg.loss not in valid_losses:
         raise ValueError(
-            f"Unsupported PELSA torch_loss={cfg.loss!r}. "
+            f"Unsupported PELSA fit_loss={cfg.loss!r}. "
             f"Expected one of {sorted(valid_losses)}."
         )
     if cfg.huber_delta <= 0:
-        raise ValueError("PELSA torch_huber_delta must be > 0.")
-    if cfg.transition_leverage_lambda < 0:
-        raise ValueError("PELSA torch_transition_leverage_lambda must be >= 0.")
-    if cfg.transition_leverage_eps <= 0:
-        raise ValueError("PELSA torch_transition_leverage_eps must be > 0.")
+        raise ValueError("PELSA fit_huber_delta must be > 0.")
     if cfg.num_threads is not None and int(cfg.num_threads) < 1:
-        raise ValueError("PELSA torch_num_threads must be >= 1 when provided.")
+        raise ValueError("PELSA fit_num_threads must be >= 1 when provided.")
     if not 0 <= cfg.betas[0] < 1 or not 0 <= cfg.betas[1] < 1:
-        raise ValueError("PELSA torch_betas values must be in [0, 1).")
+        raise ValueError("PELSA fit_betas values must be in [0, 1).")
 
     return cfg
 
@@ -305,7 +289,7 @@ def torch_dtype(torch, dtype_name: str):
         return torch.float32
     if dtype_name == "float64":
         return torch.float64
-    raise ValueError("PELSA torch_dtype must be 'float32' or 'float64'.")
+    raise ValueError("PELSA fit_dtype must be 'float32' or 'float64'.")
 
 
 def logit01(x: np.ndarray, eps: float = 1e-6) -> np.ndarray:
@@ -559,6 +543,9 @@ def masked_mse_loss(torch, pred, y, mask, cfg: TorchFitConfig):
     resid = (pred - y[:, None, :]) * mask[:, None, :]
     return torch.sum(resid * resid) / torch.clamp(mask.sum(), min=1.0)
 
+def masked_l1_loss(torch, pred, y, mask, cfg: TorchFitConfig):
+    resid = (pred - y[:, None, :]) * mask[:, None, :]
+    return torch.sum(torch.abs(resid)) / torch.clamp(mask.sum(), min=1.0)
 
 def masked_huber_loss(torch, pred, y, mask, cfg: TorchFitConfig):
     resid = (pred - y[:, None, :]) * mask[:, None, :]
@@ -572,82 +559,6 @@ def masked_huber_loss(torch, pred, y, mask, cfg: TorchFitConfig):
     return torch.sum(loss) / torch.clamp(mask.sum(), min=1.0)
 
 
-def transition_leverage_penalty(torch, x, mask, pred, params, cfg: TorchFitConfig):
-    """Penalize fitted transitions with weak observed leverage.
-
-    This optimizer-only regularizer is direction-agnostic. It penalizes
-    transitions that are weakly supported or supported only on one side of
-    the fitted EC50.
-
-    The score combines:
-    - transition support: observed points lie in the fitted non-plateau region
-    - transition symmetry: support exists on both sides of the fitted EC50
-
-    Final SSE/F-test metrics remain ordinary residual metrics computed after
-    fitting.
-    """
-    pec50 = params[:, :, 0:1]
-    slope = params[:, :, 1:2]
-    front = params[:, :, 2:3]
-    back = params[:, :, 3:4]
-
-    amplitude = torch.clamp(torch.abs(front - back), min=cfg.transition_leverage_eps)
-    low_plateau = torch.minimum(front, back)
-
-    # Position along the fitted response range, independent of curve direction:
-    #   z ~= 0 or 1 -> plateau
-    #   z ~= 0.5    -> transition / EC50 region
-    y_position = (pred - low_plateau) / amplitude
-    y_position = torch.clamp(
-        y_position,
-        min=cfg.transition_leverage_eps,
-        max=1.0 - cfg.transition_leverage_eps,
-    )
-    y_weight = 4.0 * y_position * (1.0 - y_position)
-
-    # Soft left/right assignment around the fitted EC50.  The sharpness is
-    # tied to the fitted slope, so no extra width hyperparameter is needed:
-    # steep curves define a sharper left/right split, shallow curves a softer one.
-    center = -pec50
-    side_sharpness = torch.clamp(slope, min=1e-6) * np.log(10.0)
-    right_weight = torch.sigmoid(side_sharpness * (x[:, None, :] - center))
-    left_weight = 1.0 - right_weight
-
-    left_support = torch.sum(mask[:, None, :] * y_weight * left_weight, dim=2)
-    right_support = torch.sum(mask[:, None, :] * y_weight * right_weight, dim=2)
-    transition_support = left_support + right_support
-
-    possible = torch.clamp(torch.sum(mask, dim=1, keepdim=True), min=1.0)
-    support_fraction = transition_support / possible
-
-    # Symmetry is 1 when left/right support is balanced and approaches 0 when
-    # support is one-sided.  This specifically targets edge/single-side fits.
-    balance = (
-        4.0 * left_support * right_support
-        / torch.clamp(transition_support * transition_support, min=cfg.transition_leverage_eps)
-    )
-    leverage_fraction = support_fraction * balance
-
-    penalty = -torch.log(leverage_fraction + cfg.transition_leverage_eps)
-    return torch.mean(penalty)
-
-
-def mse_transition_support_loss(torch, model, x, y, mask, cfg: TorchFitConfig):
-    pred = model.predict(x)
-    data_loss = masked_mse_loss(torch, pred, y, mask, cfg)
-    params = model.constrained_parameters()
-    penalty = transition_leverage_penalty(torch, x, mask, pred, params, cfg)
-    return data_loss + cfg.transition_leverage_lambda * penalty
-
-
-def huber_transition_support_loss(torch, model, x, y, mask, cfg: TorchFitConfig):
-    pred = model.predict(x)
-    data_loss = masked_huber_loss(torch, pred, y, mask, cfg)
-    params = model.constrained_parameters()
-    penalty = transition_leverage_penalty(torch, x, mask, pred, params, cfg)
-    return data_loss + cfg.transition_leverage_lambda * penalty
-
-
 def mse_loss(torch, model, x, y, mask, cfg: TorchFitConfig):
     return masked_mse_loss(torch, model.predict(x), y, mask, cfg)
 
@@ -656,16 +567,13 @@ def huber_loss(torch, model, x, y, mask, cfg: TorchFitConfig):
     return masked_huber_loss(torch, model.predict(x), y, mask, cfg)
 
 
-
 def get_loss_function(cfg: TorchFitConfig) -> Callable:
     if cfg.loss == "mse":
         return mse_loss
+    if cfg.loss == "l1":
+        return l1_loss
     if cfg.loss == "huber":
         return huber_loss
-    if cfg.loss == "mse_transition_support":
-        return mse_transition_support_loss
-    if cfg.loss == "huber_transition_support":
-        return huber_transition_support_loss
     raise ValueError(f"Unsupported PELSA torch loss: {cfg.loss!r}.")
 
 
@@ -931,7 +839,6 @@ def fit_4pl_torch_from_ratio_df(ratio_df: pd.DataFrame, config: dict) -> pd.Data
         f"lr={fit_cfg.lr}, n_starts={fit_cfg.n_starts}, "
         f"betas={fit_cfg.betas}, loss={fit_cfg.loss}, "
         f"huber_delta={fit_cfg.huber_delta}, "
-        f"transition_leverage_lambda={fit_cfg.transition_leverage_lambda}, "
         f"response_margin_fraction={bounds.response_margin_fraction})"
     )
 
