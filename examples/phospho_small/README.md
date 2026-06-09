@@ -7,4 +7,4 @@ It is intended solely for demonstrating ProteoFlux configuration and execution.
 ## Run
 
 ```bash
-proteoflux --config config.yaml
+proteoflux --config config_phospho.yaml

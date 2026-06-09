@@ -127,6 +127,7 @@ Runnable, reduced example datasets and matching configs are provided under `exam
 
 - `examples/searle_small/`: small DIA proteomics example (Spectronaut export subset)
 - `examples/phospho_small/`: phosphoproteomics example with an injected flow-through covariate run (Spectronaut export subsets)
+- `examples/pelsa_small/`: small pelsa analysis example (Spectronaut export subsets)
 
 Each example folder contains a `README.md` with a minimal command to run the pipeline (typically `proteoflux run --config <config>.yaml`) and the required input files (data + annotation, if applicable).
 
@@ -134,7 +135,7 @@ Each example folder contains a `README.md` with a minimal command to run the pip
 
 ## Paper
 
-The JOSS manuscript source is provided as [paper.md](paper.md).
+The manuscript source is provided as [paper.md](paper.md).
 
 ---
 

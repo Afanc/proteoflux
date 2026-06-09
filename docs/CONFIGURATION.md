@@ -10,7 +10,7 @@ This document describes all available configuration parameters.
 
 | Key | Description |
 |------|------------|
-| `analysis_type` | `proteomics`, `peptidomics`, or `phospho` |
+| `analysis_type` | `proteomics`, `peptidomics`, `phospho` or `pelsa`. |
 | `input_file` | Path to quantitative (fragment group/precursor level) input table. Support .tsv, .csv and .parquet. |
 | `input_layout` | `long` (one precursor per run per row) or `wide` (rows: precursors. columns: runs. ) |
 | `annotation_file` | Path to .tsv with sample metadata. Optional (but recommended). File should have the following columns : Filename, Condition, Replicate. |
@@ -129,7 +129,7 @@ Can be used to inject an additional .tsv/.csv/.parquet dataset.
 | Key | Description |
 |------|------------|
 | `normalization.method` | List of normalization steps. Options include log2, median_equalization, median_equalization_by_tag, quantile, global_linear, global_loess, local_linear, local_loess. Data should be always log2 transformed first. |
-| `normalization.reference_tag` | tag for median_normalization_by_tag. Default: null. |
+| `normalization.reference_tag` | tag for median_normalization_by_tag. Looks for matches in the fasta_column, fails if column not defined. Default: null. |
 | `normalization.loess_span` | LOESS smoothing span for loess normalizations. Default: 0.9. |
 
 ---
@@ -138,7 +138,7 @@ Can be used to inject an additional .tsv/.csv/.parquet dataset.
 
 | Key | Description |
 |------|------------|
-| `imputation.method` | Imputation method. Options include lc_conmed, mean, median, knn, tnknn, mindet, minprob, randomforest |
+| `imputation.method` | Imputation method. Options include lc_conmed, mean, median, knn, tnknn, mindet, minprob, randomforest. Required in all analysis types except pelsa. |
 | `imputation.lc_conmed_lod_k` | Number of lowest global datapoints to estimate LOD. Default: 10. |
 | `imputation.lc_conmed_in_min_obs` | Min. number of observations per condition to use MAR (left-censoring) instead of MNAR (conditional median). Default : 1. |
 | `imputation.lc_conmed_lc_shift` | Shift below LOD for MNAR estimation. Default: 0.20. |
@@ -171,6 +171,25 @@ Can be used to inject an additional .tsv/.csv/.parquet dataset.
 | `only_against` | Restrict to comparisons against this condition. Optional. |
 | `batch_effect_columns` | List of annotation columns to include as covariates in the design matrix (e.g. `["sex", "age"]`). Optional. |
 | `clustering_max` | Max number features for clustering. Default: 8000. |
+| `pelsa.concentration_column` | Concentration column in the annotation file. Required for Pelsa |
+| `pelsa.control_concentration` | Concentration level in the control condition (typically 0.0). Required for Pelsa |
+| `pelsa.layer` | Data layer used for PELSA fitting. Default: `"normalized"`. Input is expected to be log2-transformed. |
+| `pelsa.fit_loss` | Loss used during 4PL curve optimization. Options: `"mse"`, `"huber"`, `"l1"`. Recommended: `"huber"`. |
+| `pelsa.fit_huber_delta` | Huber loss transition threshold in log2-ratio units. Used only when `fit_loss: "huber"`. Example: `0.5`. |
+| `pelsa.fit_steps` | Number of optimizer steps for 4PL fitting. Default: `300`. |
+| `pelsa.fit_lr` | Optimizer learning rate. Default: `0.03`. |
+| `pelsa.fit_batch_size` | Number of features fitted per batch. Larger values are faster but use more RAM. Default: `4096`. |
+| `pelsa.fit_n_starts` | Number of initialization starts per feature. Higher values reduce local-minimum risk but increase runtime. Default: `1`; recommended for robust fitting: `5`. |
+| `pelsa.fit_betas` | Adam optimizer beta parameters. Advanced option. Default: `[0.9, 0.999]`. |
+| `pelsa.fit_eps` | Adam optimizer epsilon. Advanced option. Default: `1e-8`. |
+| `pelsa.fit_weight_decay` | Adam optimizer weight decay. Advanced option. Default: `0.0`. |
+| `pelsa.fit_dtype` | Torch numeric precision. Options: `"float32"` or `"float64"`. Default: `"float32"`. |
+| `pelsa.fit_num_threads` | Number of CPU threads used by torch. Optional. |
+| `pelsa.bounds.slope` | Lower and upper bounds for 4PL curve steepness. Default: `[0.01, 10.0]`. |
+| `pelsa.bounds.front` | Lower and upper bounds for the left/front plateau in log2-ratio units. Must span `0`. Example: `[-15.0, 15.0]`. |
+| `pelsa.bounds.back` | Lower and upper bounds for the right/back plateau in log2-ratio units. Must span `0`. Example: `[-15.0, 15.0]`. |
+| `pelsa.bounds.pec50_margin_log10` | Allowed pEC50 margin outside the observed log10 concentration range. `0.0` keeps pEC50 within the measured range. |
+| `pelsa.bounds.response_margin_fraction` | Extra margin allowed around the observed response range when bounding plateaus. `0.0` keeps plateaus inside the observed response range. |
 
 ---
 

@@ -1808,12 +1808,15 @@ class Preprocessor:
                 cond_map = cond_df.set_index("Sample")["Condition"]
 
                 condition_labels = [cond_map.get(s, s) for s in sample_names]
+                loess_span = self.normalization.get("loess_span", 0.9)
+                if loess_span is None:
+                    loess_span = 0.9
 
                 mat, models = regression_normalization(
                     mat,
                     scale=regression_scale_used,
                     regression_type=regression_type_used,
-                    span=self.normalization.get("loess_span"),
+                    span=loess_span,
                     condition_labels=condition_labels,
                 )
             elif m == "median_equalization_by_tag":
@@ -1943,7 +1946,7 @@ class Preprocessor:
         ir.add_metadata("normalization", "method", self.normalization.get("method"))
         ir.add_metadata("normalization", "regression_scale_used", regression_scale_used)
         ir.add_metadata("normalization", "regression_type_used", regression_type_used)
-        ir.add_metadata("normalization", "span", self.normalization.get("loess_span"))
+        ir.add_metadata("normalization", "span", float(loess_span) if regression_type_used == "loess" else None)
         ir.add_metadata("normalization", "tags", tags)
         ir.add_metadata("normalization", "tag_matches", tag_matches)
 
