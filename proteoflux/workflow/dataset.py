@@ -6,6 +6,7 @@ AnnData object with layers and metadata for downstream analysis.
 """
 
 from typing import Optional, Tuple, Union, List
+import re
 import warnings
 from copy import deepcopy
 import copy
@@ -14,6 +15,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import polars as pl
+from polars.exceptions import ComputeError
 import pyarrow.parquet as pv_parquet
 import csv
 
@@ -331,6 +333,93 @@ class Dataset:
         # Convert to AnnData format
         self._convert_to_anndata()
 
+
+    def _build_polars_schema_overrides(self, header: list[str]) -> dict[str, object]:
+        """Return CSV dtype overrides for columns known to be inference-sensitive."""
+        # Force known statistical columns to float to avoid inference bugs
+        # (e.g. many zeros early -> inferred as int -> later fails on decimals).
+        schema_overrides = {
+            col: pl.Float64
+            for col in header
+            if (
+                ("Qvalue" in col)
+                or ("Pvalue" in col)
+                or col.endswith(".PEP")
+                or col == "PEP"
+            )
+        }
+
+        # Protein-group metadata can look numeric in early rows but later contain
+        # semicolon-delimited values, e.g. "227;232" for peptide positions.
+        # Only use columns explicitly configured by the user; do not guess aliases.
+        semicolon_safe_keys = {
+            "ibaq_column",
+            "peptide_start_column",
+            "protein_weight_column",
+            "ptm_positions_column",
+            "ptm_probabilities_column",
+            "ptm_proteinlocations_column",
+            "ptm_sites_column",
+        }
+
+        dataset_cfg = self._dataset_cfg_original or {}
+        for key in semicolon_safe_keys:
+            raw_col = dataset_cfg.get(key)
+            if isinstance(raw_col, str) and raw_col in header:
+                schema_overrides[raw_col] = pl.Utf8
+
+        return schema_overrides
+
+    @staticmethod
+    def _extract_polars_parse_error_column(error: ComputeError) -> str | None:
+        """Extract the offending column name from a Polars CSV parse error."""
+        match = re.search(r"at column\s+'([^']+)'", str(error))
+        return match.group(1) if match else None
+
+    def _read_csv_polars(
+        self,
+        file_path: str,
+        delimiter: str,
+        header: list[str],
+        schema_overrides: dict[str, object],
+        *,
+        max_schema_retries: int = 5,
+    ) -> pl.DataFrame:
+        """Read CSV/TSV with bounded retries for late mixed-type columns."""
+        schema_overrides = dict(schema_overrides)
+        forced_utf8: set[str] = set()
+        header_set = set(header)
+
+        for attempt in range(max_schema_retries + 1):
+            try:
+                return pl.read_csv(
+                    file_path,
+                    separator=delimiter,
+                    infer_schema_length=10000,
+                    null_values=["NA", "NaN", "N/A", ""],
+                    schema_overrides=schema_overrides or None,
+                )
+            except ComputeError as err:
+                bad_col = self._extract_polars_parse_error_column(err)
+                if (
+                    bad_col is None
+                    or bad_col not in header_set
+                    or bad_col in forced_utf8
+                    or attempt >= max_schema_retries
+                ):
+                    raise
+
+                forced_utf8.add(bad_col)
+                schema_overrides[bad_col] = pl.Utf8
+                logger.warning(
+                    "CSV parser inferred column %r too narrowly; "
+                    "retrying with this column as Utf8. This usually happens "
+                    "with semicolon-delimited protein-group metadata.",
+                    bad_col,
+                )
+
+        raise RuntimeError("unreachable")
+
     @log_time("Data Loading")
     def _load_rawdata(self, file_path: str) -> Union[pl.DataFrame, pd.DataFrame]:
         """Load raw data from CSV / TSV / Parquet using Polars or PyArrow backends."""
@@ -348,23 +437,15 @@ class Dataset:
         delimiter = "\t" if file_path.endswith(".tsv") else ","
 
         if self.load_method == "polars":
-            # Force known statistical columns to float to avoid inference bugs
-            # (e.g. many zeros early -> inferred as int -> later fails on decimals).
             with open(file_path, "r", newline="") as fh:
                 header = next(csv.reader(fh, delimiter=delimiter))
-            schema_overrides = {
-                col: pl.Float64
-                for col in header
-                if ("Qvalue" in col) or ("Pvalue" in col) or col.endswith(".PEP") or col == "PEP"
-            }
-            df = pl.read_csv(
+            schema_overrides = self._build_polars_schema_overrides(header)
+            return self._read_csv_polars(
                 file_path,
-                separator=delimiter,
-                infer_schema_length=10000,
-                null_values=["NA", "NaN", "N/A", ""],
-                schema_overrides=schema_overrides or None,
+                delimiter,
+                header,
+                schema_overrides,
             )
-            return df
         elif self.load_method == "pyarrow":
             parse_options = pv_csv.ParseOptions(delimiter=delimiter)
             arrow_table = pv_csv.read_csv(file_path, parse_options=parse_options)
