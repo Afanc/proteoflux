@@ -1875,7 +1875,6 @@ class Preprocessor:
                     )
                 else:
                     ref_sub_all = mat[ref_mask, :]
-                    ref_counts = np.sum(np.isfinite(ref_sub), axis=0)
 
                     # Use a fixed reference set for all samples.
                     # Otherwise np.nanmedian uses a different observed subset per sample,
