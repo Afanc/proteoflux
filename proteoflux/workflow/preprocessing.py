@@ -1867,44 +1867,48 @@ class Preprocessor:
 
                 n_ref = int(ref_mask.sum())
                 if n_ref == 0:
+                    tag_matches = 0
+                    self.normalization["tag_matches"] = tag_matches
                     log_info(
                         f"median_equalization_by_tag: no proteins matched tag(s) {tags} "
                         f"in '{fasta_col}'. Step skipped."
                     )
                 else:
-                    ref_sub = mat[ref_mask, :]
+                    ref_sub_all = mat[ref_mask, :]
                     ref_counts = np.sum(np.isfinite(ref_sub), axis=0)
 
-                    if np.any(ref_counts == 0):
-                        sample_names = self.intermediate_results.columns
-                        missing_samples = [
-                            sample_names[i]
-                            for i, c in enumerate(ref_counts)
-                            if c == 0
-                        ]
+                    # Use a fixed reference set for all samples.
+                    # Otherwise np.nanmedian uses a different observed subset per sample,
+                    # which can make tag-based normalization follow detection bias.
+                    complete_ref = np.isfinite(ref_sub_all).all(axis=1)
+                    n_ref_complete = int(complete_ref.sum())
+
+                    tag_matches = n_ref_complete
+                    self.normalization["tag_matches"] = tag_matches
+
+                    if n_ref_complete == 0:
                         log_info(
-                            "median_equalization_by_tag: no reference signal in samples: "
-                            f"{missing_samples} → leaving those samples unscaled (factor=1)."
+                            f"median_equalization_by_tag: matched={n_ref} proteins by {tags} "
+                            f"in '{fasta_col}', but none were finite in all samples. "
+                            "Step skipped."
                         )
+                    else:
+                        ref_sub = ref_sub_all[complete_ref, :]
 
-                    ref_col_meds = np.nanmedian(
-                        ref_sub, axis=0, keepdims=True
-                    )
-                    ref_global = np.nanmedian(ref_sub)
+                        ref_col_meds = np.median(
+                            ref_sub, axis=0, keepdims=True
+                        )
+                        ref_global = np.median(ref_sub)
 
-                    # data should always be log transformed.
-                    shift = np.where(
-                        np.isfinite(ref_col_meds),
-                        ref_global - ref_col_meds,
-                        0.0,
-                    )
-                    mat = mat + shift
+                        # data should always be log transformed.
+                        shift = ref_global - ref_col_meds
+                        mat = mat + shift
 
-                    self.normalization["tag_matches"] = n_ref
-                    log_info(
-                        f"median_equalization_by_tag: matched={n_ref} proteins by {tags} "
-                        f"in '{fasta_col}'."
-                    )
+                        log_info(
+                            f"median_equalization_by_tag: matched={n_ref} proteins by {tags} "
+                            f"in '{fasta_col}', used_complete={n_ref_complete} "
+                            f"(dropped_missing={n_ref - n_ref_complete})."
+                        )
             elif m == "none":
                 log_info("Skipping normalization (raw data)")
             else:
