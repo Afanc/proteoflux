@@ -14,7 +14,11 @@ from typing import Tuple, Optional
 import inmoose.limma as imo
 from itertools import combinations
 from proteoflux.utils.utils import log_time, log_warning, log_info
-from proteoflux.analysis.clustering import run_clustering, run_clustering_missingness
+from proteoflux.analysis.clustering import (
+    run_clustering,
+    run_clustering_missingness,
+    run_design_adjusted_pca,
+)
 from proteoflux.analysis.stats_ops import raw_stats_from_fit, bh_qvalues, two_sided_t_pvalue
 from proteoflux.analysis.missingness import compute_missingness
 from proteoflux.analysis.nrsc import compute_nrsc, compute_nrsc_misalignment
@@ -61,14 +65,19 @@ def _design_with_optional_covariates(
     obs: pd.DataFrame,
     levels: list[str],
     cfg: dict,
+    *,
+    log_messages: bool = True,
 ) -> patsy.DesignMatrix:
     """
-    Patsy design matrix built from pre-encoded numeric columns:
-      - condition columns are explicit bare names (EC_high, EC_low, ...)
-      - categorical batch/covariates are dummy-encoded with drop_first=True
-      - numeric batch/covariates are added as numeric columns
+    Build the limma design matrix.
 
-    This preserves contrast names while keeping a native Patsy design matrix.
+    Semantics:
+      - condition columns are explicit bare names (EC_high, EC_low, ...)
+      - analysis.batch_effect_columns are categorical fixed effects by default
+
+    Numeric-like batch labels such as 1/2/3/4 are intentionally treated as
+    categories. In proteomics annotations these are usually batch/block labels,
+    not continuous covariates.
     """
     if len(levels) < 2:
         raise ValueError(f"Need ≥2 conditions for design; found {levels}")
@@ -77,7 +86,6 @@ def _design_with_optional_covariates(
     tmp["CONDITION"] = tmp["CONDITION"].astype(str)
 
     # Keep legacy/manual condition coding so contrast names remain valid.
-    cond_df = pd.DataFrame(index=tmp.index)
     for lvl in levels:
         tmp[lvl] = (tmp["CONDITION"] == lvl).astype(float)
 
@@ -96,7 +104,6 @@ def _design_with_optional_covariates(
     col_lookup = {str(c).casefold(): c for c in tmp.columns}
     resolved_batch_cols: list[str] = []
     design_terms: list[str] = list(levels)
-    batch_term_kinds: list[str] = []
 
     for col in batch_cols_cfg:
         actual = col_lookup.get(str(col).casefold())
@@ -120,32 +127,44 @@ def _design_with_optional_covariates(
                 f"2 distinct non-null values, got {n_unique}."
             )
 
-        s_num = pd.to_numeric(s, errors="coerce")
-        numeric_like = bool(s_num.notna().sum() == s.notna().sum())
+        tmp[actual] = s.astype(str)
+        dummies = pd.get_dummies(
+            tmp[actual],
+            prefix=actual,
+            prefix_sep="__",
+            drop_first=True,
+        )
+        if dummies.shape[1] == 0:
+            raise ValueError(
+                f"analysis.batch_effect_columns: categorical column {actual!r} "
+                "produced no design columns after dummy coding."
+            )
 
-        if numeric_like:
-            tmp[actual] = s_num.astype(float)
-            design_terms.append(f"Q('{actual}')")
-            batch_term_kinds.append(f"{actual} (numeric)")
-        else:
-            tmp[actual] = s.astype(str)
-            dummies = pd.get_dummies(tmp[actual], prefix=actual, prefix_sep="__", drop_first=True)
-            if dummies.shape[1] == 0:
-                raise ValueError(
-                    f"analysis.batch_effect_columns: categorical column {actual!r} "
-                    "produced no design columns after dummy coding."
-                )
-            for dummy_col in dummies.columns:
-                tmp[dummy_col] = dummies[dummy_col].astype(float)
-                design_terms.append(f"Q('{dummy_col}')")
-            batch_term_kinds.append(f"{actual} (categorical)")
+        for dummy_col in dummies.columns:
+            tmp[dummy_col] = dummies[dummy_col].astype(float)
+            design_terms.append(f"Q('{dummy_col}')")
+
+        tab = pd.crosstab(tmp[actual], tmp["CONDITION"])
+        incomplete = []
+        for level_name, row in tab.iterrows():
+            missing = [lvl for lvl in levels if int(row.get(lvl, 0)) == 0]
+            if missing:
+                incomplete.append(f"{level_name}: missing {','.join(missing)}")
+        if incomplete and log_messages:
+            examples = "; ".join(incomplete[:5])
+            more = "..." if len(incomplete) > 5 else ""
+            log_warning(
+                f"analysis.batch_effect_columns: {actual!r} has incomplete "
+                f"condition coverage ({examples}{more}). The model may still be "
+                "valid, but condition/batch confounding is possible."
+            )
 
         resolved_batch_cols.append(actual)
 
-    if batch_term_kinds:
+    if resolved_batch_cols and log_messages:
         log_info(
-            "Including batch/covariate terms in design matrix: "
-            + ", ".join(batch_term_kinds)
+            "Including categorical batch/covariate terms in design matrix: "
+            + ", ".join(resolved_batch_cols)
         )
 
     formula = "0 + " + " + ".join(design_terms)
@@ -169,9 +188,16 @@ def _design_with_optional_covariates(
             "Reduce the number of batch/covariate terms."
         )
 
+    if log_messages:
+        log_info(
+            f"Design matrix: n_samples={n_samples}, rank={rank}, residual_df={df_resid}."
+        )
+
     design_dm.attrs = {}
     design_dm.attrs["proteoflux_formula"] = formula
     design_dm.attrs["proteoflux_batch_effect_columns"] = resolved_batch_cols
+    design_dm.attrs["proteoflux_design_rank"] = rank
+    design_dm.attrs["proteoflux_residual_df"] = df_resid
     return design_dm
 
 def _fit_limma_with_contrasts(
@@ -477,6 +503,8 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     out.uns["analysis"]["design_formula"] = design_dm.attrs.get("proteoflux_formula")
     out.uns["analysis"]["batch_effect_columns"] = design_dm.attrs.get("proteoflux_batch_effect_columns", [])
     out.uns["analysis"]["design_columns"] = list(design_dm.design_info.column_names)
+    out.uns["analysis"]["design_rank"] = design_dm.attrs.get("proteoflux_design_rank")
+    out.uns["analysis"]["residual_df"] = design_dm.attrs.get("proteoflux_residual_df")
 
     nrsc = compute_nrsc(out, contrast_names)
     if nrsc is not None:
@@ -488,13 +516,47 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
 
 @log_time("Clustering")
 def clustering_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
-    """Run feature clustering and missingness clustering (unchanged behavior)."""
+    """Run feature clustering and optional design-adjusted PCA diagnostics."""
     analysis_cfg = (config or {}).get("analysis", {}) or {}
     max_features = int(analysis_cfg.get("clustering_max", 8000))
-    adata = run_clustering(adata,
-                           n_pcs=adata.X.shape[0]-1,
-                           max_features=max_features,
-                           layer="normalized")
+    n_pcs = adata.X.shape[0] - 1
+
+    adata = run_clustering(
+        adata,
+        n_pcs=n_pcs,
+        max_features=max_features,
+        layer="normalized",
+    )
+
+    analysis_meta = adata.uns.get("analysis", {})
+    batch_cols = analysis_meta.get("batch_effect_columns", []) or []
+    if isinstance(batch_cols, str):
+        batch_cols = [batch_cols]
+
+    if batch_cols and analysis_meta.get("de_method") == "limma_ebayes":
+        levels = sorted(adata.obs["CONDITION"].astype(str).unique())
+        design_dm = _design_with_optional_covariates(
+            adata.obs.copy(),
+            levels,
+            config,
+            log_messages=False,
+        )
+        design_columns = list(design_dm.design_info.column_names)
+        nuisance_columns = [c for c in design_columns if c not in levels]
+        if nuisance_columns:
+            log_info(
+                "Computing design-adjusted PCA"
+            )
+            adata = run_design_adjusted_pca(
+                adata,
+                design=np.asarray(design_dm, dtype=float),
+                design_columns=design_columns,
+                nuisance_columns=nuisance_columns,
+                n_pcs=n_pcs,
+                max_features=max_features,
+                layer="normalized",
+            )
+
     adata = run_clustering_missingness(adata, max_features=max_features)
 
     return adata
@@ -824,6 +886,8 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     out.uns["analysis"]["design_formula"] = design2.attrs.get("proteoflux_formula")
     out.uns["analysis"]["batch_effect_columns"] = design2.attrs.get("proteoflux_batch_effect_columns", [])
     out.uns["analysis"]["design_columns"] = list(design2.design_info.column_names)
+    out.uns["analysis"]["design_rank"] = design2.attrs.get("proteoflux_design_rank")
+    out.uns["analysis"]["residual_df"] = design2.attrs.get("proteoflux_residual_df")
 
     if (not pilot_mode) and (fully is not None):
         _neutralize_fully_imputed_contrasts(out=out, fully=fully)

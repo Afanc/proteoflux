@@ -136,6 +136,37 @@ def _summarize_ratio_input(
         "control_concentration": float(control_concentration),
     }
 
+def _validate_min_control_points(
+    adata: ad.AnnData,
+    *,
+    concentration_col: str,
+    control_concentration: float,
+    min_control_points: int,
+) -> int:
+    if min_control_points < 0:
+        raise ValueError("PELSA min_control_points must be >= 0.")
+
+    conc = pd.to_numeric(adata.obs[concentration_col], errors="raise").astype(float)
+    n_control_samples = int(np.sum(conc.to_numpy() == float(control_concentration)))
+
+    if n_control_samples == 0:
+        raise ValueError(
+            "PELSA requires at least one control sample with "
+            f"{concentration_col} == {control_concentration}."
+        )
+
+    if min_control_points > n_control_samples:
+        raise ValueError(
+            "PELSA min_control_points cannot be satisfied: "
+            f"min_control_points={min_control_points}, but only "
+            f"{n_control_samples} control sample(s) have "
+            f"{concentration_col} == {control_concentration}. "
+            f"Set analysis.pelsa.min_control_points <= {n_control_samples} "
+            "or add more control runs."
+        )
+
+    return n_control_samples
+
 
 def _fit_all_4pl_curves(ratio_df: pd.DataFrame, config: dict) -> pd.DataFrame:
     return fit_4pl_torch_from_ratio_df(ratio_df, config)
@@ -193,6 +224,14 @@ def run_pelsa_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     concentration_col = pelsa_cfg.get("concentration_column", "Concentration")
     layer = pelsa_cfg.get("layer", "normalized")
     control_concentration = float(pelsa_cfg.get("control_concentration", 0.0))
+    min_control_points = int(pelsa_cfg.get("min_control_points", 1))
+
+    n_control_samples = _validate_min_control_points(
+        adata,
+        concentration_col=concentration_col,
+        control_concentration=control_concentration,
+        min_control_points=min_control_points,
+    )
 
     ratio_df = _build_pelsa_ratio_table(
         adata,
@@ -212,6 +251,9 @@ def run_pelsa_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         ratio_df,
         control_concentration=control_concentration,
     )
+
+    summary["n_control_samples"] = n_control_samples
+    summary["min_control_points"] = min_control_points
 
     nonzero_conc = np.sort(
         ratio_df.loc[
@@ -236,6 +278,7 @@ def run_pelsa_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         "concentration_column": concentration_col,
         "layer": layer,
         "control_concentration": control_concentration,
+        "min_control_points": min_control_points,
         "control_reference": "mean_linear_on_log2_input",
         "control_log10_concentration": float(
             ratio_df.loc[

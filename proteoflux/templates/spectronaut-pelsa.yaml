@@ -52,6 +52,7 @@ analysis:
   pelsa:
     concentration_column: "Concentration"
     control_concentration: 0.0
+    min_control_points: 2
     fit_loss: huber
     fit_huber_delta: 0.5
     fit_steps: 300

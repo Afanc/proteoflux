@@ -127,8 +127,75 @@ def _maybe_subset(adata: AnnData, feat_idx: Sequence[int]) -> AnnData:
     # Using copy() so downstream modifications don't touch the original.
     return adata[:, feat_idx].copy() if len(feat_idx) < adata.n_vars else adata
 
+def run_design_adjusted_pca(
+    adata: AnnData,
+    *,
+    design: np.ndarray,
+    design_columns: Sequence[str],
+    nuisance_columns: Sequence[str],
+    layer: str = "normalized",
+    n_pcs: int = 50,
+    max_features: Optional[int] = None,
+    feature_selection: str = "variance",
+    random_seed: int = 0,
+    obsm_key: str = "X_pca_design_adjusted",
+    uns_key: str = "pca_design_adjusted",
+) -> AnnData:
+    """Compute PCA after removing fitted design-factor effects for QC display.
 
-@log_time("Running clustering pipeline")
+    This is a visualization-only helper. It uses the same left-censor imputation
+    as the normal clustering PCA, then subtracts only the fitted nuisance/design
+    factor columns. Condition columns remain in the matrix.
+    """
+    nuisance_columns = [str(c) for c in nuisance_columns if str(c)]
+    if not nuisance_columns:
+        return adata
+
+    if layer not in adata.layers:
+        raise ValueError(f"Cannot compute design-adjusted PCA: missing layer {layer!r}.")
+
+    design_columns = [str(c) for c in design_columns]
+    missing = [c for c in nuisance_columns if c not in design_columns]
+    if missing:
+        raise ValueError(
+            "Cannot compute design-adjusted PCA: nuisance columns are missing "
+            f"from the design matrix: {missing!r}."
+        )
+
+    D = np.asarray(design, dtype=np.float64)
+    if D.shape[0] != adata.n_obs:
+        raise ValueError(
+            "Cannot compute design-adjusted PCA: design/sample mismatch "
+            f"(design rows={D.shape[0]}, samples={adata.n_obs})."
+        )
+
+    feat_idx = _pick_feature_indices(adata, layer, max_features, feature_selection, random_seed)
+    A = _maybe_subset(adata, feat_idx)
+    data = A.layers[layer]
+    X = _lc_mindet_impute(data, random_seed=random_seed).astype(np.float64, copy=False)
+
+    nuisance_idx = [design_columns.index(c) for c in nuisance_columns]
+    beta = np.linalg.pinv(D) @ X
+    fitted_nuisance = D[:, nuisance_idx] @ beta[nuisance_idx, :]
+    X_adj = (X - fitted_nuisance).astype(np.float32, copy=False)
+
+    E = AnnData(X=X_adj, obs=A.obs.copy())
+    n_comps = max(1, min(int(n_pcs), E.n_obs - 1))
+    sc.tl.pca(E, n_comps=n_comps)
+
+    adata.obsm[obsm_key] = E.obsm["X_pca"]
+    adata.uns[uns_key] = E.uns.get("pca", {})
+    adata.uns[uns_key]["layer"] = layer
+    adata.uns[uns_key]["removed_design_columns"] = list(nuisance_columns)
+    adata.uns[uns_key]["n_features"] = int(X_adj.shape[1])
+    adata.uns[uns_key]["note"] = (
+        "Visualization-only PCA after removing fitted categorical design-factor "
+        "effects. Condition effects are preserved."
+    )
+    return adata
+
+
+@log_time("Computing left-censored PCA and MDS")
 def run_clustering(
     adata: AnnData,
     layer: Optional[str] = None,
@@ -293,7 +360,7 @@ def run_clustering(
 
     return adata
 
-@log_time("Running missingness clustering pipeline")
+@log_time("Computing missingness clustering")
 def run_clustering_missingness(
     adata: AnnData,
     layer: str = "normalized",

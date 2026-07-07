@@ -136,7 +136,13 @@ def _shorten_labels_smart(names: List[str], max_len: int = 28, min_common: int =
         out.append(short)
     return out
 
-def _plot_ids_table_multi_column(ax, df_ids, *, cond_color_map=None):
+def _plot_ids_table_multi_column(
+    ax,
+    df_ids,
+    *,
+    cond_color_map=None,
+    group_label: str = "Condition",
+):
     """
     Render a compact multi-column table of sample IDs.
     Used when number of samples is too large for a bar plot.
@@ -185,10 +191,10 @@ def _plot_ids_table_multi_column(ax, df_ids, *, cond_color_map=None):
         ax_t = ax.figure.add_subplot(gs[0, i])
         ax_t.axis("off")
 
-        cell_text = block[["Sample", "Condition", "IDs"]].values.tolist()
+        cell_text = block[["Sample", group_label, "IDs"]].values.tolist()
         table = ax_t.table(
             cellText=cell_text,
-            colLabels=["Sample", "Condition", "#IDs"],
+            colLabels=["Sample", group_label, "#IDs"],
             loc="upper left",
             cellLoc="left",
             bbox=[-0.1, 0.0, 1, 0.96],
@@ -409,19 +415,19 @@ class ReportPlotter:
 
         # Summary generated files
         fig.text(x0, y, "Input Layout: ",
-                 ha="left", va="top", fontsize=12, weight="semibold")
+                 ha="left", va="top", fontsize=12, weight="bold")
         fig.text(x0 + 0.14, y, f"{input_layout}",
                  ha="left", va="top", fontsize=12)
         y -= line_height
 
         fig.text(x0, y, "Analysis Type: ",
-                 ha="left", va="top", fontsize=12, weight="semibold")
+                 ha="left", va="top", fontsize=12, weight="bold")
         fig.text(x0 + 0.14, y, f"{analysis_type}",
                  ha="left", va="top", fontsize=12)
         y -= line_height
 
         fig.text(x0, y, "Output files:", ha="left", va="top",
-                 fontsize=12, weight="semibold")
+                 fontsize=12, weight="bold")
         y -= 0.8 * line_height
         if xlsx_export:
             fig.text(x0+0.05, y, f"- {xlsx_export} (full data table)", ha="left", va="top", fontsize=12)
@@ -431,7 +437,7 @@ class ReportPlotter:
 
         # Pipeline steps
         fig.text(x0, y, "Pipeline steps:", ha="left", va="top",
-                 fontsize=14, weight="semibold")
+                 fontsize=14, weight="bold")
         y -= line_height
 
         # Filtering
@@ -604,7 +610,7 @@ class ReportPlotter:
 
         # Package versions
         fig.text(x0, y, "Key package versions:", ha="left", va="top",
-                 fontsize=14, weight="semibold")
+                 fontsize=14, weight="bold")
         y -= line_height
 
         pkgs = {
@@ -761,7 +767,12 @@ class ReportPlotter:
                 }
             )
             ax_bar.set_title("Peptide IDs per Sample" if self.is_pelsa else "Protein IDs per Sample")
-            _plot_ids_table_multi_column(ax_bar, df_ids, cond_color_map=color_map)
+            _plot_ids_table_multi_column(
+                ax_bar,
+                df_ids,
+                cond_color_map=color_map,
+                group_label=group_label,
+            )
 
         # violins
         data_rmad = [np.asarray(x, dtype=float) for x in data_rmad]

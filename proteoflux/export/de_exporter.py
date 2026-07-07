@@ -101,9 +101,23 @@ class DEExporter:
         df["peptide_id"] = df["peptide_id"].astype(str)
         df = df.set_index("peptide_id", drop=True)
 
+        if "ec50" not in df.columns and "pec50" in df.columns:
+            pec50 = pd.to_numeric(df["pec50"], errors="coerce")
+            df["ec50"] = np.power(10.0, -pec50)
+
+        if "curve_change_fraction" not in df.columns and "curve_fold_change_log2" in df.columns:
+            curve_fc_log2 = pd.to_numeric(
+                df["curve_fold_change_log2"],
+                errors="coerce",
+            )
+            df["curve_change_fraction"] = np.sign(curve_fc_log2) * (
+                1.0 - np.power(2.0, -np.abs(curve_fc_log2))
+            )
+
         keep = [
             "fit_success",
             "curve_fold_change_log2",
+            "curve_change_fraction",
             "curve_p_value",
             "curve_q_value",
             "ec50",

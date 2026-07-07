@@ -1905,8 +1905,8 @@ class Preprocessor:
 
                         log_info(
                             f"median_equalization_by_tag: matched={n_ref} proteins by {tags} "
-                            f"in '{fasta_col}', used_complete={n_ref_complete} "
-                            f"(dropped_missing={n_ref - n_ref_complete})."
+                            f"in '{fasta_col}', used={n_ref_complete} "
+                            f"(dropped={n_ref - n_ref_complete})."
                         )
             elif m == "none":
                 log_info("Skipping normalization (raw data)")

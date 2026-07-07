@@ -55,6 +55,7 @@ class DenseTorchInput:
     x: np.ndarray
     y: np.ndarray
     n_concentrations: np.ndarray
+    n_control_points: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -237,7 +238,7 @@ def parse_torch_fit_config(pelsa_cfg: dict) -> TorchFitConfig:
     valid_losses = {
         "mse",
         "huber",
-        "L1",
+        "l1",
     }
     if cfg.loss not in valid_losses:
         raise ValueError(
@@ -306,21 +307,28 @@ def build_dense_torch_input(ratio_df: pd.DataFrame) -> DenseTorchInput:
     response = ratio_df["log2_ratio"].to_numpy(dtype=float)
     finite = np.isfinite(log_conc) & np.isfinite(response)
 
+    cols = ["peptide_id", "sample", "log10_concentration", "log2_ratio"]
+    if "is_control" in ratio_df.columns:
+        cols.append("is_control")
+
+
     df = ratio_df.loc[
         finite,
-        ["peptide_id", "sample", "log10_concentration", "log2_ratio"],
+        cols,
     ].copy()
     if df.empty:
         raise ValueError("PELSA torch backend received no valid log2FC response points.")
 
+    if "is_control" not in df.columns:
+        df["is_control"] = False
+    df["is_control"] = df["is_control"].astype(bool)
+
     peptides = pd.Index(ratio_df["peptide_id"].drop_duplicates().astype(str))
     samples = pd.Index(df["sample"].drop_duplicates().astype(str))
-    x_by_sample = (
-        df.drop_duplicates("sample")
-        .set_index("sample")
-        .loc[samples, "log10_concentration"]
-        .to_numpy(dtype=np.float32)
-    )
+
+    sample_meta = df.drop_duplicates("sample").set_index("sample").loc[samples]
+    x_by_sample = sample_meta["log10_concentration"].to_numpy(dtype=np.float32)
+    control_by_sample = sample_meta["is_control"].to_numpy(dtype=bool)
 
     y = np.full((len(peptides), len(samples)), np.nan, dtype=np.float32)
     p_codes = pd.Categorical(df["peptide_id"].astype(str), categories=peptides).codes
@@ -333,7 +341,15 @@ def build_dense_torch_input(ratio_df: pd.DataFrame) -> DenseTorchInput:
     for x_level in x_levels:
         n_concentrations += valid[:, x_by_sample == x_level].any(axis=1)
 
-    return DenseTorchInput(peptides, x_by_sample, y, n_concentrations)
+    n_control_points = valid[:, control_by_sample].sum(axis=1).astype(np.int16)
+
+    return DenseTorchInput(
+        peptides,
+        x_by_sample,
+        y,
+        n_concentrations,
+        n_control_points,
+    )
 
 
 def sanitize_curve_results_for_h5ad(df: pd.DataFrame) -> pd.DataFrame:
@@ -350,6 +366,7 @@ def sanitize_curve_results_for_h5ad(df: pd.DataFrame) -> pd.DataFrame:
     int_cols = (
         "n_points",
         "n_concentrations",
+        "n_control_points",
         "optimizer_steps",
         "optimizer_n_starts",
         "optimizer_best_start",
@@ -365,19 +382,17 @@ def build_empty_result(
     peptides: pd.Index,
     n_points: np.ndarray,
     n_concentrations: np.ndarray,
-    eligible: np.ndarray,
+    n_control_points: np.ndarray,
+    failure_reason: np.ndarray,
 ) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "peptide_id": peptides.to_numpy(dtype=str),
             "fit_success": False,
-            "failure_reason": np.where(
-                eligible,
-                "not_fitted",
-                "insufficient_nonzero_points",
-            ),
+            "failure_reason": failure_reason,
             "n_points": n_points,
             "n_concentrations": n_concentrations.astype(int),
+            "n_control_points": n_control_points.astype(int),
         }
     )
 
@@ -566,6 +581,8 @@ def mse_loss(torch, model, x, y, mask, cfg: TorchFitConfig):
 def huber_loss(torch, model, x, y, mask, cfg: TorchFitConfig):
     return masked_huber_loss(torch, model.predict(x), y, mask, cfg)
 
+def l1_loss(torch, model, x, y, mask, cfg: TorchFitConfig):
+    return masked_l1_loss(torch, model.predict(x), y, mask, cfg)
 
 def get_loss_function(cfg: TorchFitConfig) -> Callable:
     if cfg.loss == "mse":
@@ -770,6 +787,10 @@ def fit_4pl_torch_from_ratio_df(ratio_df: pd.DataFrame, config: dict) -> pd.Data
     torch = require_torch()
 
     pelsa_cfg = ((config or {}).get("analysis", {}) or {}).get("pelsa", {}) or {}
+    min_control_points = int(pelsa_cfg.get("min_control_points", 1))
+    if min_control_points < 0:
+        raise ValueError("PELSA min_control_points must be >= 0.")
+
     bounds = parse_pelsa_bounds(pelsa_cfg.get("bounds", {}) or {})
     fit_cfg = parse_torch_fit_config(pelsa_cfg)
     dtype = torch_dtype(torch, fit_cfg.dtype_name)
@@ -781,20 +802,44 @@ def fit_4pl_torch_from_ratio_df(ratio_df: pd.DataFrame, config: dict) -> pd.Data
     dense = build_dense_torch_input(ratio_df)
     valid_np = np.isfinite(dense.y)
     n_points = valid_np.sum(axis=1).astype(int)
-    eligible = dense.n_concentrations >= N_4PL_PARAMS
+
+    eligible_concentrations = dense.n_concentrations >= N_4PL_PARAMS
+    eligible_control = dense.n_control_points >= min_control_points
+    eligible = eligible_concentrations & eligible_control
+    n_insufficient_concentrations = int((~eligible_concentrations).sum())
+    n_insufficient_control = int((~eligible_control).sum())
+
+    failure_reason = np.full(len(dense.peptides), "not_fitted", dtype=object)
+    failure_reason[~eligible_concentrations] = "insufficient_concentrations"
+    failure_reason[~eligible_control] = "insufficient_control_points"
+
 
     log_info(
         "PELSA torch log2FC input: "
         f"features={len(dense.peptides)}, eligible={int(eligible.sum())}, "
-        f"samples_nonzero={len(dense.x)}, build_time={perf_counter() - t0:.2f}s"
+        f"min_control_points={min_control_points}, "
+        f"insufficient_control={n_insufficient_control}, "
+        f"insufficient_concentrations={n_insufficient_concentrations}, "
+        f"samples_for_fit={len(dense.x)}, build_time={perf_counter() - t0:.2f}s"
     )
 
     result = build_empty_result(
         dense.peptides,
         n_points,
         dense.n_concentrations,
-        eligible,
+        dense.n_control_points,
+        failure_reason,
     )
+
+    if not np.any(eligible):
+        raise ValueError(
+            "No PELSA curves are eligible for 4PL fitting. "
+            f"features={len(dense.peptides)}, "
+            f"min_control_points={min_control_points}, "
+            f"insufficient_control_points={n_insufficient_control}, "
+            f"insufficient_concentrations={n_insufficient_concentrations}. "
+            "Check analysis.pelsa.min_control_points and the concentration design."
+        )
 
     x_neg = -dense.x
     observed_pec50_limits = (float(np.nanmin(x_neg)), float(np.nanmax(x_neg)))
