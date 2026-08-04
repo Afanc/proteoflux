@@ -34,6 +34,15 @@ class DEExporter:
         self.contrasts = self.adata.uns.get("contrast_names", [])
         self.config = config or self.adata.uns.get("config", {})
 
+    @staticmethod
+    def _require_unique_columns(df: pd.DataFrame, *, table_name: str) -> None:
+        """Fail clearly instead of writing ambiguous duplicate XLSX/CSV headers."""
+        duplicated = df.columns[df.columns.duplicated(keep=False)].unique().tolist()
+        if duplicated:
+            raise ValueError(
+                f"{table_name} export contains duplicate columns: {duplicated!r}."
+            )
+
     def _get_dataframe(self, matrix_name: str) -> Optional[pd.DataFrame]:
         """Return varm[matrix_name] as a (features × contrasts) DataFrame, or None."""
         if matrix_name in self.adata.varm:
@@ -357,7 +366,6 @@ class DEExporter:
 
         if (observed_df is not None) and (not is_pelsa):
             blocks.append(observed_df)
-            blocks.append(max_observed_col)
 
         # Observed-per-contrast: for A_vs_B, take max(Observed_A, Observed_B).
         observed_contrast_df = None
@@ -374,6 +382,15 @@ class DEExporter:
                 contr_cols[f"Observed_{name}"] = observed_df[[col_a, col_b]].max(axis=1)
             if contr_cols:
                 observed_contrast_df = pd.DataFrame(contr_cols, index=ad.var_names)
+
+        # MAX_OBSERVED is useful when no contrast-level equivalent exists. Once
+        # Observed_<A_vs_B> columns are available it is redundant
+        if (
+            max_observed_col is not None
+            and observed_contrast_df is None
+            and not is_pelsa
+        ):
+            blocks.append(max_observed_col)
 
         # Flowthrough observed-per-contrast (FT)
         ft_observed_contrast_df = None
@@ -461,6 +478,7 @@ class DEExporter:
 
         idx_name = "PEPTIDE" if is_pelsa else ("PHOSPHOSITE" if is_phospho else "UNIPROT_AC")
         summary_df = pd.concat([b for b in blocks if b is not None], axis=1)
+        self._require_unique_columns(summary_df, table_name="Summary")
 
         # Ensure phospho gets PARENT_PEPTIDE_ID column and preferred metadata order
         if is_phospho:

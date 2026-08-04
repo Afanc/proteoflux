@@ -65,6 +65,7 @@ def _design_with_optional_covariates(
     obs: pd.DataFrame,
     levels: list[str],
     cfg: dict,
+    drop_constant_batch_columns: bool = False,
     *,
     log_messages: bool = True,
 ) -> patsy.DesignMatrix:
@@ -122,6 +123,13 @@ def _design_with_optional_covariates(
 
         n_unique = pd.Series(nonnull).nunique(dropna=True)
         if n_unique < 2:
+            if drop_constant_batch_columns:
+                if log_messages:
+                    log_info(
+                        f"Omitting constant batch/covariate column {actual!r} "
+                        "from this contrast-specific design."
+                    )
+                continue
             raise ValueError(
                 f"analysis.batch_effect_columns: column {actual!r} must contain at least "
                 f"2 distinct non-null values, got {n_unique}."
@@ -186,11 +194,6 @@ def _design_with_optional_covariates(
             "Design matrix leaves no residual degrees of freedom. "
             f"n_samples={n_samples}, rank={rank}, residual_df={df_resid}. "
             "Reduce the number of batch/covariate terms."
-        )
-
-    if log_messages:
-        log_info(
-            f"Design matrix: n_samples={n_samples}, rank={rank}, residual_df={df_resid}."
         )
 
     design_dm.attrs = {}
@@ -299,12 +302,266 @@ def _compute_missingness_payload(adata_in: ad.AnnData) -> tuple[pd.DataFrame, st
     res = compute_missingness(adata_in, max_features=None, random_seed=0)
     return res.df, res.source
 
-def _make_contrasts(levels: list[str], design_dm, cfg: dict) -> pd.DataFrame:
-    """Build limma contrasts matrix (mechanical extraction)."""
-    defs = _contrast_defs_from_cfg(levels, cfg)
-    contrast_df = imo.makeContrasts(defs, levels=design_dm)
-    contrast_df.columns = [c.replace(" - ", "_vs_") for c in contrast_df.columns]
-    return contrast_df
+def _separate_contrasts_enabled(cfg: dict) -> bool:
+    """Return whether each contrast should be fitted on its own sample subset."""
+    value = ((cfg or {}).get("analysis", {}) or {}).get(
+        "separate_contrasts",
+        False,
+    )
+    if not isinstance(value, (bool, np.bool_)):
+        raise ValueError(
+            "analysis.separate_contrasts must be true or false, "
+            f"got {value!r}."
+        )
+    return bool(value)
+
+def _build_limma_fit_plan(
+    obs: pd.DataFrame,
+    levels: list[str],
+    cfg: dict,
+) -> dict:
+    """Build one experiment-wide fit or one independent fit per contrast."""
+    contrast_defs = _contrast_defs_from_cfg(levels, cfg)
+    contrast_names = [
+        definition.replace(" - ", "_vs_")
+        for definition in contrast_defs
+    ]
+
+    if not contrast_defs:
+        raise ValueError("No contrasts were selected for analysis.")
+
+    if not _separate_contrasts_enabled(cfg):
+        design_dm = _design_with_optional_covariates(obs, levels, cfg)
+        contrasts_df = imo.makeContrasts(contrast_defs, levels=design_dm)
+        contrasts_df.columns = contrast_names
+
+        return {
+            "separate": False,
+            "contrast_names": contrast_names,
+            "entries": [
+                {
+                    "contrast_indices": list(range(len(contrast_names))),
+                    "contrast_names": contrast_names,
+                    "conditions": list(levels),
+                    "sample_names": obs.index.to_list(),
+                    "design": design_dm,
+                    "contrasts": contrasts_df,
+                }
+            ],
+        }
+
+    log_info(
+        "Separate-contrast analysis: fitting "
+        f"{len(contrast_defs)} contrast(s) independently."
+    )
+
+    condition_values = obs["CONDITION"].astype(str)
+    entries = []
+
+    for index, (definition, name) in enumerate(
+        zip(contrast_defs, contrast_names)
+    ):
+        try:
+            condition_a, condition_b = definition.split(" - ", 1)
+        except ValueError as exc:
+            raise ValueError(
+                f"Contrast definition {definition!r} does not match "
+                "'<A> - <B>'."
+            ) from exc
+
+        sample_mask = condition_values.isin([condition_a, condition_b])
+        pair_obs = obs.loc[sample_mask].copy()
+        pair_counts = pair_obs["CONDITION"].astype(str).value_counts()
+
+        missing = [
+            condition
+            for condition in (condition_a, condition_b)
+            if int(pair_counts.get(condition, 0)) == 0
+        ]
+        if missing:
+            raise ValueError(
+                f"Contrast {name!r} has no samples for condition(s) "
+                f"{missing!r}."
+            )
+
+        design_dm = _design_with_optional_covariates(
+            pair_obs,
+            [condition_a, condition_b],
+            cfg,
+            drop_constant_batch_columns=True,
+        )
+        contrasts_df = imo.makeContrasts([definition], levels=design_dm)
+        contrasts_df.columns = [name]
+
+        entries.append(
+            {
+                "contrast_indices": [index],
+                "contrast_names": [name],
+                "conditions": [condition_a, condition_b],
+                "sample_names": pair_obs.index.to_list(),
+                "design": design_dm,
+                "contrasts": contrasts_df,
+            }
+        )
+
+    return {
+        "separate": True,
+        "contrast_names": contrast_names,
+        "entries": entries,
+    }
+
+
+def _fit_limma_from_plan(
+    *,
+    df_GxN: pd.DataFrame,
+    fit_plan: dict,
+    pilot_mode: bool,
+    fully_mask: Optional[np.ndarray] = None,
+) -> dict:
+    """Execute a fit plan and return feature-by-contrast result matrices."""
+    entries = fit_plan["entries"]
+
+    if not fit_plan["separate"]:
+        entry = entries[0]
+        return _fit_limma_with_contrasts(
+            df_GxN=df_GxN.loc[:, entry["sample_names"]],
+            design_dm=entry["design"],
+            contrasts_df=entry["contrasts"],
+            pilot_mode=pilot_mode,
+            fully_mask=fully_mask,
+        )
+
+    n_features = df_GxN.shape[0]
+
+    def _as_feature_column(value, *, key: str) -> np.ndarray:
+        arr = np.asarray(value, dtype=float)
+
+        if arr.ndim == 0 or arr.size == 1:
+            return np.full(
+                n_features,
+                float(arr.reshape(-1)[0]),
+                dtype=float,
+            )
+
+        if arr.ndim == 2 and arr.shape[1] != 1:
+            raise ValueError(
+                f"Separate-contrast {key} has shape {arr.shape}; "
+                "expected one column."
+            )
+
+        arr = arr.reshape(-1)
+        if arr.size != n_features:
+            raise ValueError(
+                f"Separate-contrast {key} has length {arr.size}, "
+                f"expected {n_features}."
+            )
+        return arr
+
+    results = []
+
+    for entry in entries:
+        indices = entry["contrast_indices"]
+        entry_mask = (
+            None
+            if fully_mask is None
+            else fully_mask[:, indices]
+        )
+
+        results.append(
+            _fit_limma_with_contrasts(
+                df_GxN=df_GxN.loc[:, entry["sample_names"]],
+                design_dm=entry["design"],
+                contrasts_df=entry["contrasts"],
+                pilot_mode=pilot_mode,
+                fully_mask=entry_mask,
+            )
+        )
+
+    combined = {}
+
+    for key in results[0]:
+        if results[0][key] is None:
+            combined[key] = None
+            continue
+
+        combined[key] = np.column_stack(
+            [
+                _as_feature_column(result[key], key=key)
+                for result in results
+            ]
+        )
+
+    return combined
+
+
+def _store_fit_plan_metadata(
+    out: ad.AnnData,
+    fit_plan: dict,
+) -> None:
+    """Record whether the model was experiment-wide or contrast-specific."""
+    analysis_meta = out.uns["analysis"]
+    analysis_meta["separate_contrasts"] = bool(fit_plan["separate"])
+
+    if not fit_plan["separate"]:
+        design_dm = fit_plan["entries"][0]["design"]
+        analysis_meta["design_formula"] = design_dm.attrs.get(
+            "proteoflux_formula"
+        )
+        analysis_meta["batch_effect_columns"] = design_dm.attrs.get(
+            "proteoflux_batch_effect_columns",
+            [],
+        )
+        analysis_meta["design_columns"] = list(
+            design_dm.design_info.column_names
+        )
+        analysis_meta["design_rank"] = design_dm.attrs.get(
+            "proteoflux_design_rank"
+        )
+        analysis_meta["residual_df"] = design_dm.attrs.get(
+            "proteoflux_residual_df"
+        )
+        analysis_meta.pop("contrast_models", None)
+        return
+
+    contrast_models = {}
+
+    for entry in fit_plan["entries"]:
+        design_dm = entry["design"]
+        name = entry["contrast_names"][0]
+
+        contrast_models[name] = {
+            "conditions": list(entry["conditions"]),
+            "n_samples": int(len(entry["sample_names"])),
+            "design_formula": design_dm.attrs.get("proteoflux_formula"),
+            "design_columns": list(design_dm.design_info.column_names),
+            "design_rank": int(
+                design_dm.attrs.get("proteoflux_design_rank")
+            ),
+            "residual_df": int(
+                design_dm.attrs.get("proteoflux_residual_df")
+            ),
+            "batch_effect_columns": list(
+                design_dm.attrs.get(
+                    "proteoflux_batch_effect_columns",
+                    [],
+                )
+            ),
+        }
+
+    # There is deliberately no single design/rank/df in this mode.
+    analysis_meta["design_formula"] = "per-contrast"
+    analysis_meta["batch_effect_columns"] = list(dict.fromkeys(
+        column
+        for entry in fit_plan["entries"]
+        for column in entry["design"].attrs.get(
+            "proteoflux_batch_effect_columns",
+            [],
+        )
+    ))
+    analysis_meta["design_columns"] = []
+    analysis_meta["design_rank"] = None
+    analysis_meta["residual_df"] = None
+    analysis_meta["contrast_models"] = contrast_models
 
 def _pilot_log2fc_matrix(adata: ad.AnnData, contrast_names: list[str]) -> np.ndarray:
     """Compute contrast log2FCs as condition mean differences, without fitting limma."""
@@ -402,6 +659,9 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         out.uns[UNS_MISSINGNESS_SOURCE] = miss_source
         out.uns[UNS_MISSINGNESS_RULE] = "nan-is-missing"
         out.uns[UNS_HAS_COVARIATE] = False
+        out.uns["analysis"]["separate_contrasts"] = (
+            _separate_contrasts_enabled(config)
+        )
         return out
 
     # Pilot mode due to singleton replicates (keep existing behavior/logging)
@@ -428,6 +688,9 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         out.uns["analysis"]["design_formula"] = None
         out.uns["analysis"]["batch_effect_columns"] = []
         out.uns["analysis"]["design_columns"] = []
+        out.uns["analysis"]["separate_contrasts"] = (
+            _separate_contrasts_enabled(config)
+        )
 
         nrsc = compute_nrsc(out, contrast_names)
         if nrsc is not None:
@@ -442,32 +705,29 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     if len(levels) < 2:
         raise ValueError(f"Need ≥2 conditions for contrasts; found {levels}")
 
-    design_dm = _design_with_optional_covariates(obs, levels, config)
-
     # Expression: genes × samples
     df_X = _genes_by_samples_df(adata.X, adata.obs_names, adata.var_names)
 
-    contrast_df = _make_contrasts(levels, design_dm, config)
-    contrast_names = list(contrast_df.columns)
+    fit_plan = _build_limma_fit_plan(obs, levels, config)
+    contrast_names = fit_plan["contrast_names"]
 
     # Fully-imputed detection (contrast-local) — used for pre-BH masking in shared fit helper.
     cond_arr = adata.obs["CONDITION"].astype(str).to_numpy()
     fully = _fully_imputed_mask_from_layer(adata=adata, layer_name="raw", conditions=cond_arr, contrast_names=contrast_names)
 
-    limma_res = _fit_limma_with_contrasts(
+    limma_res = _fit_limma_from_plan(
         df_GxN=df_X,
-        design_dm=design_dm,
-        contrasts_df=contrast_df,
+        fit_plan=fit_plan,
         pilot_mode=pilot_mode,
         fully_mask=fully,
     )
 
-    # Residual variance (from the raw lmFit, matching prior behavior)
+    # One column per contrast in separate mode; legacy vector in global mode.
     resid_var = np.asarray(limma_res["sigma"], dtype=np.float32) ** 2
-    adata.uns[UNS_RESIDUAL_VARIANCE] = resid_var
 
     # Assemble into AnnData
     out = adata.copy()
+    out.uns[UNS_RESIDUAL_VARIANCE] = resid_var
 
     out.varm[VARM_LOG2FC] = limma_res["coefs"]
 
@@ -500,11 +760,8 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     out.uns[UNS_MISSINGNESS_SOURCE] = miss_source
     out.uns[UNS_MISSINGNESS_RULE] = "nan-is-missing"
     out.uns[UNS_HAS_COVARIATE] = False
-    out.uns["analysis"]["design_formula"] = design_dm.attrs.get("proteoflux_formula")
-    out.uns["analysis"]["batch_effect_columns"] = design_dm.attrs.get("proteoflux_batch_effect_columns", [])
-    out.uns["analysis"]["design_columns"] = list(design_dm.design_info.column_names)
-    out.uns["analysis"]["design_rank"] = design_dm.attrs.get("proteoflux_design_rank")
-    out.uns["analysis"]["residual_df"] = design_dm.attrs.get("proteoflux_residual_df")
+
+    _store_fit_plan_metadata(out, fit_plan)
 
     nrsc = compute_nrsc(out, contrast_names)
     if nrsc is not None:
@@ -737,11 +994,9 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
 
     R_df = pd.DataFrame(R, index=Y_df.index, columns=Y_df.columns)  # (G×N)
 
-    # Stage 2: limma on residuals
-    design2 = _design_with_optional_covariates(obs, levels, config)
-    contr   = _make_contrasts(levels, design2, config)
-
-    contrast_names = list(contr.columns)
+    # Use the same sample subsets/designs for adjusted, raw, and FT fits.
+    fit_plan = _build_limma_fit_plan(obs, levels, config)
+    contrast_names = fit_plan["contrast_names"]
 
     cond_arr = obs["CONDITION"].astype(str).to_numpy()
     fully = _fully_imputed_mask_from_layer(
@@ -751,10 +1006,9 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         contrast_names=contrast_names,
     )
 
-    limma_resid = _fit_limma_with_contrasts(
+    limma_resid = _fit_limma_from_plan(
         df_GxN=R_df,
-        design_dm=design2,
-        contrasts_df=contr,
+        fit_plan=fit_plan,
         pilot_mode=pilot_mode,
         fully_mask=fully,
     )
@@ -776,10 +1030,9 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         # Mark this contrast "no FT info" if either side has zero real FT
         contrast_noft[:, j] = (cntA == 0) | (cntB == 0)
 
-    limma_raw = _fit_limma_with_contrasts(
+    limma_raw = _fit_limma_from_plan(
         df_GxN=Y_df,
-        design_dm=design2,
-        contrasts_df=contr,
+        fit_plan=fit_plan,
         pilot_mode=pilot_mode,
         fully_mask=fully,
     )
@@ -806,10 +1059,9 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
             conditions=cond_arr,
             contrast_names=contrast_names,
         )
-    limma_cov = _fit_limma_with_contrasts(
+    limma_cov = _fit_limma_from_plan(
         df_GxN=C_df,
-        design_dm=design2,
-        contrasts_df=contr,
+        fit_plan=fit_plan,
         pilot_mode=pilot_mode,
         fully_mask=fully_ft,
     )
@@ -883,11 +1135,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     out.uns[UNS_HAS_COVARIATE] = True
     out.uns[UNS_PILOT_MODE] = bool(pilot_mode)
 
-    out.uns["analysis"]["design_formula"] = design2.attrs.get("proteoflux_formula")
-    out.uns["analysis"]["batch_effect_columns"] = design2.attrs.get("proteoflux_batch_effect_columns", [])
-    out.uns["analysis"]["design_columns"] = list(design2.design_info.column_names)
-    out.uns["analysis"]["design_rank"] = design2.attrs.get("proteoflux_design_rank")
-    out.uns["analysis"]["residual_df"] = design2.attrs.get("proteoflux_residual_df")
+    _store_fit_plan_metadata(out, fit_plan)
 
     if (not pilot_mode) and (fully is not None):
         _neutralize_fully_imputed_contrasts(out=out, fully=fully)

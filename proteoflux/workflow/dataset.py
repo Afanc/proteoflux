@@ -49,8 +49,6 @@ class Dataset:
 
         self.inject_runs_cfg: dict = dataset_cfg.get("inject_runs", {}) or {}
 
-        self.exclude_runs = self._parse_exclude_runs(dataset_cfg.get("exclude_runs"))
-
         # Preprocessing config and setup
         preprocessing_cfg = deepcopy(kwargs.get("preprocessing", {}) or {})
 
@@ -100,20 +98,6 @@ class Dataset:
 
         # Process
         self._load_and_process()
-
-    @staticmethod
-    def _parse_exclude_runs(x) -> set[str]:
-        """Accept None / str / iterable; return a normalized set of run identifiers."""
-        if x is None:
-            return set()
-        if isinstance(x, str):
-            return {x.strip()} if x.strip() else set()
-        try:
-            return {str(v).strip() for v in x if str(v).strip()}
-        except TypeError:
-            # not iterable (e.g. int); fall back to single-item set
-            s = str(x).strip()
-            return {s} if s else set()
 
     @property
     def is_proteomics(self) -> bool:
@@ -316,7 +300,7 @@ class Dataset:
         return self._concat_relaxed([df_main] + injected_frames)
 
     def _load_and_process(self):
-        """Load raw data, harmonize, inject runs, exclude runs, preprocess, convert."""
+        """Load raw data, harmonize, inject runs, preprocess, convert."""
 
         # Load data
         self.rawinput = self._load_rawdata(self.file_path)
@@ -551,6 +535,15 @@ class Dataset:
 
         # Create var and obs metadata
         sample_names = [col for col in processed_mat.columns if col != "INDEX"]
+
+        leaked_excluded_runs = sorted(
+            self.harmonizer.exclude_runs.intersection(sample_names)
+        )
+        if leaked_excluded_runs:
+            raise RuntimeError(
+                "Excluded runs unexpectedly survived preprocessing: "
+                f"{leaked_excluded_runs!r}."
+            )
         obs = condition_df.loc[sample_names]
 
         self.adata = ad.AnnData(X=X.T, obs=obs, var=protein_meta_df)
@@ -794,6 +787,7 @@ class Dataset:
         self.adata.uns["preprocessing"] = {
             "input_layout": self.input_layout,
             "analysis_type": self.analysis_type,
+            "excluded_runs": sorted(self.harmonizer.exclude_runs),
             "filtering": {
                 "cont": self.preprocessed_data.meta_cont,
                 "qvalue": self.preprocessed_data.meta_qvalue,
