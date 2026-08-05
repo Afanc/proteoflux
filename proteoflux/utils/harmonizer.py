@@ -176,17 +176,32 @@ class DataHarmonizer:
 
         return ann
 
-    def _fmt_diff(self, missing: list[str], extra: list[str], what: str) -> None:
-        if not missing and not extra:
+    def _fmt_diff(
+        self,
+        annotation_only: list[str],
+        data_only: list[str],
+        what: str,
+    ) -> None:
+        if not annotation_only and not data_only:
             return
+
         def _fmt(lst, cap=20):
             return lst[:cap] + ([f"... (+{len(lst)-cap} more)"] if len(lst) > cap else [])
-        parts = []
-        if missing:
-            parts.append(f"Annotated {what} not found in data ({len(missing)}): {_fmt(missing)}")
-        if extra:
-            parts.append(f"Data has {what} not in annotation ({len(extra)}): {_fmt(extra)}")
-        msg = f"{what.capitalize()} / annotation mismatch:\n  " + "\n  ".join(parts)
+
+        if annotation_only:
+            log_warning(
+                f"Annotation entries ignored: {len(annotation_only)} {what} "
+                f"not found in data: {_fmt(annotation_only)}"
+            )
+
+        if not data_only:
+            return
+
+        msg = (
+            f"{what.capitalize()} / annotation mismatch:\n"
+            f"  Data has {what} not in annotation ({len(data_only)}): "
+            f"{_fmt(data_only)}"
+        )
         logger.error(msg)
         raise ValueError(msg)
 
@@ -196,9 +211,9 @@ class DataHarmonizer:
         excl = set(getattr(self, "exclude_runs", set()) or set())
         df_files  = df_files  - excl
         ann_files = ann_files - excl
-        missing = sorted(ann_files - df_files)
-        extra   = sorted(df_files - ann_files)
-        self._fmt_diff(missing, extra, "filenames")
+        annotation_only = sorted(ann_files - df_files)
+        data_only = sorted(df_files - ann_files)
+        self._fmt_diff(annotation_only, data_only, "filenames")
 
     def _validate_wide_annotation(self, df: pl.DataFrame, ann: pl.DataFrame) -> None:
         ann_filenames = set(ann.select("FILENAME").unique().to_series().to_list())
@@ -228,9 +243,9 @@ class DataHarmonizer:
         df_files = df_files - excl
         ann_filenames = ann_filenames - excl
 
-        missing = sorted(ann_filenames - df_files)
-        extra   = sorted(df_files - ann_filenames)
-        self._fmt_diff(missing, extra, "wide sample labels")
+        annotation_only = sorted(ann_filenames - df_files)
+        data_only = sorted(df_files - ann_filenames)
+        self._fmt_diff(annotation_only, data_only, "wide sample labels")
 
     def _rename_columns_safely(self, df: pl.DataFrame) -> pl.DataFrame:
         """
@@ -649,7 +664,8 @@ class DataHarmonizer:
             ann = self._load_annotation()
             filenames = ann.select("FILENAME").unique().to_series().to_list()
 
-            # Strict two-way validation before melt
+            # Every data sample must be annotated; the annotation may contain
+            # additional samples, which are warned about and ignored.
             self._validate_wide_annotation(df, ann)
 
             if not self.signal_key:
@@ -663,7 +679,6 @@ class DataHarmonizer:
             # Accept both forms for backwards compatibility.
             df_cols = set(df.columns)
             value_vars: list[str] = []
-            missing: list[str] = []
             for fn in filenames:
                 if fn in df_cols:
                     value_vars.append(fn)
@@ -671,17 +686,6 @@ class DataHarmonizer:
                 cand = f"{fn} {self.signal_key}"
                 if cand in df_cols:
                     value_vars.append(cand)
-                    continue
-                missing.append(fn)
-
-            if missing:
-                preview = ", ".join(missing[:10])
-                tail = " ..." if len(missing) > 10 else ""
-                raise ValueError(
-                    "Wide + annotation: some annotation FILENAME entries do not match any wide signal column.\n"
-                    f"Expected either '<FILENAME>' or '<FILENAME> {self.signal_key}'.\n"
-                    f"First missing: {preview}{tail}"
-                )
 
             id_vars = [c for c in df.columns if c not in value_vars]
 
