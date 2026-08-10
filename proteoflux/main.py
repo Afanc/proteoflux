@@ -1,6 +1,7 @@
 from proteoflux.workflow.dataset import Dataset
 from proteoflux.analysis.limma_pipeline import run_limma_pipeline, clustering_pipeline
 from proteoflux.analysis.pelsa_pipeline import run_pelsa_pipeline
+from proteoflux.analysis.ksea_pipeline import run_ksea_pipeline
 from proteoflux.analysis.validation import validate_analysis_input
 from proteoflux.export.pdf_report_exporter import ReportPlotter
 from proteoflux.export.de_exporter import DEExporter
@@ -18,6 +19,8 @@ def run_pipeline(config: dict):
          adata = run_pelsa_pipeline(adata, config)
     else:
          adata = run_limma_pipeline(adata, config)
+         if dataset.analysis_type == "phospho":
+             adata = run_ksea_pipeline(adata, config)
 
     adata = clustering_pipeline(adata, config)
 
