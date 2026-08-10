@@ -985,6 +985,18 @@ class DataHarmonizer:
               .alias("_prob_list_aligned")
         )
 
+        # Normalize percentages while positions and probabilities are still
+        # paired by list index. Spectronaut may report either 0-1 or 0-100.
+        df = df.with_columns(
+            pl.col("_prob_list_aligned")
+              .list.eval(
+                  pl.when((pl.element() > 1.0) & pl.element().is_not_null())
+                    .then(pl.element() / 100.0)
+                    .otherwise(pl.element())
+              )
+              .alias("_prob_list_aligned")
+        )
+
         # Protein groups may encode PEPTIDE_START as '471;471' etc → coerce deterministically.
         df = df.with_columns(
             pl.col("PEPTIDE_START")
@@ -992,91 +1004,95 @@ class DataHarmonizer:
               .alias("_PEPTIDE_START_I")
         )
 
-        # KEEP policy: do NOT explode multisites; build a single INDEX per peptide-row.
-        if policy == "retain":
-            dfk = df.with_columns(
+        # Keep candidate positions and probabilities paired in a lookup table.
+        probability_lookup = (
+            df.select(
+                "_ROW_ID",
+                "_ptmpos_list",
+                "_prob_list_aligned",
+            )
+            .explode(["_ptmpos_list", "_prob_list_aligned"])
+            .rename(
+                {
+                    "_ptmpos_list": "SITE_POS",
+                    "_prob_list_aligned": "LOC_PROB",
+                }
+            )
+        )
+
+        # Explode only the biological sites declared by ProteinPTMLocations.
+        # Each declared site is then joined to the probability belonging to its
+        # peptide-local position.
+        df_sites = (
+            df.with_columns(
                 pl.col("PTM_PROTEINLOCATIONS")
                   .cast(pl.Utf8)
                   .str.extract_all(r"[STY]\d+")
-                  .alias("_prot_sites_list")
-            ).with_columns(
-                pl.col("_prot_sites_list")
-                  .list.eval(pl.element().str.extract(r"(\d+)").cast(pl.Int64))
-                  .alias("_abs_pos_list")
+                  .alias("_prot_sites")
+            )
+            .explode("_prot_sites")
+            .with_columns(
+                pl.col("_prot_sites").str.slice(0, 1).alias("_AA"),
+                pl.col("_prot_sites")
+                  .str.extract(r"(\d+)")
+                  .cast(pl.Int64)
+                  .alias("_ABS_POS"),
+            )
+            .with_columns(
+                (
+                    pl.col("_ABS_POS")
+                    - pl.col("_PEPTIDE_START_I")
+                    + 1
+                ).alias("SITE_POS")
+            )
+            .filter(
+                pl.col("SITE_POS").is_not_null()
+                & (pl.col("SITE_POS") >= 1)
+                & pl.col("_ptmpos_list").list.contains(pl.col("SITE_POS"))
+            )
+            .join(
+                probability_lookup,
+                on=["_ROW_ID", "SITE_POS"],
+                how="inner",
+            )
+        )
+
+        # RETAIN policy: collect matched sites back into one composite row.
+        # Use the minimum probability because every retained site must satisfy
+        # the localization threshold.
+        if policy == "retain":
+            matched_sites = df_sites.group_by(
+                "_ROW_ID",
+                maintain_order=True,
+            ).agg(
+                pl.col("_prot_sites").alias("_prot_sites_kept"),
+                pl.col("SITE_POS").alias("_site_pos_kept"),
+                pl.col("LOC_PROB").alias("_site_prob_kept"),
             )
 
-            dfk = dfk.with_columns(
-                pl.struct(["_abs_pos_list", "_PEPTIDE_START_I"])
-                  .map_elements(
-                      lambda s: (
-                          []
-                          if (s["_abs_pos_list"] is None)
-                          else [
-                              (int(x) - int(s["_PEPTIDE_START_I"]) + 1)
-                              for x in s["_abs_pos_list"]
-                              if x is not None and s["_PEPTIDE_START_I"] is not None
-                          ]
-                      ),
-                      return_dtype=pl.List(pl.Int64),
-                  )
-                  .alias("_site_pos_list")
-            )
-
-            dfk = dfk.with_columns(
-                pl.struct(["_site_pos_list", "_ptmpos_list"])
-                  .map_elements(
-                      lambda s: (
-                          []
-                          if (s["_site_pos_list"] is None)
-                          else [
-                              (pos in (s["_ptmpos_list"] or []))
-                              for pos in (s["_site_pos_list"] or [])
-                          ]
-                      ),
-                      return_dtype=pl.List(pl.Boolean),
-                  )
-                  .alias("_keep_mask_list")
-
-            )
-            dfk = dfk.with_columns(
-                pl.struct(["_prot_sites_list", "_site_pos_list", "_keep_mask_list"])
-                  .map_elements(
-                      lambda s: (
-                          [],
-                          [],
-                      )
-                      if not s or s.get("_keep_mask_list") is None
-                      else (
-                          [v for v, m in zip((s.get("_prot_sites_list") or []), (s.get("_keep_mask_list") or [])) if m],
-                          [v for v, m in zip((s.get("_site_pos_list") or []), (s.get("_keep_mask_list") or [])) if m],
-                      ),
-                      return_dtype=pl.Struct(
-                          [
-                              pl.Field("_prot_sites_kept", pl.List(pl.Utf8)),
-                              pl.Field("_site_pos_kept", pl.List(pl.Int64)),
-                          ]
-                      ),
-                  )
-                  .alias("_kept_struct")
-            ).with_columns(
-                pl.col("_kept_struct").struct.field("_prot_sites_kept").alias("_prot_sites_kept"),
-                pl.col("_kept_struct").struct.field("_site_pos_kept").alias("_site_pos_kept"),
-            ).drop("_kept_struct", strict=False).filter(
-                pl.col("_prot_sites_kept").list.len() > 0
-            ).with_columns(
+            dfk = (
+                df.join(
+                    matched_sites,
+                    on="_ROW_ID",
+                    how="inner",
+                )
+                .with_columns(
                 pl.col("_prot_sites_kept").list.join(",").alias("_prot_sites_joined"),
                 pl.col("_site_pos_kept")
                   .list.eval(pl.element().cast(pl.Utf8))
                   .list.join(",")
                   .alias("_site_pos_joined"),
                 # scalar LOC_PROB for downstream: use the MAX across kept sites.
-                pl.col("_prob_list_aligned").list.max().alias("LOC_PROB"),
-            ).with_columns(
-                (pl.col("PEP_SEQUENCE") + pl.lit("|p") + pl.col("_site_pos_joined")).alias("PEPTIDE_INDEX"),
+                    pl.col("_site_prob_kept").list.min().alias("LOC_PROB"),
+                )
+                .with_columns(
+                (
+                    pl.col("PEP_SEQUENCE") + pl.lit("|p") + pl.col("_site_pos_joined")).alias("PEPTIDE_INDEX"),
                 (pl.col("UNIPROT") + pl.lit("|") + pl.col("_prot_sites_joined")).alias("INDEX"),
                 pl.col("UNIPROT").alias("PARENT_PROTEIN"),
                 pl.col("PEP_SEQUENCE").alias("PARENT_PEPTIDE_ID"),
                 pl.lit("PHOSPHO").alias("ASSAY"),
+                )
             )
 
             log_info(f"Unique phosphosites (retain policy): {dfk.select('INDEX').n_unique()}")
@@ -1084,66 +1100,19 @@ class DataHarmonizer:
                 raise ValueError("[PHOSPHO] Null INDEX produced — phospho indexing is broken.")
             return dfk.drop(
                 [
-                    "_ROW_ID",
-                    "_prot_sites_list",
-                    "_abs_pos_list",
-                    "_site_pos_list",
-                    "_keep_mask_list",
                     "_prot_sites_kept",
                     "_site_pos_kept",
+                    "_site_prob_kept",
                     "_prot_sites_joined",
                     "_site_pos_joined",
                 ],
                 strict=False,
             )
 
-        # EXPLODE policy (legacy): explode candidates into one row per site
-        df2 = (
-            df.with_columns(
-                pl.int_ranges(pl.lit(0), pl.col("_ptmpos_list").list.len()).alias("_idx")
-            )
-            .explode("_idx")
-            .with_columns(
-                pl.col("_ptmpos_list").list.get(pl.col("_idx")).alias("SITE_POS"),
-                pl.col("_prob_list_aligned").list.get(pl.col("_idx")).alias("LOC_PROB"),
-            )
-            .drop("_idx")
-        )
-
-        # Normalize probabilities (0–100 → 0–1) and drop explicit zeros
-        df2 = df2.with_columns(
-            pl.when((pl.col("LOC_PROB") > 1.0) & pl.col("LOC_PROB").is_not_null())
-              .then(pl.col("LOC_PROB") / 100.0)
-              .otherwise(pl.col("LOC_PROB"))
-              .alias("LOC_PROB")
-        ).filter(
+        # EXPLODE policy: one output row per declared site, already carrying
+        # its position-matched probability.
+        df2 = df_sites.filter(
             pl.col("LOC_PROB").is_null() | (pl.col("LOC_PROB") > 0.0)
-        )
-
-        # ------------------------------------------------------------------
-        # 3) Parse ProteinPTMLocations → phospho-only biological sites
-        # ------------------------------------------------------------------
-        df2 = df2.with_columns(
-            pl.col("PTM_PROTEINLOCATIONS")
-              .cast(pl.Utf8)
-              .str.extract_all(r"[STY]\d+")
-              .alias("_prot_sites")
-        ).explode("_prot_sites")
-
-        df2 = df2.with_columns(
-            pl.col("_prot_sites").str.slice(0, 1).alias("_AA"),
-            pl.col("_prot_sites").str.extract(r"(\d+)").cast(pl.Int64).alias("_ABS_POS"),
-        )
-
-        # ------------------------------------------------------------------
-        # 4) Map protein position → peptide-local position
-        # ------------------------------------------------------------------
-        df2 = df2.with_columns(
-            (
-                pl.col("_ABS_POS")
-                - pl.col("PEPTIDE_START").cast(pl.Int64, strict=False)
-                + 1
-            ).alias("SITE_POS")
         )
 
         # Keep only real phospho sites:
