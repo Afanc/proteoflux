@@ -8,7 +8,6 @@ each contrast.
 
 from __future__ import annotations
 
-import hashlib
 import re
 from pathlib import Path
 from typing import Any
@@ -22,23 +21,20 @@ from proteoflux.analysis.stats_ops import bh_qvalues
 from proteoflux.utils.utils import log_info, log_time, log_warning
 
 
-# Centralized here so a future database format needs changes in one place only.
-DB_KINASE_NAME = "KINASE"
-DB_KINASE_ACCESSION = "KIN_ACC_ID"
-DB_KINASE_GENE = "GENE"
-DB_KINASE_ORGANISM = "KIN_ORGANISM"
-DB_SUBSTRATE_ACCESSION = "SUB_ACC_ID"
-DB_SUBSTRATE_ORGANISM = "SUB_ORGANISM"
-DB_SUBSTRATE_SITE = "SUB_MOD_RSD"
-DB_SOURCE = "Source"
+# The config defines the input schema explicitly. Only one kinase identifier
+# plus substrate UniProt + site are mandatory; the remaining concepts are
+# optional metadata or filters.
+_DATABASE_COLUMN_KEYS = (
+    "kinase",
+    "kinase_uniprot",
+    "kinase_gene",
+    "kinase_organism",
+    "substrate_uniprot",
+    "substrate_organism",
+    "substrate_site",
+    "source",
+)
 
-_REQUIRED_DATABASE_COLUMNS = {
-    DB_KINASE_NAME,
-    DB_KINASE_ORGANISM,
-    DB_SUBSTRATE_ACCESSION,
-    DB_SUBSTRATE_ORGANISM,
-    DB_SUBSTRATE_SITE,
-}
 _SITE_RE = re.compile(r"^[STY]\d+$", flags=re.IGNORECASE)
 
 _RESULT_COLUMNS = [
@@ -83,16 +79,31 @@ def _first_nonempty(values: pd.Series) -> str:
 
 
 def _join_unique(values: pd.Series) -> str:
-    unique = sorted({str(value).strip() for value in values if str(value).strip()})
+    unique = sorted(
+        {
+            item.strip()
+            for value in values
+            for item in str(value).split(";")
+            if item.strip()
+        }
+    )
     return ";".join(unique)
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _resolve_database_column(
+    columns: list[str],
+    concept: str,
+    configured: Any,
+) -> str | None:
+    configured_name = "" if configured is None else str(configured).strip()
+    if not configured_name:
+        return None
+    if configured_name not in columns:
+        raise ValueError(
+            f"KSEA database_columns.{concept} refers to missing column "
+            f"{configured_name!r}. Available columns: {columns!r}."
+        )
+    return configured_name
 
 
 def _parse_config(config: dict) -> dict[str, Any] | None:
@@ -135,17 +146,34 @@ def _parse_config(config: dict) -> dict[str, Any] | None:
     if min_substrates < 1:
         raise ValueError("analysis.kinase_activity.min_substrates must be >= 1.")
 
+    database_columns = kinase_cfg.get("database_columns") or {}
+    if not isinstance(database_columns, dict):
+        raise ValueError(
+            "analysis.kinase_activity.database_columns must be a mapping."
+        )
+    unknown_columns = sorted(
+        set(database_columns).difference(_DATABASE_COLUMN_KEYS)
+    )
+    if unknown_columns:
+        raise ValueError(
+            "analysis.kinase_activity.database_columns contains unknown keys: "
+            f"{unknown_columns!r}. Supported keys: "
+            f"{list(_DATABASE_COLUMN_KEYS)!r}."
+        )
+
     return {
         "method": method,
         "organism": organism,
         "substrate_database": Path(str(database_value)).expanduser(),
         "min_substrates": min_substrates,
+        "database_columns": database_columns,
     }
 
 
 def _load_substrate_database(
     database_path: Path,
     organism: str,
+    configured_columns: dict[str, Any],
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     if not database_path.is_file():
         raise FileNotFoundError(
@@ -170,20 +198,45 @@ def _load_substrate_database(
             f"KSEA substrate database contains duplicate columns: {duplicated_columns!r}."
         )
 
-    missing_columns = sorted(_REQUIRED_DATABASE_COLUMNS.difference(database.columns))
-    if missing_columns:
+    columns = list(database.columns)
+    resolved = {
+        concept: _resolve_database_column(
+            columns,
+            concept,
+            configured_columns.get(concept),
+        )
+        for concept in _DATABASE_COLUMN_KEYS
+    }
+    kinase_identity_columns = [
+        resolved[concept]
+        for concept in ("kinase_uniprot", "kinase_gene", "kinase")
+        if resolved[concept] is not None
+    ]
+    missing_concepts = [
+        concept
+        for concept in ("substrate_uniprot", "substrate_site")
+        if resolved[concept] is None
+    ]
+    if not kinase_identity_columns:
+        missing_concepts.insert(0, "kinase identifier")
+    if missing_concepts:
         raise ValueError(
-            "KSEA substrate database is missing required columns: "
-            f"{missing_columns!r}. Available columns: {list(database.columns)!r}."
+            "KSEA substrate database could not resolve required concepts: "
+            f"{missing_concepts!r}. Available columns: {columns!r}. Set the "
+            "corresponding analysis.kinase_activity.database_columns mappings."
         )
 
     loaded_rows = int(len(database))
     organism_key = organism.casefold()
-    kinase_organism = _clean_text(database[DB_KINASE_ORGANISM]).str.casefold()
-    substrate_organism = _clean_text(database[DB_SUBSTRATE_ORGANISM]).str.casefold()
-    database = database.loc[
-        (kinase_organism == organism_key) & (substrate_organism == organism_key)
-    ].copy()
+    organism_mask = np.ones(len(database), dtype=bool)
+    for concept in ("kinase_organism", "substrate_organism"):
+        column = resolved[concept]
+        if column is not None:
+            organism_mask &= (
+                _clean_text(database[column]).str.casefold().to_numpy()
+                == organism_key
+            )
+    database = database.loc[organism_mask].copy()
     organism_rows = int(len(database))
 
     if database.empty:
@@ -192,24 +245,32 @@ def _load_substrate_database(
             f"organism {organism!r}."
         )
 
-    database["kinase"] = _clean_text(database[DB_KINASE_NAME])
-    database["kinase_uniprot"] = (
-        _clean_text(database[DB_KINASE_ACCESSION])
-        if DB_KINASE_ACCESSION in database.columns
-        else ""
-    )
-    database["kinase_gene"] = (
-        _clean_text(database[DB_KINASE_GENE])
-        if DB_KINASE_GENE in database.columns
-        else ""
-    )
-    database["substrate_accession"] = (
-        _clean_text(database[DB_SUBSTRATE_ACCESSION]).str.upper()
-    )
-    database["site"] = _clean_text(database[DB_SUBSTRATE_SITE]).str.upper()
-    database["database_source"] = (
-        _clean_text(database[DB_SOURCE]) if DB_SOURCE in database.columns else ""
-    )
+    def optional_text(concept: str) -> pd.Series:
+        column = resolved[concept]
+        if column is None:
+            return pd.Series("", index=database.index, dtype=object)
+        return _clean_text(database[column])
+
+    database["kinase"] = optional_text("kinase")
+    database["kinase_uniprot"] = optional_text("kinase_uniprot")
+    database["kinase_gene"] = optional_text("kinase_gene")
+    database["substrate_accession"] = optional_text(
+        "substrate_uniprot"
+    ).str.upper()
+    database["site"] = optional_text("substrate_site").str.upper()
+    database["database_source"] = optional_text("source")
+    database.loc[
+        database["database_source"].eq(""), "database_source"
+    ] = database_path.stem
+
+    missing_name = database["kinase"].eq("")
+    database.loc[missing_name, "kinase"] = database.loc[
+        missing_name, "kinase_gene"
+    ]
+    missing_name = database["kinase"].eq("")
+    database.loc[missing_name, "kinase"] = database.loc[
+        missing_name, "kinase_uniprot"
+    ]
 
     database["kinase_id"] = database["kinase_uniprot"]
     missing_id = database["kinase_id"].eq("")
@@ -217,17 +278,33 @@ def _load_substrate_database(
     missing_id = database["kinase_id"].eq("")
     database.loc[missing_id, "kinase_id"] = database.loc[missing_id, "kinase"]
 
+    valid_site = database["site"].str.fullmatch(_SITE_RE)
+    if not valid_site.any():
+        site_examples = (
+            database.loc[database["site"].ne(""), "site"]
+            .drop_duplicates()
+            .head(5)
+            .tolist()
+        )
+        raise ValueError(
+            f"KSEA column {resolved['substrate_site']!r}, resolved as "
+            f"substrate_site, contains no valid S/T/Y sites. Expected values "
+            f"such as 'S52'; observed examples: {site_examples!r}. Check "
+            "analysis.kinase_activity.database_columns.substrate_site."
+        )
+
     valid = (
         database["kinase_id"].ne("")
         & database["substrate_accession"].ne("")
-        & database["site"].str.fullmatch(_SITE_RE)
+        & valid_site
     )
     invalid_rows = int((~valid).sum())
     database = database.loc[valid].copy()
     if database.empty:
         raise ValueError(
             f"KSEA substrate database has no valid {organism!r} relationships after "
-            "requiring a kinase identifier, UniProt substrate accession, and S/T/Y site."
+            "requiring a kinase identifier, UniProt substrate accession, and "
+            "an S/T/Y site."
         )
 
     source_counts = database.loc[
@@ -251,14 +328,7 @@ def _load_substrate_database(
     duplicate_relationships = int(len(database) - len(relationships))
     metadata = {
         "filename": database_path.name,
-        "sha256": _sha256(database_path),
-        "loaded_rows": loaded_rows,
-        "organism_rows": organism_rows,
-        "invalid_rows_removed": invalid_rows,
-        "duplicate_relationships_removed": duplicate_relationships,
-        "unique_relationships": int(len(relationships)),
-        "source_names": source_counts.index.astype(str).tolist(),
-        "source_rows": source_counts.astype(int).tolist(),
+        "source": ";".join(source_counts.index.astype(str).tolist()),
     }
 
     log_info(
@@ -644,6 +714,7 @@ def run_ksea_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     relationships, database_metadata = _load_substrate_database(
         parsed_config["substrate_database"],
         parsed_config["organism"],
+        parsed_config["database_columns"],
     )
     feature_sites, invalid_features = _build_feature_site_table(adata)
     if feature_sites.empty:

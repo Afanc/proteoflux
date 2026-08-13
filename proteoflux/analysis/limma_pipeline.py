@@ -18,6 +18,7 @@ from proteoflux.analysis.clustering import (
     run_clustering,
     run_clustering_missingness,
     run_design_adjusted_pca,
+    run_kinase_activity_clustering,
 )
 from proteoflux.analysis.stats_ops import raw_stats_from_fit, bh_qvalues, two_sided_t_pvalue
 from proteoflux.analysis.missingness import compute_missingness
@@ -784,6 +785,18 @@ def clustering_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         max_features=max_features,
         layer="normalized",
     )
+
+    analysis_type = str(
+        (adata.uns.get("preprocessing", {}) or {}).get("analysis_type", "")
+    ).lower()
+    if analysis_type == "phospho":
+        sign_threshold = analysis_cfg.get("sign_threshold", 0.05)
+        if sign_threshold is None:
+            sign_threshold = 0.05
+        adata = run_kinase_activity_clustering(
+            adata,
+            sign_threshold=float(sign_threshold),
+        )
 
     analysis_meta = adata.uns.get("analysis", {})
     batch_cols = analysis_meta.get("batch_effect_columns", []) or []

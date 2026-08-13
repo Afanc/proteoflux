@@ -9,13 +9,16 @@ Provides:
 
 import warnings
 import numpy as np
+import pandas as pd
 import scipy.cluster.hierarchy as sch
+import scipy.spatial.distance as ssd
+from scipy.stats import rankdata
 from anndata import AnnData
 import scanpy as sc
 from sklearn.metrics import pairwise_distances
 from sklearn.manifold import MDS
 from typing import Optional, Dict, Any, Sequence
-from proteoflux.utils.utils import log_time
+from proteoflux.utils.utils import log_time, log_info
 from proteoflux.analysis.adata_schema import (
     UNS_NEIGHBORS,
     UNS_PCA,
@@ -84,6 +87,255 @@ def _colmean_impute(M: np.ndarray) -> np.ndarray:
     # if a column is all-NaN, nanmean gives NaN -> replace with 0 so linkage/PCA stay finite
     col_mean = np.where(np.isfinite(col_mean), col_mean, 0.0).astype(M.dtype, copy=False)
     return np.where(np.isnan(M), col_mean, M)
+
+def _kinase_tested_mask(values: pd.Series) -> np.ndarray:
+    """Normalize bool-like KSEA flags without treating the string 'False' as true."""
+    if pd.api.types.is_bool_dtype(values.dtype):
+        return values.fillna(False).to_numpy(dtype=bool)
+    return (
+        values.astype(str)
+        .str.strip()
+        .str.lower()
+        .isin({"true", "1", "yes"})
+        .to_numpy(dtype=bool)
+    )
+
+
+def _spearman_profile_distances(
+    matrix: np.ndarray,
+    *,
+    absolute: bool,
+) -> np.ndarray:
+    """Return condensed Spearman distances between matrix rows."""
+    matrix = np.asarray(matrix, dtype=float)
+    if matrix.ndim != 2:
+        raise ValueError("Spearman profile input must be a two-dimensional matrix.")
+
+    ranked = np.apply_along_axis(rankdata, 1, matrix)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        correlation = np.corrcoef(ranked)
+    correlation = np.asarray(correlation, dtype=float)
+    correlation = np.clip(correlation, -1.0, 1.0)
+    if absolute:
+        correlation = np.abs(correlation)
+
+    distance = 1.0 - correlation
+    distance[~np.isfinite(distance)] = 1.0
+    np.fill_diagonal(distance, 0.0)
+    return ssd.squareform(distance, checks=False)
+
+
+@log_time("Computing kinase activity clustering")
+def run_kinase_activity_clustering(
+    adata: AnnData,
+    *,
+    sign_threshold: float = 0.05,
+) -> AnnData:
+    """Cluster significant kinase KSEA profiles across contrasts.
+
+    Rows are kinases significant in at least one contrast and columns are
+    contrasts. Missing/untested activity scores remain missing; contrast
+    medians are used only to make the linkage input finite. Kinases use
+    ordinary Spearman distance; contrasts use sign-invariant Spearman distance
+    so inverse profiles can cluster together regardless of contrast direction.
+    """
+    payload = adata.uns.get("kinase_activity")
+    if not isinstance(payload, dict):
+        return adata
+
+    results = payload.get("results")
+    required = {
+        "contrast",
+        "kinase_id",
+        "activity_score",
+        "qvalue",
+        "tested",
+    }
+    if (
+        not isinstance(results, pd.DataFrame)
+        or not required.issubset(results.columns)
+    ):
+        return adata
+
+    threshold = float(sign_threshold)
+    if not 0.0 < threshold <= 1.0:
+        raise ValueError(
+            "Kinase clustering sign_threshold must be in (0, 1]."
+        )
+
+    work = results.copy()
+    work["kinase_id"] = work["kinase_id"].astype(str)
+    work["contrast"] = work["contrast"].astype(str)
+    work["activity_score"] = pd.to_numeric(
+        work["activity_score"], errors="coerce"
+    )
+    work["qvalue"] = pd.to_numeric(work["qvalue"], errors="coerce")
+    work["_tested"] = _kinase_tested_mask(work["tested"])
+
+    valid = (
+        work["_tested"].to_numpy(dtype=bool)
+        & np.isfinite(work["activity_score"].to_numpy(dtype=float))
+        & np.isfinite(work["qvalue"].to_numpy(dtype=float))
+    )
+    significant_ids = set(
+        work.loc[
+            valid & work["qvalue"].lt(threshold),
+            "kinase_id",
+        ]
+    )
+
+    configured_contrasts = [
+        str(value) for value in adata.uns.get("contrast_names", [])
+    ]
+    available_contrasts = list(dict.fromkeys(work["contrast"].tolist()))
+    contrast_names = [
+        contrast
+        for contrast in configured_contrasts
+        if contrast in available_contrasts
+    ]
+    contrast_names.extend(
+        contrast
+        for contrast in available_contrasts
+        if contrast not in contrast_names
+    )
+
+    ordered_kinase_ids = list(
+        dict.fromkeys(work["kinase_id"].tolist())
+    )
+    tested_activity_ids = set(
+        work.loc[
+            work["_tested"]
+            & np.isfinite(
+                work["activity_score"].to_numpy(dtype=float)
+            ),
+            "kinase_id",
+        ]
+    )
+
+    significant_kinase_ids = [
+        kinase_id
+        for kinase_id in ordered_kinase_ids
+        if kinase_id in significant_ids
+    ]
+    all_tested_kinase_ids = [
+        kinase_id
+        for kinase_id in ordered_kinase_ids
+        if kinase_id in tested_activity_ids
+    ]
+
+    def build_profile(kinase_ids: list[str]) -> dict:
+        profile = {
+            "kinase_ids": kinase_ids,
+            "contrast_names": contrast_names,
+            "kinase_order": kinase_ids,
+            "contrast_order": contrast_names,
+            "kinase_linkage": np.empty((0, 4), dtype=float),
+            "contrast_linkage": np.empty((0, 4), dtype=float),
+        }
+
+        if not kinase_ids or not contrast_names:
+            profile["skipped_reason"] = "no eligible kinase profiles"
+            return profile
+
+        matrix = (
+            work.loc[
+                work["_tested"]
+                & work["kinase_id"].isin(kinase_ids)
+            ]
+            .pivot(
+                index="kinase_id",
+                columns="contrast",
+                values="activity_score",
+            )
+            .reindex(
+                index=kinase_ids,
+                columns=contrast_names,
+            )
+            .to_numpy(dtype=float)
+        )
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="All-NaN slice encountered",
+                category=RuntimeWarning,
+            )
+            contrast_medians = np.nanmedian(matrix, axis=0)
+
+        contrast_medians = np.where(
+            np.isfinite(contrast_medians),
+            contrast_medians,
+            0.0,
+        )
+        linkage_matrix = np.where(
+            np.isfinite(matrix),
+            matrix,
+            contrast_medians[None, :],
+        )
+
+        if len(kinase_ids) >= 2 and len(contrast_names) >= 2:
+            kinase_distances = _spearman_profile_distances(
+                linkage_matrix,
+                absolute=False,
+            )
+            kinase_linkage = sch.linkage(
+                kinase_distances,
+                method="average",
+            )
+            profile["kinase_linkage"] = kinase_linkage
+            profile["kinase_order"] = [
+                kinase_ids[index]
+                for index in sch.leaves_list(kinase_linkage)
+            ]
+
+        if len(contrast_names) >= 2 and len(kinase_ids) >= 2:
+            contrast_distances = _spearman_profile_distances(
+                linkage_matrix.T,
+                absolute=True,
+            )
+            contrast_linkage = sch.linkage(
+                contrast_distances,
+                method="average",
+            )
+            profile["contrast_linkage"] = contrast_linkage
+            profile["contrast_order"] = [
+                contrast_names[index]
+                for index in sch.leaves_list(contrast_linkage)
+            ]
+
+        return profile
+
+    profiles = {
+        "significant": build_profile(significant_kinase_ids),
+        "all_tested": build_profile(all_tested_kinase_ids),
+    }
+
+    clustering = {
+        "value": "activity_score",
+        "filter": "qvalue below sign_threshold in at least one contrast",
+        "sign_threshold": threshold,
+        "hierarchical_method": "average",
+        "kinase_distance": "1 - Spearman correlation",
+        "contrast_distance": "1 - absolute Spearman correlation",
+        "linkage_missing_rule": (
+            "contrast median; zero if an entire contrast is missing"
+        ),
+        "profiles": profiles,
+    }
+
+    # Preserve the old top-level significant-profile contract.
+    clustering.update(profiles["significant"])
+
+    payload["clustering"] = clustering
+    log_info(
+        "Kinase activity clustering: "
+        f"significant_kinases={len(significant_kinase_ids)}, "
+        f"tested_kinases={len(all_tested_kinase_ids)}, "
+        f"contrasts={len(contrast_names)}, "
+        "value=activity_score."
+    )
+    return adata
+
 
 def _pick_feature_indices(adata: AnnData, layer: Optional[str], max_features: Optional[int],
                           strategy: str = "variance", random_seed: int = 0) -> np.ndarray:
