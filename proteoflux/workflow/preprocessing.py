@@ -1579,7 +1579,7 @@ class Preprocessor:
 
     def _pivot_main_block(self, df: pl.DataFrame) -> Dict[str, Optional[pl.DataFrame]]:
         """Mechanical extraction of the original per-block pivot logic."""
-        if self.analysis_type in {"peptidomics", "pelsa"}:
+        if self.analysis_type in {"peptidomics", "pelsa", "phospho"}:
             method = self.peptide_rollup_method
             log_info(
                 f"Peptide quantification using {method} "
