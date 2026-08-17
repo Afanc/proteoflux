@@ -65,6 +65,12 @@ _SUBSTRATE_COLUMNS = [
     "database_source",
 ]
 
+_CONDITION_KINASE_COLUMNS = [
+    "condition",
+    "kinase_id",
+    "n_substrates",
+]
+
 
 def _clean_text(series: pd.Series) -> pd.Series:
     return series.astype("string").fillna("").str.strip().astype(object)
@@ -670,6 +676,108 @@ def _compute_contrast(
     }
     return results, substrates, summary
 
+def _condition_kinase_data(
+    adata: ad.AnnData,
+    assignments: pd.DataFrame,
+    valid_feature_mask: np.ndarray,
+    min_substrates: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    summary_columns = [
+        "condition",
+        "observed_phosphosites",
+        "database_matched_sites",
+        "matched_kinases",
+        "eligible_kinases",
+    ]
+
+    if "raw" not in adata.layers:
+        log_warning(
+            "KSEA condition-level kinase counts are unavailable because "
+            "adata.layers['raw'] is missing."
+        )
+        return (
+            pd.DataFrame(columns=summary_columns),
+            pd.DataFrame(columns=_CONDITION_KINASE_COLUMNS),
+        )
+
+    raw_layer = adata.layers["raw"]
+    raw = raw_layer.toarray() if hasattr(raw_layer, "toarray") else np.asarray(raw_layer)
+    if raw.shape != (adata.n_obs, adata.n_vars):
+        raise ValueError(
+            "adata.layers['raw'] must have shape "
+            f"{(adata.n_obs, adata.n_vars)}, got {raw.shape}."
+        )
+
+    condition_values = adata.obs["CONDITION"].astype(str).to_numpy()
+    conditions = list(dict.fromkeys(condition_values.tolist()))
+    assignment_indices = assignments["feature_index"].to_numpy(dtype=int)
+
+    summary_rows: list[dict[str, object]] = []
+    kinase_rows: list[dict[str, object]] = []
+    for condition in conditions:
+        sample_mask = condition_values == condition
+        observed = (
+            valid_feature_mask
+            & np.any(np.isfinite(raw[sample_mask, :]), axis=0)
+        )
+
+        matched = assignments.loc[observed[assignment_indices]]
+        if matched.empty:
+            substrate_counts = pd.Series(dtype=int)
+        else:
+            substrate_counts = matched.groupby("kinase_id")[
+                "feature_index"
+            ].nunique()
+
+        eligible_counts = substrate_counts.loc[
+            substrate_counts.ge(min_substrates)
+        ]
+        summary_rows.append(
+            {
+                "condition": condition,
+                "observed_phosphosites": int(observed.sum()),
+                "database_matched_sites": int(
+                    matched["feature_index"].nunique()
+                ),
+                "matched_kinases": int(substrate_counts.size),
+                "eligible_kinases": int(eligible_counts.size),
+            }
+        )
+        kinase_rows.extend(
+            {
+                "condition": condition,
+                "kinase_id": str(kinase_id),
+                "n_substrates": int(n_substrates),
+            }
+            for kinase_id, n_substrates in eligible_counts.items()
+        )
+
+    summary = pd.DataFrame(summary_rows, columns=summary_columns)
+    summary.index = pd.Index(
+        summary["condition"].astype(str),
+        name="condition_id",
+    )
+
+    condition_kinases = pd.DataFrame(
+        kinase_rows,
+        columns=_CONDITION_KINASE_COLUMNS,
+    )
+    if condition_kinases.empty:
+        condition_kinases.index = pd.Index(
+            [], dtype=str, name="condition_kinase_id"
+        )
+    else:
+        membership_ids = (
+            condition_kinases["condition"].astype(str)
+            + "|"
+            + condition_kinases["kinase_id"].astype(str)
+        )
+        condition_kinases.index = pd.Index(
+            membership_ids,
+            name="condition_kinase_id",
+        )
+    return summary, condition_kinases
+
 
 def _set_string_index(frame: pd.DataFrame, values: pd.Series, name: str) -> pd.DataFrame:
     frame = frame.copy()
@@ -735,6 +843,13 @@ def run_ksea_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         f"features={adata.n_vars}, valid_site_ids={len(unique_feature_sites)}, "
         f"invalid_site_ids_removed={invalid_features}, "
         f"database_matched_sites={assignments['feature_index'].nunique() if not assignments.empty else 0}."
+    )
+
+    condition_summary_df, condition_kinases_df = _condition_kinase_data(
+        adata=adata,
+        assignments=assignments,
+        valid_feature_mask=valid_feature_mask,
+        min_substrates=parsed_config["min_substrates"],
     )
 
     fully_imputed = _fully_imputed_mask(adata, contrast_names)
@@ -828,6 +943,8 @@ def run_ksea_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         "pvalue_rule": "two-sided standard-normal z-test",
         "fdr_scope": "BH within each contrast across tested kinases",
         "database": database_metadata,
+        "condition_summary": condition_summary_df,
+        "condition_kinases": condition_kinases_df,
         "contrast_summary": summary_df,
         "results": results_df,
         "substrates": substrates_df,

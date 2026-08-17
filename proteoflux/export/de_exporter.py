@@ -6,6 +6,7 @@ tables. Behavior, column names, and sheet names are kept identical to the existi
 implementation—only readability and documentation are improved.
 """
 import h5py
+import anndata as ad
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -674,5 +675,5 @@ class DEExporter:
             sub = flt.get(key)
             _strip_values(sub)
 
-        self.adata.write(h5ad_path, compression="gzip")
-
+        with ad.settings.override(allow_write_nullable_strings=True):
+            self.adata.write(h5ad_path, compression="gzip")
