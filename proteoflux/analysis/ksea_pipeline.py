@@ -23,14 +23,12 @@ from proteoflux.utils.utils import log_info, log_time, log_warning
 
 # The config defines the input schema explicitly. Only one kinase identifier
 # plus substrate UniProt + site are mandatory; the remaining concepts are
-# optional metadata or filters.
+# optional metadata.
 _DATABASE_COLUMN_KEYS = (
     "kinase",
     "kinase_uniprot",
     "kinase_gene",
-    "kinase_organism",
     "substrate_uniprot",
-    "substrate_organism",
     "substrate_site",
     "source",
 )
@@ -127,15 +125,30 @@ def _parse_config(config: dict) -> dict[str, Any] | None:
             f"received {method!r}."
         )
 
-    organism = str(kinase_cfg.get("organism") or "").strip()
-    if not organism:
-        raise ValueError("analysis.kinase_activity.organism must not be null or empty.")
-
     database_value = kinase_cfg.get("substrate_database")
-    if database_value is None or str(database_value).strip() == "":
+    if isinstance(database_value, (str, Path)):
+        database_values = [database_value]
+    elif isinstance(database_value, list):
+        database_values = database_value
+    else:
         raise ValueError(
-            "analysis.kinase_activity.substrate_database must point to a local "
-            "kinase-substrate TSV file."
+            "analysis.kinase_activity.substrate_database must be a local path "
+            "or a non-empty list of local paths."
+        )
+
+    database_paths: list[Path] = []
+    for index, value in enumerate(database_values):
+        if not isinstance(value, (str, Path)) or not str(value).strip():
+            raise ValueError(
+                "analysis.kinase_activity.substrate_database contains an "
+                f"invalid path at index {index}: {value!r}."
+            )
+        database_paths.append(Path(str(value)).expanduser())
+
+    if not database_paths:
+        raise ValueError(
+            "analysis.kinase_activity.substrate_database must contain at "
+            "least one local kinase-substrate database path."
         )
 
     min_substrates = kinase_cfg.get("min_substrates", 5)
@@ -169,8 +182,7 @@ def _parse_config(config: dict) -> dict[str, Any] | None:
 
     return {
         "method": method,
-        "organism": organism,
-        "substrate_database": Path(str(database_value)).expanduser(),
+        "substrate_databases": database_paths,
         "min_substrates": min_substrates,
         "database_columns": database_columns,
     }
@@ -178,7 +190,6 @@ def _parse_config(config: dict) -> dict[str, Any] | None:
 
 def _load_substrate_database(
     database_path: Path,
-    organism: str,
     configured_columns: dict[str, Any],
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     if not database_path.is_file():
@@ -232,23 +243,9 @@ def _load_substrate_database(
             "corresponding analysis.kinase_activity.database_columns mappings."
         )
 
-    loaded_rows = int(len(database))
-    organism_key = organism.casefold()
-    organism_mask = np.ones(len(database), dtype=bool)
-    for concept in ("kinase_organism", "substrate_organism"):
-        column = resolved[concept]
-        if column is not None:
-            organism_mask &= (
-                _clean_text(database[column]).str.casefold().to_numpy()
-                == organism_key
-            )
-    database = database.loc[organism_mask].copy()
-    organism_rows = int(len(database))
-
     if database.empty:
         raise ValueError(
-            f"KSEA substrate database contains no kinase-substrate rows for "
-            f"organism {organism!r}."
+            f"KSEA substrate database contains no rows: {database_path}"
         )
 
     def optional_text(concept: str) -> pd.Series:
@@ -308,9 +305,9 @@ def _load_substrate_database(
     database = database.loc[valid].copy()
     if database.empty:
         raise ValueError(
-            f"KSEA substrate database has no valid {organism!r} relationships after "
-            "requiring a kinase identifier, UniProt substrate accession, and "
-            "an S/T/Y site."
+            "KSEA substrate database has no valid relationships after "
+            "requiring a kinase identifier, UniProt substrate accession, "
+            f"and an S/T/Y site: {database_path}"
         )
 
     source_counts = database.loc[
@@ -331,21 +328,76 @@ def _load_substrate_database(
         )
     )
 
-    duplicate_relationships = int(len(database) - len(relationships))
     metadata = {
         "filename": database_path.name,
         "source": ";".join(source_counts.index.astype(str).tolist()),
     }
 
-    log_info(
-        "KSEA substrate database loaded: "
-        f"file={database_path.name!r}, rows={loaded_rows}, organism={organism!r}, "
-        f"organism_rows={organism_rows}, invalid_removed={invalid_rows}, "
-        f"duplicate_relationships_removed={duplicate_relationships}, "
-        f"unique_relationships={len(relationships)}."
-    )
     return relationships, metadata
 
+def _load_substrate_databases(
+    database_paths: list[Path],
+    configured_columns: dict[str, Any],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    loaded = [
+        _load_substrate_database(path, configured_columns)
+        for path in database_paths
+    ]
+
+    if len(loaded) == 1:
+        return loaded[0]
+
+    relationships = pd.concat(
+        [frame for frame, _metadata in loaded],
+        ignore_index=True,
+    )
+
+    relationships = (
+        relationships.groupby(
+            ["kinase_id", "substrate_accession", "site"],
+            as_index=False,
+            sort=False,
+        )
+        .agg(
+            kinase=("kinase", _first_nonempty),
+            kinase_gene=("kinase_gene", _first_nonempty),
+            kinase_uniprot=("kinase_uniprot", _first_nonempty),
+            database_source=("database_source", _join_unique),
+        )
+    )
+
+    metadata_rows = [metadata for _frame, metadata in loaded]
+    metadata = {
+        "filename": ", ".join(
+            str(item["filename"]) for item in metadata_rows
+        ),
+        "source": _join_unique(
+            pd.Series(
+                [item.get("source", "") for item in metadata_rows],
+                dtype=object,
+            )
+        ),
+    }
+
+    return relationships, metadata
+
+
+def validate_ksea_database(config: dict) -> None:
+    """Validate the configured KSEA database without running KSEA."""
+    parsed_config = _parse_config(config)
+    if parsed_config is None:
+        return
+
+    relationships, metadata = _load_substrate_databases(
+        parsed_config["substrate_databases"],
+        parsed_config["database_columns"],
+    )
+
+    log_info(
+        "KSEA database validation passed: "
+        f"file={metadata['filename']!r}, "
+        f"relationships={len(relationships)}."
+    )
 
 def _scalar_text(value: Any) -> str:
     if value is None:
@@ -813,18 +865,12 @@ def run_ksea_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
             f"KSEA expected {log2fc_key!r} shape {expected_shape}, received "
             f"{log2fc.shape}."
         )
-    log_info(
-        "KSEA fold-change input: "
-        f"varm={log2fc_key!r}, source={log2fc_source}, "
-        f"features={adata.n_vars}, contrasts={len(contrast_names)}."
-    )
 
-    relationships, database_metadata = _load_substrate_database(
-        parsed_config["substrate_database"],
-        parsed_config["organism"],
+    relationships, database_metadata = _load_substrate_databases(
+        parsed_config["substrate_databases"],
         parsed_config["database_columns"],
     )
-    feature_sites, invalid_features = _build_feature_site_table(adata)
+    feature_sites, _ = _build_feature_site_table(adata)
     if feature_sites.empty:
         raise ValueError(
             "KSEA could not parse any phosphosite identifiers. Expected feature IDs "
@@ -837,13 +883,6 @@ def run_ksea_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         unique_feature_sites["feature_index"].to_numpy(dtype=int)
     ] = True
     assignments = _match_substrates(feature_sites, relationships)
-
-    log_info(
-        "KSEA phosphosite matching: "
-        f"features={adata.n_vars}, valid_site_ids={len(unique_feature_sites)}, "
-        f"invalid_site_ids_removed={invalid_features}, "
-        f"database_matched_sites={assignments['feature_index'].nunique() if not assignments.empty else 0}."
-    )
 
     condition_summary_df, condition_kinases_df = _condition_kinase_data(
         adata=adata,
@@ -870,20 +909,6 @@ def run_ksea_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         substrate_frames.append(substrates)
         summaries.append(summary)
 
-        log_info(
-            f"KSEA contrast {contrast!r}: "
-            f"valid_sites={summary['valid_phosphosites']}, "
-            f"nonfinite_removed={summary['nonfinite_removed']}, "
-            f"fully_imputed_removed={summary['fully_imputed_removed']}, "
-            f"background={summary['background_sites']}, "
-            f"database_matched={summary['database_matched_sites']}, "
-            f"database_unmatched={summary['database_unmatched_sites']}, "
-            f"kinases={summary['matched_kinases']}, "
-            f"tested={summary['tested_kinases']}, "
-            f"below_minimum={summary['below_minimum_kinases']}, "
-            f"not_tested={summary['untested_kinases']}."
-        )
-
     results_df = (
         pd.concat(result_frames, ignore_index=True)
         if result_frames
@@ -895,6 +920,37 @@ def run_ksea_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         else _empty_substrates()
     )
     summary_df = pd.DataFrame(summaries)
+
+    matched_phosphosites = (
+        int(assignments["feature_index"].nunique())
+        if not assignments.empty
+        else 0
+    )
+    unmatched_phosphosites = int(adata.n_vars - matched_phosphosites)
+
+    matched_kinases = (
+        int(results_df["kinase_id"].nunique())
+        if not results_df.empty
+        else 0
+    )
+    tested_kinases = (
+        int(
+            results_df.loc[
+                results_df["tested"].eq(True),
+                "kinase_id",
+            ].nunique()
+        )
+        if not results_df.empty
+        else 0
+    )
+
+    log_info(
+        "KSEA summary: "
+        f"phosphosites matched={matched_phosphosites:,}/{adata.n_vars:,}, "
+        f"unmatched={unmatched_phosphosites:,}; "
+        f"kinases tested in >=1 contrast="
+        f"{tested_kinases:,}/{matched_kinases:,}; "
+    )
 
     if not results_df.empty:
         result_ids = (
@@ -932,7 +988,6 @@ def run_ksea_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     output.uns["kinase_activity"] = {
         "schema_version": 1,
         "method": "ksea",
-        "organism": parsed_config["organism"],
         "min_substrates": parsed_config["min_substrates"],
         "log2fc_varm_key": log2fc_key,
         "log2fc_source": log2fc_source,
