@@ -10,6 +10,22 @@ from proteoflux.utils.sequence_ops import (
 )
 
 
+_RUN_EXTENSIONS = (".raw", ".d", ".mzML", ".mzXML", ".wiff")
+
+
+def _normalize_run_name(value: object | None) -> str | None:
+    """Normalize run identifiers for joins, validation, and exclusions."""
+    if value is None:
+        return None
+
+    name = str(value).strip()
+    name_lower = name.lower()
+    for extension in _RUN_EXTENSIONS:
+        if name_lower.endswith(extension.lower()):
+            return name[: -len(extension)]
+    return name
+
+
 class DataHarmonizer:
     """Harmonizes input data by renaming columns to a common format."""
 
@@ -58,12 +74,16 @@ class DataHarmonizer:
         self.phospho_multisite_policy = (column_config.get("phospho_multisite_collapse_policy", "explode") or "explode").strip().lower()
 
         raw_excl = column_config.get("exclude_runs")
-        self.exclude_runs = set()
-        if raw_excl:
-            if isinstance(raw_excl, str):
-                self.exclude_runs = {raw_excl.strip()} if raw_excl.strip() else set()
-            else:
-                self.exclude_runs = {str(x).strip() for x in raw_excl if str(x).strip()}
+        exclude_values = (
+            [raw_excl]
+            if isinstance(raw_excl, str)
+            else (raw_excl or [])
+        )
+        self.exclude_runs = {
+            normalized
+            for value in exclude_values
+            if (normalized := _normalize_run_name(value))
+        }
 
         # normalize policy aliases
         if self.phospho_multisite_policy in {"explode", "duplicate"}:
@@ -127,22 +147,11 @@ class DataHarmonizer:
             # Rename only the chosen column to avoid creating duplicates
             ann = ann.rename({join_col: "FILENAME"})
 
-        # Be tolerant about whitespace on the join key
-        ann = ann.with_columns(pl.col("FILENAME").cast(pl.Utf8).str.strip_chars())
-
-        # Strip common MS file extensions to make join robust
-        def _strip_ext(s: str | None) -> str | None:
-            if s is None:
-                return None
-            s = s.strip()
-            # remove common vendor suffixes
-            for ext in (".raw", ".d", ".mzML", ".mzXML", ".wiff"):
-                if s.lower().endswith(ext.lower()):
-                    return s[: -len(ext)]
-            return s
-
+        # Use the same normalization as data filenames and configured exclusions.
         ann = ann.with_columns(
-            pl.col("FILENAME").map_elements(_strip_ext, return_dtype=pl.Utf8).alias("FILENAME")
+            pl.col("FILENAME")
+            .map_elements(_normalize_run_name, return_dtype=pl.Utf8)
+            .alias("FILENAME")
         )
 
         # Condition always required
@@ -232,7 +241,9 @@ class DataHarmonizer:
         for col in df.columns:
             m = pattern.match(col)
             if m:
-                df_files.add(m.group(1).strip())
+                label = _normalize_run_name(m.group(1))
+                if label:
+                    df_files.add(label)
 
         if not df_files:
             raise ValueError(
@@ -335,6 +346,14 @@ class DataHarmonizer:
         """Common path: rename → strict filename check → annotation join → coalesce condition/replicate."""
         df = self._rename_columns_safely(df)
 
+        # Normalize once, before either exclusions or annotation validation.
+        if "FILENAME" in df.columns:
+            df = df.with_columns(
+                pl.col("FILENAME")
+                .map_elements(_normalize_run_name, return_dtype=pl.Utf8)
+                .alias("FILENAME")
+            )
+
         have_cond = "CONDITION" in df.columns
         have_rep = "REPLICATE" in df.columns
 
@@ -371,23 +390,6 @@ class DataHarmonizer:
         # Require FILENAME for long join; for wide we will already have created it via melt.
         if "FILENAME" not in df.columns:
             raise ValueError("Cannot inject annotation: 'FILENAME' column not found in data.")
-
-        # Be tolerant about whitespace on the join key
-        df = df.with_columns(pl.col("FILENAME").cast(pl.Utf8).str.strip_chars())
-
-        # Strip common MS file extensions to make join robust (mirror annotation logic)
-        def _strip_ext(s: str | None) -> str | None:
-            if s is None:
-                return None
-            s = s.strip()
-            for ext in (".raw", ".d", ".mzML", ".mzXML", ".wiff"):
-                if s.lower().endswith(ext.lower()):
-                    return s[: -len(ext)]
-            return s
-
-        df = df.with_columns(
-            pl.col("FILENAME").map_elements(_strip_ext, return_dtype=pl.Utf8).alias("FILENAME")
-        )
 
         # Exclude runs before strict annotation parity + join.
         # This makes it legal for the annotation to omit excluded runs, while remaining strict for kept runs.

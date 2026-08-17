@@ -978,43 +978,57 @@ class Preprocessor:
         )
 
         if using_covariate:
-            main = mapping_tmp.filter(pl.col("IS_COVARIATE") == False)
-            cov = mapping_tmp.filter(pl.col("IS_COVARIATE") == True)
-            if main.height and cov.height:
-                rep_main = (
-                    main.group_by("CONDITION")
-                    .agg(pl.len().alias("N"))
-                    .sort("CONDITION")
-                )
-                rep_cov = (
-                    cov.group_by("CONDITION")
-                    .agg(pl.len().alias("N"))
-                    .sort("CONDITION")
-                )
-                cmp = rep_main.join(
-                    rep_cov, on="CONDITION", how="outer", suffix="_FT"
-                )
-                # Strict parity checks:
-                # 1) CONDITION levels must match between main and covariate.
-                # 2) Replicate counts per CONDITION must match.
-                # NOTE: comparisons against NULL yield NULL in Polars and would silently bypass filters;
-                # therefore we validate NULL explicitly before comparing.
-                missing_main = cmp.filter(pl.col("N").is_null()).select(pl.col("CONDITION_FT").alias("CONDITION"))
-                missing_cov = cmp.filter(pl.col("N_FT").is_null()).select("CONDITION")
-                if missing_main.height or missing_cov.height:
-                    raise ValueError(
-                        "Main/covariate CONDITION levels do not match. "
-                        f"Only-in-covariate={missing_main.get_column('CONDITION').to_list()} "
-                        f"Only-in-main={missing_cov.get_column('CONDITION').to_list()}. "
-                        "Ensure covariate uses the same CONDITION labels as the main dataset."
-                    )
+            is_covariate = pl.col("IS_COVARIATE").fill_null(False)
+            main = mapping_tmp.filter(~is_covariate)
+            cov = mapping_tmp.filter(is_covariate)
 
-                bad = cmp.filter(pl.col("N") != pl.col("N_FT"))
-                if bad.height:
-                    raise ValueError(
-                        "Covariate has different replicate counts per CONDITION than the main dataset. "
-                        f"Mismatch table:\n{bad}"
-                    )
+            if main.height == 0 or cov.height == 0:
+                raise ValueError(
+                    "Covariate alignment requires both main and covariate runs after filtering."
+                )
+
+            def _duplicate_alignment_keys(block: pl.DataFrame) -> list[str]:
+                return (
+                    block.group_by("ALIGN_KEY")
+                    .agg(pl.len().alias("N"))
+                    .filter(pl.col("N") > 1)
+                    .sort("ALIGN_KEY")
+                    .get_column("ALIGN_KEY")
+                    .to_list()
+                )
+
+            duplicate_main = _duplicate_alignment_keys(main)
+            duplicate_cov = _duplicate_alignment_keys(cov)
+            if duplicate_main or duplicate_cov:
+                raise ValueError(
+                    "Covariate alignment requires exactly one run for each "
+                    "(CONDITION, REPLICATE) pair. "
+                    f"Duplicate main pairs={duplicate_main}; "
+                    f"duplicate covariate pairs={duplicate_cov}."
+                )
+
+            main_keys = main.select("ALIGN_KEY")
+            cov_keys = cov.select("ALIGN_KEY")
+            only_main = (
+                main_keys.join(cov_keys, on="ALIGN_KEY", how="anti")
+                .sort("ALIGN_KEY")
+                .get_column("ALIGN_KEY")
+                .to_list()
+            )
+            only_cov = (
+                cov_keys.join(main_keys, on="ALIGN_KEY", how="anti")
+                .sort("ALIGN_KEY")
+                .get_column("ALIGN_KEY")
+                .to_list()
+            )
+            if only_main or only_cov:
+                raise ValueError(
+                    "Main/covariate replicate pairs do not match. "
+                    f"Only-in-main={only_main}; "
+                    f"only-in-covariate={only_cov}. "
+                    "Each retained main run needs the covariate run with the same "
+                    "CONDITION and REPLICATE."
+                )
 
         self.intermediate_results.add_df("condition_pivot", mapping_tmp)
 
@@ -1437,6 +1451,42 @@ class Preprocessor:
                     f"Covariate Quantification using {self.covariate_protein_rollup_method}"
                 )
 
+                condition_pivot = ir.dfs.get("condition_pivot")
+                if condition_pivot is None:
+                    raise RuntimeError(
+                        "Covariate alignment requires the condition/sample map."
+                    )
+
+                is_covariate = pl.col("IS_COVARIATE").fill_null(False)
+                main_pairs = condition_pivot.filter(~is_covariate).select(
+                    pl.col("Sample").alias("MAIN_SAMPLE"),
+                    "ALIGN_KEY",
+                )
+                cov_pairs = condition_pivot.filter(is_covariate).select(
+                    pl.col("Sample").alias("COVARIATE_SAMPLE"),
+                    "ALIGN_KEY",
+                )
+                sample_pairs = cov_pairs.join(
+                    main_pairs,
+                    on="ALIGN_KEY",
+                    how="inner",
+                )
+                covariate_to_main = dict(
+                    sample_pairs.select(
+                        ["COVARIATE_SAMPLE", "MAIN_SAMPLE"]
+                    ).iter_rows()
+                )
+                main_sample_order = [
+                    column
+                    for column in filtered_intensity.columns
+                    if column != "INDEX"
+                ]
+                if set(covariate_to_main.values()) != set(main_sample_order):
+                    raise RuntimeError(
+                        "Validated covariate sample pairs do not match the main "
+                        "intensity matrix columns."
+                    )
+
                 cov_int_by_key = self._pivot_cov_by_key(df_cov, cov_key_map, key_col, "SIGNAL", self.covariate_protein_rollup_method)
                 cov_qv_by_key = self._pivot_cov_by_key(df_cov, cov_key_map, key_col, "QVALUE", "mean") if "QVALUE" in df_cov.columns else None
                 cov_pep_by_key = self._pivot_cov_by_key(df_cov, cov_key_map, key_col, "PEP", "mean") if "PEP" in df_cov.columns else None
@@ -1465,15 +1515,41 @@ class Preprocessor:
                 ) -> Optional[pl.DataFrame]:
                     if by_key is None:
                         return None
-                    out = main_with_key.join(by_key, on=key_col, how="left")
-                    return out.select(
-                        ["INDEX"]
-                        + [
-                            c
-                            for c in out.columns
-                            if c not in ("INDEX", key_col)
-                        ]
+
+                    covariate_columns = [
+                        column
+                        for column in by_key.columns
+                        if column != key_col
+                    ]
+                    unexpected = sorted(
+                        set(covariate_columns) - set(covariate_to_main)
                     )
+                    if unexpected:
+                        raise ValueError(
+                            "Covariate pivot contains samples without a validated "
+                            f"main-sample pair: {unexpected}."
+                        )
+
+                    aligned = by_key.rename(
+                        {
+                            column: covariate_to_main[column]
+                            for column in covariate_columns
+                        }
+                    )
+                    missing = [
+                        sample
+                        for sample in main_sample_order
+                        if sample not in aligned.columns
+                    ]
+                    if missing:
+                        raise ValueError(
+                            "Covariate pivot is missing paired samples required by "
+                            f"the main matrix: {missing}."
+                        )
+
+                    aligned = aligned.select([key_col] + main_sample_order)
+                    out = main_with_key.join(aligned, on=key_col, how="left")
+                    return out.select(["INDEX"] + main_sample_order)
 
                 cov_int = _broadcast(cov_int_by_key)
                 cov_qv = _broadcast(cov_qv_by_key)

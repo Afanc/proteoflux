@@ -77,6 +77,17 @@ analysis:
   separate_contrasts: False
   batch_effect_columns: null
   clustering_max: 8000
+  kinase_activity:
+    method: ksea
+    min_substrates: 5
+    substrate_database: null
+    database_columns:
+      kinase: null
+      kinase_uniprot: null
+      kinase_gene: null
+      substrate_uniprot: null
+      substrate_site: null
+      source: null
 
 exports:
   path_h5ad: "proteoflux_results.h5ad"

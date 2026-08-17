@@ -149,8 +149,11 @@ class Dataset:
             eff_cfg["analysis_type"] = normalize_analysis_type(idx_type)
 
             eff_cfg["annotation_file"] = inject_cfg.get("annotation_file", None)
-            eff_cfg["is_covariate_run"] = bool((inject_cfg or {}).get("is_covariate", False))
 
+            # Main and injected files usually use different filenames.
+            # Do not inherit dataset.exclude_runs into injected datasets.
+            eff_cfg["exclude_runs"] = inject_cfg.get("exclude_runs") or []
+            eff_cfg["is_covariate_run"] = bool((inject_cfg or {}).get("is_covariate", False))
 
             # This is the ONLY supported way to map different raw columns for injected runs
             # while keeping the preprocessing code operating on canonical QVALUE/PEP/PRECURSORS_EXP.
