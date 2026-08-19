@@ -8,32 +8,46 @@ each contrast.
 
 from __future__ import annotations
 
+import copy
+import csv
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import anndata as ad
 import numpy as np
 import pandas as pd
-from scipy.stats import norm
-
+import polars as pl
 from proteoflux.analysis.stats_ops import bh_qvalues
 from proteoflux.utils.utils import log_info, log_time, log_warning
+from scipy.stats import norm
 
-
-# The config defines the input schema explicitly. Only one kinase identifier
-# plus substrate UniProt + site are mandatory; the remaining concepts are
-# optional metadata.
+# The config defines the input schema explicitly. One kinase identifier plus
+# substrate site and at least one substrate identifier (UniProt or gene) are
+# mandatory; the remaining concepts are optional metadata.
 _DATABASE_COLUMN_KEYS = (
     "kinase",
     "kinase_uniprot",
     "kinase_gene",
     "substrate_uniprot",
+    "substrate_gene",
     "substrate_site",
     "source",
 )
 
 _SITE_RE = re.compile(r"^[STY]\d+$", flags=re.IGNORECASE)
+
+_MISSING_IDENTIFIER_TOKENS = {
+    "",
+    "?",
+    "NA",
+    "N/A",
+    "NAN",
+    "NONE",
+    "NULL",
+    "-",
+}
 
 _RESULT_COLUMNS = [
     "contrast",
@@ -70,28 +84,68 @@ _CONDITION_KINASE_COLUMNS = [
 ]
 
 
-def _clean_text(series: pd.Series) -> pd.Series:
-    return series.astype("string").fillna("").str.strip().astype(object)
-
-
-def _first_nonempty(values: pd.Series) -> str:
-    for value in values:
-        text = str(value).strip()
-        if text:
-            return text
-    return ""
-
-
-def _join_unique(values: pd.Series) -> str:
-    unique = sorted(
-        {
-            item.strip()
-            for value in values
-            for item in str(value).split(";")
-            if item.strip()
-        }
+def _pl_clean_text(column: str) -> pl.Expr:
+    return (
+        pl.col(column)
+        .cast(pl.String, strict=False)
+        .fill_null("")
+        .str.strip_chars()
     )
-    return ";".join(unique)
+
+
+def _pl_clean_identifier(column: str) -> pl.Expr:
+    """Normalize identifiers and convert common missing-value tokens to empty."""
+    cleaned = _pl_clean_text(column).str.to_uppercase()
+    return (
+        pl.when(cleaned.is_in(sorted(_MISSING_IDENTIFIER_TOKENS)))
+        .then(pl.lit(""))
+        .otherwise(cleaned)
+    )
+
+
+def _pl_first_nonempty(column: str) -> pl.Expr:
+    return (
+        pl.col(column)
+        .filter(pl.col(column).ne(""))
+        .first()
+        .fill_null("")
+        .alias(column)
+    )
+
+
+def _pl_join_unique_list(column: str) -> pl.Expr:
+    """Collect sorted unique semicolon-delimited values as a string list."""
+    return (
+        pl.col(column)
+        .str.split(";")
+        .flatten()
+        .unique()
+        .sort()
+        .alias(column)
+    )
+
+
+def _pl_join_unique_lists(frame: pl.DataFrame, columns: list[str]) -> pl.DataFrame:
+    return frame.with_columns([
+        pl.col(column)
+        .list.filter(pl.element().ne(""))
+        .list.join(";")
+        .alias(column)
+        for column in columns
+    ])
+
+
+def _join_semicolon_values(values: list[str]) -> str:
+    return ";".join(
+        sorted(
+            {
+                item.strip()
+                for value in values
+                for item in str(value).split(";")
+                if item.strip()
+            }
+        )
+    )
 
 
 def _resolve_database_column(
@@ -150,6 +204,15 @@ def _parse_config(config: dict) -> dict[str, Any] | None:
             "analysis.kinase_activity.substrate_database must contain at "
             "least one local kinase-substrate database path."
         )
+    normalized_paths = [str(path.resolve(strict=False)) for path in database_paths]
+    duplicate_paths = sorted(
+        {path for path in normalized_paths if normalized_paths.count(path) > 1}
+    )
+    if duplicate_paths:
+        raise ValueError(
+            "analysis.kinase_activity.substrate_database contains duplicate "
+            f"paths: {duplicate_paths!r}."
+        )
 
     min_substrates = kinase_cfg.get("min_substrates", 5)
     if isinstance(min_substrates, bool):
@@ -191,31 +254,29 @@ def _parse_config(config: dict) -> dict[str, Any] | None:
 def _load_substrate_database(
     database_path: Path,
     configured_columns: dict[str, Any],
-) -> tuple[pd.DataFrame, dict[str, Any]]:
+) -> tuple[pl.DataFrame, dict[str, Any]]:
     if not database_path.is_file():
         raise FileNotFoundError(
             f"KSEA substrate database does not exist or is not a file: {database_path}"
         )
 
-    database = pd.read_csv(
-        database_path,
-        sep="\t",
-        dtype=str,
-        keep_default_na=False,
-        low_memory=False,
-    )
-    database.columns = [str(column).strip() for column in database.columns]
-    duplicated_columns = (
-        pd.Index(database.columns)[pd.Index(database.columns).duplicated()]
-        .unique()
-        .tolist()
+    with database_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        header = next(csv.reader(handle, delimiter="\t"), None)
+    if not header:
+        raise ValueError(
+            f"KSEA substrate database contains no header: {database_path}"
+        )
+
+    columns = [str(column).lstrip("\ufeff").strip() for column in header]
+    duplicated_columns = sorted(
+        {column for column in columns if columns.count(column) > 1}
     )
     if duplicated_columns:
         raise ValueError(
-            f"KSEA substrate database contains duplicate columns: {duplicated_columns!r}."
+            "KSEA substrate database contains duplicate columns: "
+            f"{duplicated_columns!r}."
         )
 
-    columns = list(database.columns)
     resolved = {
         concept: _resolve_database_column(
             columns,
@@ -229,11 +290,16 @@ def _load_substrate_database(
         for concept in ("kinase_uniprot", "kinase_gene", "kinase")
         if resolved[concept] is not None
     ]
-    missing_concepts = [
-        concept
-        for concept in ("substrate_uniprot", "substrate_site")
-        if resolved[concept] is None
-    ]
+    missing_concepts = []
+    if resolved["substrate_site"] is None:
+        missing_concepts.append("substrate_site")
+    if (
+        resolved["substrate_uniprot"] is None
+        and resolved["substrate_gene"] is None
+    ):
+        missing_concepts.append(
+            "substrate identifier (substrate_uniprot or substrate_gene)"
+        )
     if not kinase_identity_columns:
         missing_concepts.insert(0, "kinase identifier")
     if missing_concepts:
@@ -243,51 +309,104 @@ def _load_substrate_database(
             "corresponding analysis.kinase_activity.database_columns mappings."
         )
 
-    if database.empty:
+    def optional_text(concept: str) -> pl.Expr:
+        column = resolved[concept]
+        if column is None:
+            return pl.lit("", dtype=pl.String)
+        return _pl_clean_text(column)
+
+    def optional_identifier(concept: str) -> pl.Expr:
+        column = resolved[concept]
+        if column is None:
+            return pl.lit("", dtype=pl.String)
+        return _pl_clean_identifier(column)
+
+    # Projection pushdown means the large input files parse only the configured
+    # identifier/site/source columns, and infer_schema=False keeps every value
+    # as text without a separate schema-inference pass.
+    database = (
+        pl.scan_csv(
+            database_path,
+            separator="\t",
+            infer_schema=False,
+            missing_utf8_is_empty_string=True,
+            low_memory=False,
+            rechunk=False,
+            with_column_names=lambda names: [
+                str(name).lstrip("\ufeff").strip() for name in names
+            ],
+        )
+        .select(
+            optional_text("kinase").alias("kinase"),
+            optional_identifier("kinase_uniprot").alias("kinase_uniprot"),
+            optional_identifier("kinase_gene").alias("kinase_gene"),
+            optional_identifier("substrate_uniprot").alias(
+                "substrate_accession"
+            ),
+            optional_identifier("substrate_gene").alias("substrate_gene"),
+            optional_text("substrate_site").str.to_uppercase().alias("site"),
+            optional_text("source").alias("database_source"),
+        )
+        .collect()
+    )
+    if database.is_empty():
         raise ValueError(
             f"KSEA substrate database contains no rows: {database_path}"
         )
 
-    def optional_text(concept: str) -> pd.Series:
-        column = resolved[concept]
-        if column is None:
-            return pd.Series("", index=database.index, dtype=object)
-        return _clean_text(database[column])
+    kinase_isoform_rows_normalized = int(
+        database.select(
+            pl.col("kinase_uniprot").str.contains(r"-\d+$").sum()
+        ).item()
+    )
+    database = database.with_columns(
+        pl.when(pl.col("database_source").eq(""))
+        .then(pl.lit(database_path.stem))
+        .otherwise(pl.col("database_source"))
+        .alias("database_source"),
+        # KSEA reports activity for the kinase gene/protein, not separately for
+        # UniProt isoforms. Keep substrate accessions untouched because their
+        # residue numbering can be isoform-specific.
+        pl.col("kinase_uniprot")
+        .str.replace(r"-\d+$", "")
+        .alias("kinase_uniprot"),
+        _pl_clean_identifier("kinase").alias("_kinase_name_id"),
+    )
 
-    database["kinase"] = optional_text("kinase")
-    database["kinase_uniprot"] = optional_text("kinase_uniprot")
-    database["kinase_gene"] = optional_text("kinase_gene")
-    database["substrate_accession"] = optional_text(
-        "substrate_uniprot"
-    ).str.upper()
-    database["site"] = optional_text("substrate_site").str.upper()
-    database["database_source"] = optional_text("source")
-    database.loc[
-        database["database_source"].eq(""), "database_source"
-    ] = database_path.stem
+    # Prefer UniProt for each database row. Fall back to the substrate gene
+    # only when the UniProt accession is genuinely unavailable.
+    database = database.with_columns(
+        pl.when(pl.col("substrate_accession").ne(""))
+        .then(pl.lit("uniprot"))
+        .otherwise(pl.lit("gene"))
+        .alias("substrate_match_type"),
+        pl.when(pl.col("substrate_accession").ne(""))
+        .then(pl.col("substrate_accession"))
+        .otherwise(pl.col("substrate_gene"))
+        .alias("substrate_id"),
+        pl.when(pl.col("kinase_gene").ne(""))
+        .then(pl.col("kinase_gene"))
+        .when(pl.col("kinase").ne(""))
+        .then(pl.col("kinase"))
+        .otherwise(pl.col("kinase_uniprot"))
+        .alias("kinase"),
+        pl.when(pl.col("kinase_gene").ne(""))
+        .then(pl.col("kinase_gene"))
+        .when(pl.col("kinase_uniprot").ne(""))
+        .then(pl.col("kinase_uniprot"))
+        .otherwise(pl.col("_kinase_name_id"))
+        .alias("kinase_id"),
+    ).drop("_kinase_name_id")
 
-    missing_name = database["kinase"].eq("")
-    database.loc[missing_name, "kinase"] = database.loc[
-        missing_name, "kinase_gene"
-    ]
-    missing_name = database["kinase"].eq("")
-    database.loc[missing_name, "kinase"] = database.loc[
-        missing_name, "kinase_uniprot"
-    ]
-
-    database["kinase_id"] = database["kinase_uniprot"]
-    missing_id = database["kinase_id"].eq("")
-    database.loc[missing_id, "kinase_id"] = database.loc[missing_id, "kinase_gene"]
-    missing_id = database["kinase_id"].eq("")
-    database.loc[missing_id, "kinase_id"] = database.loc[missing_id, "kinase"]
-
-    valid_site = database["site"].str.fullmatch(_SITE_RE)
-    if not valid_site.any():
+    valid_site = pl.col("site").str.contains(r"^[STY]\d+$")
+    if not bool(database.select(valid_site.any()).item()):
         site_examples = (
-            database.loc[database["site"].ne(""), "site"]
-            .drop_duplicates()
+            database.filter(pl.col("site").ne(""))
+            .select("site")
+            .unique(maintain_order=True)
             .head(5)
-            .tolist()
+            .get_column("site")
+            .to_list()
         )
         raise ValueError(
             f"KSEA column {resolved['substrate_site']!r}, resolved as "
@@ -297,89 +416,298 @@ def _load_substrate_database(
         )
 
     valid = (
-        database["kinase_id"].ne("")
-        & database["substrate_accession"].ne("")
+        pl.col("kinase_id").ne("")
+        & pl.col("substrate_id").ne("")
         & valid_site
     )
-    invalid_rows = int((~valid).sum())
-    database = database.loc[valid].copy()
-    if database.empty:
+    input_rows = database.height
+    both_substrate_ids = int(
+        database.select(
+            (
+                pl.col("substrate_accession").ne("")
+                & pl.col("substrate_gene").ne("")
+            ).sum()
+        ).item()
+    )
+    database = database.filter(valid)
+    invalid_rows = int(input_rows - database.height)
+    if database.is_empty():
         raise ValueError(
             "KSEA substrate database has no valid relationships after "
-            "requiring a kinase identifier, UniProt substrate accession, "
-            f"and an S/T/Y site: {database_path}"
+            "requiring a kinase identifier, substrate UniProt accession or "
+            f"gene symbol, and an S/T/Y site: {database_path}"
         )
 
-    source_counts = database.loc[
-        database["database_source"].ne(""), "database_source"
-    ].value_counts()
+    source_counts = {
+        str(source): int(count)
+        for source, count in database.group_by("database_source")
+        .len()
+        .sort("database_source")
+        .iter_rows()
+    }
 
     relationships = (
-        database.groupby(
-            ["kinase_id", "substrate_accession", "site"],
-            as_index=False,
-            sort=False,
+        database.group_by(
+            [
+                "kinase_id",
+                "substrate_match_type",
+                "substrate_id",
+                "site",
+            ],
         )
         .agg(
-            kinase=("kinase", _first_nonempty),
-            kinase_gene=("kinase_gene", _first_nonempty),
-            kinase_uniprot=("kinase_uniprot", _first_nonempty),
-            database_source=("database_source", _join_unique),
+            _pl_first_nonempty("kinase"),
+            _pl_first_nonempty("kinase_gene"),
+            _pl_first_nonempty("kinase_uniprot"),
+            _pl_first_nonempty("substrate_accession"),
+            _pl_first_nonempty("substrate_gene"),
+            _pl_join_unique_list("database_source"),
         )
     )
+    relationships = _pl_join_unique_lists(relationships, ["database_source"])
 
     metadata = {
         "filename": database_path.name,
-        "source": ";".join(source_counts.index.astype(str).tolist()),
+        "source": _join_semicolon_values(list(source_counts)),
+        "input_rows": input_rows,
+        "valid_rows": database.height,
+        "invalid_rows": invalid_rows,
+        "relationships": relationships.height,
+        "duplicate_relationships_removed": int(
+            database.height - relationships.height
+        ),
+        "uniprot_relationships": relationships.filter(
+            pl.col("substrate_match_type").eq("uniprot")
+        ).height,
+        "gene_fallback_relationships": relationships.filter(
+            pl.col("substrate_match_type").eq("gene")
+        ).height,
+        "rows_with_both_substrate_ids": both_substrate_ids,
+        "kinase_isoform_rows_normalized": kinase_isoform_rows_normalized,
+        "source_counts": source_counts,
+        "column_mapping": {
+            concept: column
+            for concept, column in resolved.items()
+            if column is not None
+        },
     }
 
     return relationships, metadata
 
-def _load_substrate_databases(
+
+def _reconcile_kinase_identities(
+    relationships: pl.DataFrame,
+) -> tuple[pl.DataFrame, dict[str, Any]]:
+    """Map accession-only kinases to unambiguous genes across databases."""
+    pairs = (
+        relationships.filter(
+            pl.col("kinase_gene").ne("")
+            & pl.col("kinase_uniprot").ne("")
+        )
+        .select("kinase_gene", "kinase_uniprot")
+        .unique()
+    )
+    if pairs.is_empty():
+        return relationships, {
+            "accession_only_kinase_relationships_remapped": 0,
+            "conflicting_kinase_accessions": 0,
+            "conflicting_kinase_accession_examples": [],
+        }
+
+    accession_map = pairs.group_by("kinase_uniprot").agg(
+        pl.col("kinase_gene").n_unique().alias("_n_genes"),
+        pl.col("kinase_gene").first().alias("_canonical_kinase_gene"),
+    )
+    conflicts = accession_map.filter(pl.col("_n_genes").gt(1))
+    unambiguous = accession_map.filter(pl.col("_n_genes").eq(1)).select(
+        "kinase_uniprot",
+        "_canonical_kinase_gene",
+    )
+
+    relationships = relationships.join(
+        unambiguous,
+        on="kinase_uniprot",
+        how="left",
+    )
+    remap = (
+        pl.col("kinase_gene").eq("")
+        & pl.col("_canonical_kinase_gene").is_not_null()
+    )
+    remapped = int(relationships.select(remap.sum()).item())
+    relationships = relationships.with_columns(
+        pl.when(remap)
+        .then(pl.col("_canonical_kinase_gene"))
+        .otherwise(pl.col("kinase_id"))
+        .alias("kinase_id"),
+        pl.when(remap)
+        .then(pl.col("_canonical_kinase_gene"))
+        .otherwise(pl.col("kinase"))
+        .alias("kinase"),
+        pl.when(remap)
+        .then(pl.col("_canonical_kinase_gene"))
+        .otherwise(pl.col("kinase_gene"))
+        .alias("kinase_gene"),
+    ).drop("_canonical_kinase_gene")
+
+    return relationships, {
+        "accession_only_kinase_relationships_remapped": remapped,
+        "conflicting_kinase_accessions": conflicts.height,
+        "conflicting_kinase_accession_examples": conflicts.get_column(
+            "kinase_uniprot"
+        ).head(5).to_list(),
+    }
+
+
+def _load_substrate_databases_uncached(
     database_paths: list[Path],
     configured_columns: dict[str, Any],
-) -> tuple[pd.DataFrame, dict[str, Any]]:
-    loaded = [
-        _load_substrate_database(path, configured_columns)
-        for path in database_paths
-    ]
+) -> tuple[pl.DataFrame, dict[str, Any]]:
+    loaded: list[tuple[pl.DataFrame, dict[str, Any]]] = []
+    for priority, path in enumerate(database_paths):
+        frame, metadata = _load_substrate_database(
+            path,
+            configured_columns,
+        )
+        frame = frame.with_columns(
+            pl.lit(priority, dtype=pl.Int32).alias("database_priority")
+        )
+        loaded.append((frame, metadata))
 
-    if len(loaded) == 1:
-        return loaded[0]
-
-    relationships = pd.concat(
+    relationships = pl.concat(
         [frame for frame, _metadata in loaded],
-        ignore_index=True,
+        how="vertical_relaxed",
+        rechunk=False,
     )
+    relationships, kinase_identity_metadata = _reconcile_kinase_identities(
+        relationships
+    )
+    if kinase_identity_metadata["conflicting_kinase_accessions"]:
+        log_warning(
+            "KSEA found kinase UniProt accessions assigned to multiple gene "
+            "symbols: accessions="
+            f"{kinase_identity_metadata['conflicting_kinase_accessions']:,}, "
+            "examples="
+            f"{kinase_identity_metadata['conflicting_kinase_accession_examples']!r}. "
+            "Gene symbols remain canonical, so these relationships stay "
+            "separate; check the database annotations."
+        )
 
-    relationships = (
-        relationships.groupby(
-            ["kinase_id", "substrate_accession", "site"],
-            as_index=False,
-            sort=False,
-        )
-        .agg(
-            kinase=("kinase", _first_nonempty),
-            kinase_gene=("kinase_gene", _first_nonempty),
-            kinase_uniprot=("kinase_uniprot", _first_nonempty),
-            database_source=("database_source", _join_unique),
-        )
+    # Configured database order defines priority for exact duplicate
+    # relationships. Keep the highest-priority metadata while retaining all
+    # contributing source labels for provenance.
+    relationships_before_merge = relationships.height
+    relationships = relationships.sort(
+        "database_priority",
+        maintain_order=True,
+    ).group_by(
+        [
+            "kinase_id",
+            "substrate_match_type",
+            "substrate_id",
+            "site",
+        ],
+    ).agg(
+        _pl_first_nonempty("kinase"),
+        _pl_first_nonempty("kinase_gene"),
+        _pl_first_nonempty("kinase_uniprot"),
+        _pl_first_nonempty("substrate_accession"),
+        _pl_first_nonempty("substrate_gene"),
+        _pl_join_unique_list("database_source"),
+        pl.col("database_priority").min(),
     )
+    relationships = _pl_join_unique_lists(relationships, ["database_source"])
 
     metadata_rows = [metadata for _frame, metadata in loaded]
     metadata = {
         "filename": ", ".join(
             str(item["filename"]) for item in metadata_rows
         ),
-        "source": _join_unique(
-            pd.Series(
-                [item.get("source", "") for item in metadata_rows],
-                dtype=object,
-            )
+        "source": _join_semicolon_values(
+            [str(item.get("source", "")) for item in metadata_rows]
         ),
+        "input_rows": sum(int(item["input_rows"]) for item in metadata_rows),
+        "valid_rows": sum(int(item["valid_rows"]) for item in metadata_rows),
+        "invalid_rows": sum(int(item["invalid_rows"]) for item in metadata_rows),
+        "relationships": relationships.height,
+        "duplicate_relationships_removed": (
+            sum(
+                int(item["duplicate_relationships_removed"])
+                for item in metadata_rows
+            )
+            + int(relationships_before_merge - relationships.height)
+        ),
+        "kinase_isoform_rows_normalized": sum(
+            int(item["kinase_isoform_rows_normalized"])
+            for item in metadata_rows
+        ),
+        "accession_only_kinase_relationships_remapped": (
+            kinase_identity_metadata[
+                "accession_only_kinase_relationships_remapped"
+            ]
+        ),
+        "conflicting_kinase_accessions": kinase_identity_metadata[
+            "conflicting_kinase_accessions"
+        ],
+        "identifier_policy": (
+            "kinase gene first with UniProt/name fallback and kinase isoforms "
+            "collapsed; substrate UniProt first with gene fallback only when "
+            "UniProt is absent"
+        ),
+        "column_mapping": {
+            key: str(value).strip()
+            for key, value in configured_columns.items()
+            if value is not None and str(value).strip()
+        },
+        "_file_summaries": metadata_rows,
     }
 
     return relationships, metadata
+
+
+@lru_cache(maxsize=2)
+def _load_substrate_databases_cached(
+    database_signatures: tuple[tuple[str, int, int], ...],
+    configured_columns: tuple[tuple[str, str], ...],
+) -> tuple[pl.DataFrame, dict[str, Any]]:
+    paths = [Path(path) for path, _size, _mtime_ns in database_signatures]
+    columns = {
+        key: value if value else None
+        for key, value in configured_columns
+    }
+    return _load_substrate_databases_uncached(paths, columns)
+
+
+def _load_substrate_databases(
+    database_paths: list[Path],
+    configured_columns: dict[str, Any],
+) -> tuple[pl.DataFrame, dict[str, Any]]:
+    signatures: list[tuple[str, int, int]] = []
+    for path in database_paths:
+        if not path.is_file():
+            raise FileNotFoundError(
+                "KSEA substrate database does not exist or is not a file: "
+                f"{path}"
+            )
+        resolved_path = path.resolve()
+        stat = resolved_path.stat()
+        signatures.append(
+            (str(resolved_path), int(stat.st_size), int(stat.st_mtime_ns))
+        )
+
+    column_signature = tuple(
+        (
+            key,
+            "" if configured_columns.get(key) is None
+            else str(configured_columns.get(key)).strip(),
+        )
+        for key in _DATABASE_COLUMN_KEYS
+    )
+    relationships, metadata = _load_substrate_databases_cached(
+        tuple(signatures),
+        column_signature,
+    )
+    # Polars clones are cheap and prevent callers from mutating the cached handle.
+    return relationships.clone(), copy.deepcopy(metadata)
 
 
 def validate_ksea_database(config: dict) -> None:
@@ -396,8 +724,12 @@ def validate_ksea_database(config: dict) -> None:
     log_info(
         "KSEA database validation passed: "
         f"file={metadata['filename']!r}, "
-        f"relationships={len(relationships)}."
+        f"relationships={len(relationships):,}, "
+        f"invalid_rows={metadata['invalid_rows']:,}, "
+        "duplicate_relationships_removed="
+        f"{metadata['duplicate_relationships_removed']:,}."
     )
+
 
 def _scalar_text(value: Any) -> str:
     if value is None:
@@ -415,115 +747,207 @@ def _build_feature_site_table(adata: ad.AnnData) -> tuple[pd.DataFrame, int]:
         (column for column in ("PARENT_PROTEIN", "UNIPROT") if column in adata.var.columns),
         None,
     )
+    gene_column = "GENE_NAMES" if "GENE_NAMES" in adata.var.columns else None
 
-    rows: list[dict[str, Any]] = []
-    invalid_features = 0
-    for feature_index, feature_name in enumerate(adata.var_names.astype(str)):
-        phosphosite_id = str(feature_name)
-        if "|" not in phosphosite_id:
-            invalid_features += 1
-            continue
+    feature_names = adata.var_names.astype(str).tolist()
+    n_features = len(feature_names)
+    columns = [
+        "feature_index",
+        "phosphosite_id",
+        "substrate_match_type",
+        "substrate_id",
+        "matched_accession",
+        "site",
+    ]
+    if n_features == 0:
+        return pd.DataFrame(columns=columns), 0
 
-        index_parent, site = phosphosite_id.rsplit("|", 1)
-        site = site.strip().upper()
-        if _SITE_RE.fullmatch(site) is None:
-            invalid_features += 1
-            continue
+    parent_values = (
+        [_scalar_text(value) for value in adata.var[parent_column].tolist()]
+        if parent_column is not None
+        else [""] * n_features
+    )
+    gene_values = (
+        [_scalar_text(value) for value in adata.var[gene_column].tolist()]
+        if gene_column is not None
+        else [""] * n_features
+    )
 
-        parent_text = ""
-        if parent_column is not None:
-            parent_text = _scalar_text(adata.var.iloc[feature_index][parent_column])
-        if not parent_text:
-            parent_text = index_parent.strip()
-
-        accessions = sorted(
-            {
-                accession.strip().upper()
-                for accession in parent_text.split(";")
-                if accession.strip()
-            }
-        )
-        if not accessions:
-            invalid_features += 1
-            continue
-
-        for accession in accessions:
-            rows.append(
-                {
-                    "feature_index": feature_index,
-                    "phosphosite_id": phosphosite_id,
-                    "substrate_accession": accession,
-                    "site": site,
-                }
+    def identifier_list(column: str) -> pl.Expr:
+        return (
+            pl.col(column)
+            .str.split(";")
+            .list.eval(pl.element().str.strip_chars().str.to_uppercase())
+            .list.filter(
+                pl.element().ne("")
+                & ~pl.element().is_in(sorted(_MISSING_IDENTIFIER_TOKENS))
             )
+            .list.unique()
+            .list.sort()
+        )
 
-    feature_sites = pd.DataFrame(
-        rows,
-        columns=[
+    features = pl.DataFrame(
+        {
+            "feature_index": np.arange(n_features, dtype=np.int64),
+            "phosphosite_id": feature_names,
+            "_parent_value": parent_values,
+            "_gene_value": gene_values,
+        }
+    ).with_columns(
+        pl.col("phosphosite_id")
+        .str.extract(r"^(.*)\|([^|]+)$", group_index=1)
+        .fill_null("")
+        .str.strip_chars()
+        .alias("_index_parent"),
+        pl.col("phosphosite_id")
+        .str.extract(r"^(.*)\|([^|]+)$", group_index=2)
+        .fill_null("")
+        .str.strip_chars()
+        .str.to_uppercase()
+        .alias("site"),
+    )
+    features = features.with_columns(
+        pl.when(pl.col("_parent_value").ne(""))
+        .then(pl.col("_parent_value"))
+        .otherwise(pl.col("_index_parent"))
+        .alias("_parent_value"),
+    ).with_columns(
+        identifier_list("_parent_value").alias("_accessions"),
+        identifier_list("_gene_value").alias("_genes"),
+    ).with_columns(
+        pl.col("_accessions").list.join(";").alias("_parent_accessions")
+    )
+
+    valid = (
+        pl.col("site").str.contains(r"^[STY]\d+$")
+        & (
+            pl.col("_accessions").list.len().gt(0)
+            | pl.col("_genes").list.len().gt(0)
+        )
+    )
+    valid_features = features.filter(valid)
+    invalid_features = int(n_features - valid_features.height)
+
+    accessions = (
+        valid_features.select(
             "feature_index",
             "phosphosite_id",
-            "substrate_accession",
             "site",
-        ],
+            pl.col("_accessions").alias("substrate_id"),
+        )
+        .explode("substrate_id")
+        .filter(pl.col("substrate_id").is_not_null())
+        .with_columns(
+            pl.lit("uniprot").alias("substrate_match_type"),
+            pl.col("substrate_id").alias("matched_accession"),
+        )
     )
-    return feature_sites, invalid_features
+    genes = (
+        valid_features.select(
+            "feature_index",
+            "phosphosite_id",
+            "site",
+            "_parent_accessions",
+            pl.col("_genes").alias("substrate_id"),
+        )
+        .explode("substrate_id")
+        .filter(pl.col("substrate_id").is_not_null())
+        .with_columns(
+            pl.lit("gene").alias("substrate_match_type"),
+            pl.col("_parent_accessions").alias("matched_accession"),
+        )
+        .drop("_parent_accessions")
+    )
+
+    feature_sites = pl.concat(
+        [accessions.select(columns), genes.select(columns)],
+        how="vertical_relaxed",
+        rechunk=False,
+    )
+    return (
+        pd.DataFrame(feature_sites.to_dict(as_series=False), columns=columns),
+        invalid_features,
+    )
 
 
 def _match_substrates(
     feature_sites: pd.DataFrame,
-    relationships: pd.DataFrame,
+    relationships: pl.DataFrame | pd.DataFrame,
 ) -> pd.DataFrame:
-    if feature_sites.empty:
-        return pd.DataFrame(
-            columns=[
+    empty_columns = [
+        "kinase_id",
+        "kinase",
+        "kinase_gene",
+        "kinase_uniprot",
+        "feature_index",
+        "phosphosite_id",
+        "matched_accession",
+        "database_source",
+        "match_types",
+    ]
+    relationships_empty = (
+        relationships.is_empty()
+        if isinstance(relationships, pl.DataFrame)
+        else relationships.empty
+    )
+    if feature_sites.empty or relationships_empty:
+        return pd.DataFrame(columns=empty_columns)
+
+    feature_sites_pl = pl.from_pandas(feature_sites, include_index=False)
+    relationships_for_match = (
+        relationships.clone()
+        if isinstance(relationships, pl.DataFrame)
+        else pl.from_pandas(relationships, include_index=False)
+    )
+    if "database_priority" not in relationships_for_match.columns:
+        relationships_for_match = relationships_for_match.with_columns(
+            pl.lit(0, dtype=pl.Int32).alias("database_priority")
+        )
+
+    matched = feature_sites_pl.join(
+        relationships_for_match.select(
+            [
                 "kinase_id",
                 "kinase",
                 "kinase_gene",
                 "kinase_uniprot",
-                "feature_index",
-                "phosphosite_id",
-                "matched_accession",
+                "substrate_match_type",
+                "substrate_id",
+                "site",
                 "database_source",
+                "database_priority",
             ]
-        )
-
-    matched = feature_sites.merge(
-        relationships,
-        on=["substrate_accession", "site"],
+        ),
+        on=["substrate_match_type", "substrate_id", "site"],
         how="inner",
-        validate="many_to_many",
     )
-    if matched.empty:
-        return pd.DataFrame(
-            columns=[
-                "kinase_id",
-                "kinase",
-                "kinase_gene",
-                "kinase_uniprot",
-                "feature_index",
-                "phosphosite_id",
-                "matched_accession",
-                "database_source",
-            ]
-        )
+    if matched.is_empty():
+        return pd.DataFrame(columns=empty_columns)
 
-    # A phosphosite from a protein group may match more than one accession for
-    # the same kinase.  It still counts once in n_substrates.
-    matched = (
-        matched.groupby(
-            ["kinase_id", "feature_index", "phosphosite_id"],
-            as_index=False,
-            sort=False,
-        )
-        .agg(
-            kinase=("kinase", _first_nonempty),
-            kinase_gene=("kinase_gene", _first_nonempty),
-            kinase_uniprot=("kinase_uniprot", _first_nonempty),
-            matched_accession=("substrate_accession", _join_unique),
-            database_source=("database_source", _join_unique),
-        )
+    # Count a kinase/phosphosite once even if it was reached through several
+    # identifiers or databases. Database order chooses display metadata, while
+    # every contributing source and match type remains visible for provenance.
+    matched = matched.sort(
+        "database_priority",
+        maintain_order=True,
+    ).group_by(
+        ["kinase_id", "feature_index", "phosphosite_id"],
+    ).agg(
+        _pl_first_nonempty("kinase"),
+        _pl_first_nonempty("kinase_gene"),
+        _pl_first_nonempty("kinase_uniprot"),
+        _pl_join_unique_list("matched_accession"),
+        _pl_join_unique_list("database_source"),
+        _pl_join_unique_list("substrate_match_type").alias("match_types"),
+        pl.col("database_priority").min(),
     )
-    return matched
+    matched = _pl_join_unique_lists(
+        matched,
+        ["matched_accession", "database_source", "match_types"],
+    ).drop("database_priority")
+    # The matched table is small relative to the relationship database; this
+    # conversion avoids adding a pyarrow requirement to the KSEA path.
+    return pd.DataFrame(matched.to_dict(as_series=False))
 
 
 def _select_log2fc(adata: ad.AnnData) -> tuple[np.ndarray, str, str]:
@@ -870,7 +1294,8 @@ def run_ksea_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         parsed_config["substrate_databases"],
         parsed_config["database_columns"],
     )
-    feature_sites, _ = _build_feature_site_table(adata)
+
+    feature_sites, invalid_features = _build_feature_site_table(adata)
     if feature_sites.empty:
         raise ValueError(
             "KSEA could not parse any phosphosite identifiers. Expected feature IDs "
@@ -883,6 +1308,34 @@ def run_ksea_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         unique_feature_sites["feature_index"].to_numpy(dtype=int)
     ] = True
     assignments = _match_substrates(feature_sites, relationships)
+
+    if assignments.empty:
+        uniprot_assignments = 0
+        gene_only_assignments = 0
+        mixed_identifier_assignments = 0
+    else:
+        match_type_sets = assignments["match_types"].map(
+            lambda value: set(str(value).split(";"))
+        )
+        has_uniprot = match_type_sets.map(lambda values: "uniprot" in values)
+        has_gene = match_type_sets.map(lambda values: "gene" in values)
+        uniprot_assignments = int(has_uniprot.sum())
+        gene_only_assignments = int((has_gene & ~has_uniprot).sum())
+        mixed_identifier_assignments = int((has_gene & has_uniprot).sum())
+
+    log_info(
+        "KSEA database matching: "
+        f"relationships={len(relationships):,}; "
+        f"kinase-site assignments={len(assignments):,}; "
+        f"matched phosphosites="
+        f"{assignments['feature_index'].nunique() if not assignments.empty else 0:,}; "
+        f"matched kinases="
+        f"{assignments['kinase_id'].nunique() if not assignments.empty else 0:,}; "
+        f"uniprot assignments={uniprot_assignments:,}; "
+        f"gene-only assignments={gene_only_assignments:,}; "
+        f"mixed-source assignments={mixed_identifier_assignments:,}; "
+        f"invalid dataset features={invalid_features:,}."
+    )
 
     condition_summary_df, condition_kinases_df = _condition_kinase_data(
         adata=adata,
@@ -908,6 +1361,7 @@ def run_ksea_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         result_frames.append(results)
         substrate_frames.append(substrates)
         summaries.append(summary)
+
 
     results_df = (
         pd.concat(result_frames, ignore_index=True)
@@ -983,6 +1437,11 @@ def run_ksea_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         summary_df["contrast"],
         "contrast_id",
     )
+    stored_database_metadata = {
+        key: value
+        for key, value in database_metadata.items()
+        if not key.startswith("_")
+    }
 
     output = adata.copy()
     output.uns["kinase_activity"] = {
@@ -997,7 +1456,7 @@ def run_ksea_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         ),
         "pvalue_rule": "two-sided standard-normal z-test",
         "fdr_scope": "BH within each contrast across tested kinases",
-        "database": database_metadata,
+        "database": stored_database_metadata,
         "condition_summary": condition_summary_df,
         "condition_kinases": condition_kinases_df,
         "contrast_summary": summary_df,
