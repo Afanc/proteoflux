@@ -618,6 +618,16 @@ def _load_substrate_databases_uncached(
     relationships = _pl_join_unique_lists(relationships, ["database_source"])
 
     metadata_rows = [metadata for _frame, metadata in loaded]
+
+    new_relationship_counts = {
+        int(priority): int(count)
+        for priority, count in relationships.group_by(
+            "database_priority"
+        ).len().iter_rows()
+    }
+    for priority, item in enumerate(metadata_rows):
+        item["new_relationships"] = new_relationship_counts.get(priority, 0)
+
     metadata = {
         "filename": ", ".join(
             str(item["filename"]) for item in metadata_rows
@@ -884,6 +894,7 @@ def _match_substrates(
         "matched_accession",
         "database_source",
         "match_types",
+        "database_priority",
     ]
     relationships_empty = (
         relationships.is_empty()
@@ -944,10 +955,80 @@ def _match_substrates(
     matched = _pl_join_unique_lists(
         matched,
         ["matched_accession", "database_source", "match_types"],
-    ).drop("database_priority")
+    )
     # The matched table is small relative to the relationship database; this
     # conversion avoids adding a pyarrow requirement to the KSEA path.
     return pd.DataFrame(matched.to_dict(as_series=False))
+
+
+def _database_contribution_summary(
+    file_summaries: list[dict[str, Any]],
+    assignments: pd.DataFrame,
+) -> pd.DataFrame:
+    """Summarize each database's incremental contribution in config order."""
+    columns = [
+        "filename",
+        "relationships",
+        "new_relationships",
+        "new_matched_relationships",
+        "new_matched_phosphosites",
+        "new_matched_kinases",
+    ]
+
+    relationship_counts: dict[int, int] = {}
+    phosphosite_counts: dict[int, int] = {}
+    kinase_counts: dict[int, int] = {}
+    if not assignments.empty:
+        work = assignments.copy()
+        work["database_priority"] = pd.to_numeric(
+            work["database_priority"], errors="coerce"
+        )
+        work = work.dropna(subset=["database_priority"])
+        work["database_priority"] = work["database_priority"].astype(int)
+
+        relationship_counts = {
+            int(priority): int(count)
+            for priority, count in work["database_priority"]
+            .value_counts()
+            .items()
+        }
+        phosphosite_counts = {
+            int(priority): int(count)
+            for priority, count in work.groupby("feature_index")[
+                "database_priority"
+            ]
+            .min()
+            .value_counts()
+            .items()
+        }
+        kinase_counts = {
+            int(priority): int(count)
+            for priority, count in work.groupby("kinase_id")[
+                "database_priority"
+            ]
+            .min()
+            .value_counts()
+            .items()
+        }
+
+    rows = [
+        {
+            "filename": str(item["filename"]),
+            "relationships": int(item["relationships"]),
+            "new_relationships": int(item.get("new_relationships", 0)),
+            "new_matched_relationships": relationship_counts.get(priority, 0),
+            "new_matched_phosphosites": phosphosite_counts.get(priority, 0),
+            "new_matched_kinases": kinase_counts.get(priority, 0),
+        }
+        for priority, item in enumerate(file_summaries)
+    ]
+    summary = pd.DataFrame(rows, columns=columns)
+    summary.index = pd.Index(
+        [str(priority) for priority in range(len(summary))],
+        dtype=str,
+        name="database_priority",
+    )
+    return summary
 
 
 def _select_log2fc(adata: ad.AnnData) -> tuple[np.ndarray, str, str]:
@@ -1294,6 +1375,20 @@ def run_ksea_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         parsed_config["substrate_databases"],
         parsed_config["database_columns"],
     )
+    for file_summary in database_metadata.get("_file_summaries", []):
+        log_info(
+            "KSEA database loaded: "
+            f"file={file_summary['filename']!r}, "
+            f"rows={file_summary['input_rows']:,}, "
+            f"relationships={file_summary['relationships']:,}, "
+            "uniprot_relationships="
+            f"{file_summary['uniprot_relationships']:,}, "
+            "gene_fallback_relationships="
+            f"{file_summary['gene_fallback_relationships']:,}, "
+            f"invalid_rows={file_summary['invalid_rows']:,}, "
+            "duplicate_relationships_removed="
+            f"{file_summary['duplicate_relationships_removed']:,}."
+        )
 
     feature_sites, invalid_features = _build_feature_site_table(adata)
     if feature_sites.empty:
@@ -1442,6 +1537,19 @@ def run_ksea_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         for key, value in database_metadata.items()
         if not key.startswith("_")
     }
+    stored_database_metadata.update(
+        {
+            "matched_relationships": int(len(assignments)),
+            "matched_phosphosites": matched_phosphosites,
+            "matched_kinases": int(assignments["kinase_id"].nunique())
+            if not assignments.empty
+            else 0,
+        }
+    )
+    database_summary_df = _database_contribution_summary(
+        database_metadata.get("_file_summaries", []),
+        assignments,
+    )
 
     output = adata.copy()
     output.uns["kinase_activity"] = {
@@ -1457,6 +1565,7 @@ def run_ksea_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         "pvalue_rule": "two-sided standard-normal z-test",
         "fdr_scope": "BH within each contrast across tested kinases",
         "database": stored_database_metadata,
+        "database_summary": database_summary_df,
         "condition_summary": condition_summary_df,
         "condition_kinases": condition_kinases_df,
         "contrast_summary": summary_df,
