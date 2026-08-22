@@ -8,6 +8,12 @@ from proteoflux.utils.utils import log_time, log_info
 from proteoflux.analysis.pelsa_torch import fit_4pl_torch_from_ratio_df
 
 
+_PARENT_SIGNIFICANT_COUNT_COLUMN = "significant_peptides_per_parent"
+_PARENT_SIGNIFICANT_COUNT_VAR_COLUMN = (
+    "PELSA_SIGNIFICANT_PEPTIDES_PER_PARENT"
+)
+
+
 def _log2_mean(values: np.ndarray) -> float:
     """Mean on linear scale, returned on log2 scale."""
     values = np.asarray(values, dtype=float)
@@ -172,6 +178,97 @@ def _fit_all_4pl_curves(ratio_df: pd.DataFrame, config: dict) -> pd.DataFrame:
     return fit_4pl_torch_from_ratio_df(ratio_df, config)
 
 
+def _annotate_parent_significant_peptide_counts(
+    adata: ad.AnnData,
+    curve_results: pd.DataFrame,
+    *,
+    sign_threshold: float,
+) -> pd.DataFrame:
+    """Attach the number of significant peptides for each parent protein."""
+    if not np.isfinite(sign_threshold) or not 0.0 < sign_threshold <= 1.0:
+        raise ValueError("PELSA sign_threshold must be finite and in (0, 1].")
+    if "PARENT_PROTEIN" not in adata.var.columns:
+        raise ValueError(
+            "PELSA parent-level peptide support requires "
+            "adata.var['PARENT_PROTEIN']."
+        )
+
+    required = {"peptide_id", "curve_q_value"}
+    missing = sorted(required.difference(curve_results.columns))
+    if missing:
+        raise ValueError(
+            "PELSA curve results cannot calculate parent-level peptide "
+            f"support; missing columns: {missing!r}."
+        )
+
+    results = curve_results.copy()
+    results["peptide_id"] = results["peptide_id"].astype(str)
+    duplicated = results.loc[
+        results["peptide_id"].duplicated(keep=False), "peptide_id"
+    ].unique()
+    if len(duplicated):
+        raise ValueError(
+            "PELSA curve results contain duplicate peptide identifiers; "
+            f"examples: {duplicated[:5].tolist()!r}."
+        )
+
+    parent_by_peptide = pd.Series(
+        adata.var["PARENT_PROTEIN"].to_numpy(),
+        index=pd.Index(adata.var_names.astype(str), name="peptide_id"),
+    )
+    missing_peptides = sorted(
+        set(results["peptide_id"]).difference(parent_by_peptide.index)
+    )
+    if missing_peptides:
+        raise ValueError(
+            "PELSA curve results contain peptides absent from adata.var; "
+            f"examples: {missing_peptides[:5]!r}."
+        )
+
+    results["_parent_protein"] = (
+        results["peptide_id"]
+        .map(parent_by_peptide)
+        .astype("string")
+        .fillna("")
+        .str.strip()
+    )
+    qvalues = pd.to_numeric(results["curve_q_value"], errors="coerce")
+    significant = np.isfinite(qvalues) & qvalues.lt(float(sign_threshold))
+    valid_parent = ~results["_parent_protein"].str.casefold().isin(
+        {"", "nan", "none", "na", "n/a", "?"}
+    )
+
+    counts = (
+        results.loc[valid_parent]
+        .assign(_significant=significant.loc[valid_parent].astype(int))
+        .groupby("_parent_protein", sort=False)["_significant"]
+        .sum()
+        .astype(int)
+    )
+    results[_PARENT_SIGNIFICANT_COUNT_COLUMN] = (
+        results["_parent_protein"].map(counts).fillna(0).astype(int)
+    )
+    results = results.drop(columns="_parent_protein")
+
+    count_by_peptide = results.set_index("peptide_id")[
+        _PARENT_SIGNIFICANT_COUNT_COLUMN
+    ]
+    adata.var[_PARENT_SIGNIFICANT_COUNT_VAR_COLUMN] = (
+        count_by_peptide.reindex(adata.var_names.astype(str))
+        .fillna(0)
+        .astype(int)
+        .to_numpy()
+    )
+
+    log_info(
+        "PELSA parent peptide support: "
+        f"significant_peptides={int(significant.sum()):,}, "
+        f"significant_parents={int((counts > 0).sum()):,}, "
+        f"q_threshold={sign_threshold:g}."
+    )
+    return results
+
+
 def _build_pelsa_localization_metadata(adata: ad.AnnData) -> dict:
     var = adata.var
 
@@ -215,11 +312,9 @@ def _build_pelsa_localization_metadata(adata: ad.AnnData) -> dict:
 def run_pelsa_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     adata = adata.copy()
 
-    pelsa_cfg = (
-        ((config or {}).get("analysis", {}) or {})
-        .get("pelsa", {})
-        or {}
-    )
+    analysis_cfg = (config or {}).get("analysis", {}) or {}
+    pelsa_cfg = analysis_cfg.get("pelsa", {}) or {}
+    sign_threshold = float(analysis_cfg.get("sign_threshold", 0.05))
 
     concentration_col = pelsa_cfg.get("concentration_column", "Concentration")
     layer = pelsa_cfg.get("layer", "normalized")
@@ -241,6 +336,11 @@ def run_pelsa_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     )
 
     curve_results = _fit_all_4pl_curves(ratio_df, config)
+    curve_results = _annotate_parent_significant_peptide_counts(
+        adata,
+        curve_results,
+        sign_threshold=sign_threshold,
+    )
 
     n_success = int(curve_results["fit_success"].sum())
     log_info(
@@ -279,6 +379,8 @@ def run_pelsa_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         "layer": layer,
         "control_concentration": control_concentration,
         "min_control_points": min_control_points,
+        "sign_threshold": sign_threshold,
+        "parent_significant_count_column": _PARENT_SIGNIFICANT_COUNT_COLUMN,
         "control_reference": "mean_linear_on_log2_input",
         "control_log10_concentration": float(
             ratio_df.loc[

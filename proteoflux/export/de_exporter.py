@@ -130,6 +130,7 @@ class DEExporter:
             "curve_change_fraction",
             "curve_p_value",
             "curve_q_value",
+            "significant_peptides_per_parent",
             "ec50",
             "slope",
             "front",

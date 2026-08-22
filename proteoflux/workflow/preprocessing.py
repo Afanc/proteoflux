@@ -1843,6 +1843,7 @@ class Preprocessor:
         regression_type_used = None
         tags = None
         tag_matches = None
+        intersection_features = None
 
         if isinstance(normalization_method, str):
             normalization_method = [normalization_method]
@@ -1862,6 +1863,38 @@ class Preprocessor:
                 medians = np.nanmedian(mat, axis=0, keepdims=True)
                 shift = global_median - medians
                 mat = mat + np.where(np.isfinite(medians), shift, 0.0)
+            elif m == "median_equalization_intersection":
+                # Estimate every sample shift from exactly the same feature
+                # set, avoiding sample-specific detection bias.
+                complete = np.isfinite(mat).all(axis=1)
+                intersection_features = int(complete.sum())
+                total_features = int(mat.shape[0])
+                intersection_key = (
+                    "intersection_features"
+                    if block is Block.MAIN
+                    else "intersection_features_covariate"
+                )
+                self.normalization[intersection_key] = intersection_features
+
+                if intersection_features == 0:
+                    log_info(
+                        "median_equalization_intersection: no features were "
+                        f"finite in all {mat.shape[1]} samples. Step skipped."
+                    )
+                else:
+                    reference = mat[complete, :]
+                    medians = np.median(
+                        reference,
+                        axis=0,
+                        keepdims=True,
+                    )
+                    global_median = np.median(reference)
+                    mat = mat + (global_median - medians)
+                    log_info(
+                        "median_equalization_intersection: "
+                        f"used={intersection_features}/{total_features} "
+                        f"features present in all {mat.shape[1]} samples."
+                    )
             elif m == "quantile":
                 qt = sklearn.preprocessing.QuantileTransformer(random_state=42)
                 mat = qt.fit_transform(mat)
@@ -2028,6 +2061,11 @@ class Preprocessor:
         ir.add_metadata("normalization", "span", float(loess_span) if regression_type_used == "loess" else None)
         ir.add_metadata("normalization", "tags", tags)
         ir.add_metadata("normalization", "tag_matches", tag_matches)
+        ir.add_metadata(
+            "normalization",
+            f"intersection_features{key_sfx}",
+            intersection_features,
+        )
 
     # -------------------------------------------------------------------------
     # Imputation
