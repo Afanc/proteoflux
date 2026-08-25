@@ -89,6 +89,7 @@ analysis:
       kinase_gene: null
       substrate_uniprot: null
       substrate_site: null
+      substrate_gene: null
       source: null
 
 exports:
