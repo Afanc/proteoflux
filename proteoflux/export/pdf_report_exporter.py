@@ -562,9 +562,13 @@ class ReportPlotter:
             imp_method += f", rf_max_iter={rf_max_iter}"
 
         if "lc_conmed" in imp_method:
-            lc_conmed_lod_k = preproc.get("imputation").get("lc_conmed_lod_k", "NA")
-            lc_conmed_min_obs = preproc.get("imputation").get("lc_conmed_in_min_obs", "1")
-            imp_method += f", lod_k={lc_conmed_lod_k}, min_obs={lc_conmed_min_obs}"
+            lc_conmed_lod_k = imp.get("lc_conmed_lod_k", "NA")
+            lc_conmed_min_obs = imp.get("lc_conmed_in_min_obs", 1)
+            if lc_conmed_min_obs is not None:
+                threshold = f"min_obs={lc_conmed_min_obs}"
+            else:
+                threshold = f"frac_min_obs={imp.get('lc_conmed_frac_min_obs', 'NA')}"
+            imp_method += f", lod_k={lc_conmed_lod_k}, {threshold}"
 
         fig.text(x0 + 0.02, y, f"- Imputation: {imp_method} ",
                  ha="left", va="top", fontsize=12)
