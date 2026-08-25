@@ -45,7 +45,7 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
     Optimized version with per-row/per-condition caching.
 
     Missing value rule for cell X[i, j]:
-      • If the same condition has >= in_min_obs observed values:
+      • If the same condition reaches its minimum observed-value threshold:
             center = median of that condition
             sd_pool = pooled SD across all conditions with data
             draw ~ Normal(center, jitter_frac * sd_pool)
@@ -67,6 +67,7 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
         lod_shift=0.20,
         lod_sd_width=0.05,
         in_min_obs=1,
+        frac_min_obs=None,
         random_state=42,
     ):
         self.condition_map = condition_map
@@ -74,6 +75,7 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
         self.group_column = group_column
 
         self.in_min_obs = in_min_obs
+        self.frac_min_obs = frac_min_obs
         self.lod_k = lod_k
         self.q_lower = q_lower
         self.q_upper = q_upper
@@ -94,6 +96,30 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
         cond_levels = np.unique(self._cond)
         self._cond_levels = cond_levels
         self._cond_idx = {c: np.where(self._cond == c)[0] for c in cond_levels}
+
+        if self.in_min_obs is not None:
+            if (
+                isinstance(self.in_min_obs, (bool, np.bool_))
+                or not isinstance(self.in_min_obs, (int, np.integer))
+                or int(self.in_min_obs) < 1
+            ):
+                raise ValueError("in_min_obs must be an integer >= 1 or None.")
+            self._min_obs_by_cond = {
+                c: int(self.in_min_obs) for c in cond_levels
+            }
+        else:
+            if (
+                isinstance(self.frac_min_obs, (bool, np.bool_))
+                or not isinstance(self.frac_min_obs, (int, float, np.number))
+                or not 0 < float(self.frac_min_obs) <= 1
+            ):
+                raise ValueError(
+                    "frac_min_obs must be in (0, 1] when in_min_obs is None."
+                )
+            self._min_obs_by_cond = {
+                c: max(1, int(np.ceil(float(self.frac_min_obs) * len(idx))))
+                for c, idx in self._cond_idx.items()
+            }
 
         # Global LoD (median of lowest k intensities)
         obs = X[~np.isnan(X)]
@@ -133,7 +159,7 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
         # Local bindings
         cond = self._cond
         cond_idx = self._cond_idx
-        in_min_obs = self.in_min_obs
+        min_obs_by_cond = self._min_obs_by_cond
         q_lower = self.q_lower
         q_upper = self.q_upper
         jitter_frac = self.jitter_frac
@@ -159,14 +185,18 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
                 obs_by_cond[c] = vals
 
             # Pooled SD across all conditions with any data
-            groups = [v for v in obs_by_cond.values() if v.size >= in_min_obs]
+            groups = [
+                vals
+                for c, vals in obs_by_cond.items()
+                if vals.size >= min_obs_by_cond[c]
+            ]
             sd_pool = _pooled_sd(groups)
             sd_jitter = max(jitter_frac * sd_pool, _EPS_local)
 
             # cache cond stats
             cond_stats = {}
             for c, vals in obs_by_cond.items():
-                if vals.size >= in_min_obs:
+                if vals.size >= min_obs_by_cond[c]:
                     center = float(np.median(vals))
                     if vals.size > 1:
                         q_lo = float(np.quantile(vals, q_lower, method="linear"))
@@ -182,7 +212,7 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
                 cj = cond[j]
                 in_group_vals = obs_by_cond.get(cj, np.array([], dtype=np.float64))
 
-                if in_group_vals.size >= in_min_obs:
+                if in_group_vals.size >= min_obs_by_cond[cj]:
                     center, q_lo, q_hi = cond_stats[cj]
                     draw = rng.normal(center, sd_jitter)
                     if draw < q_lo:

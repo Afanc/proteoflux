@@ -37,6 +37,7 @@ from proteoflux.utils.utils import (
     logger,
     log_info,
     log_indent,
+    log_warning,
 )
 from proteoflux.utils.sequence_ops import (
     expr_peptide_index_seq,
@@ -175,6 +176,15 @@ class Preprocessor:
 
         # Imputation
         self.imputation = config.get("imputation") or {}
+        if str(self.imputation.get("method", "")).lower() == "lc_conmed":
+            in_min_obs = self.imputation.get("lc_conmed_in_min_obs", 1)
+            frac_min_obs = self.imputation.get("lc_conmed_frac_min_obs")
+            if in_min_obs is not None and frac_min_obs is not None:
+                log_warning(
+                    "LC-ConMed received both lc_conmed_in_min_obs and "
+                    "lc_conmed_frac_min_obs; using lc_conmed_in_min_obs."
+                )
+
 
         self.exports = config.get("exports") or {}
 

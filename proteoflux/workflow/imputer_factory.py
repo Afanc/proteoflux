@@ -43,6 +43,7 @@ def get_imputer(**kwargs) -> Any:
             q_lower=kwargs.get("lc_conmed_q_lower", 0.25),
             q_upper=kwargs.get("lc_conmed_q_upper", 0.75),
             in_min_obs=kwargs.get("lc_conmed_in_min_obs", 1),
+            frac_min_obs=kwargs.get("lc_conmed_frac_min_obs"),
             random_state=kwargs.get("random_state", 42),
         )
     elif method == "nsknn":
