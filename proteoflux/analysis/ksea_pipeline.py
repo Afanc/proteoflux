@@ -243,19 +243,11 @@ def _parse_config(config: dict) -> dict[str, Any] | None:
             f"{list(_DATABASE_COLUMN_KEYS)!r}."
         )
 
-    control_value = kinase_cfg.get("control_condition")
-    control_condition = (
-        str(control_value).strip()
-        if control_value is not None and str(control_value).strip()
-        else None
-    )
-
     return {
         "method": method,
         "substrate_databases": database_paths,
         "min_substrates": min_substrates,
         "database_columns": database_columns,
-        "control_condition": control_condition,
     }
 
 
@@ -1111,44 +1103,6 @@ def _fully_imputed_mask(
     return fully
 
 
-def _select_control_contrasts(
-    adata: ad.AnnData,
-    contrast_names: list[str],
-    control_condition: str | None,
-) -> list[tuple[int, str]]:
-    """Return original contrast indices, optionally restricted to one control."""
-    contrast_items = list(enumerate(contrast_names))
-    if control_condition is None:
-        return contrast_items
-
-    conditions = set(adata.obs["CONDITION"].astype(str))
-    if control_condition not in conditions:
-        raise ValueError(
-            "analysis.kinase_activity.control_condition must match a dataset "
-            f"condition; received {control_condition!r}. Available conditions: "
-            f"{sorted(conditions)!r}."
-        )
-
-    selected = []
-    for contrast_index, contrast in contrast_items:
-        if "_vs_" not in contrast:
-            continue
-        condition_a, condition_b = contrast.split("_vs_", 1)
-        if control_condition in {condition_a, condition_b}:
-            selected.append((contrast_index, contrast))
-
-    if not selected:
-        raise ValueError(
-            f"KSEA control condition {control_condition!r} is not present in any "
-            "differential-analysis contrast."
-        )
-    log_info(
-        "KSEA control-condition filter: "
-        f"control={control_condition!r}, contrasts={len(selected)}/{len(contrast_items)}."
-    )
-    return selected
-
-
 def _empty_results() -> pd.DataFrame:
     return pd.DataFrame(columns=_RESULT_COLUMNS)
 
@@ -1416,12 +1370,9 @@ def run_ksea_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
             f"KSEA expected {log2fc_key!r} shape {expected_shape}, received "
             f"{log2fc.shape}."
         )
-    contrast_items = _select_control_contrasts(
-        adata,
-        all_contrast_names,
-        parsed_config["control_condition"],
-    )
-    contrast_names = [contrast for _, contrast in contrast_items]
+
+    contrast_items = list(enumerate(all_contrast_names))
+    contrast_names = all_contrast_names
 
     relationships, database_metadata = _load_substrate_databases(
         parsed_config["substrate_databases"],
@@ -1608,7 +1559,6 @@ def run_ksea_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         "schema_version": 1,
         "method": "ksea",
         "min_substrates": parsed_config["min_substrates"],
-        "control_condition": parsed_config["control_condition"],
         "log2fc_varm_key": log2fc_key,
         "log2fc_source": log2fc_source,
         "background_rule": (
