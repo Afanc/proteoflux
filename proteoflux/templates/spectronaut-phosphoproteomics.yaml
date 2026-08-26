@@ -82,7 +82,6 @@ analysis:
     method: ksea
     min_substrates: 5
     substrate_database: null
-    control_condition: null
     database_columns:
       kinase: null
       kinase_uniprot: null
