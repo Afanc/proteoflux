@@ -29,6 +29,7 @@ Can be used to inject an additional .tsv/.csv/.parquet dataset.
 | `inject_runs.RUN_NAME.input_file` | Path to injected dataset. |
 | `inject_runs.RUN_NAME.indexing_type` | Indexing strategy for this run: proteomics, peptidomics or phospho. Should be peptidomics if analysis is phospho and injected run is a flowthrough. |
 | `inject_runs.RUN_NAME.annotation_file` | Path to annotation file for the injected run. |
+| `inject_runs.RUN_NAME.exclude_runs` | String or list of run identifiers (filenames) to exclude from the injected analysis. Should be used to drop phospho/flowthrough pairs. Optional.  |
 | `inject_runs.RUN_NAME.is_covariate` | Boolean. If true, run is treated as covariate (phospho ANCOVA-style residualization using the flowthrough). |
 | `inject_runs.RUN_NAME.column_overrides` | Dictionary overriding dataset column mappings for this run only. Optional. |
 | `inject_runs.RUN_NAME.column_overrides.qvalue_column` | q-value column, for filtering. Optinoal. |
@@ -128,7 +129,7 @@ Can be used to inject an additional .tsv/.csv/.parquet dataset.
 
 | Key | Description |
 |------|------------|
-| `normalization.method` | List of normalization steps. Options include log2, median_equalization, median_equalization_by_tag, quantile, global_linear, global_loess, local_linear, local_loess. Data should be always log2 transformed first. |
+| `normalization.method` | List of normalization steps. Options include log2, median_equalization, median_equalization_by_tag, median_equalization_intersection, quantile, global_linear, global_loess, local_linear, local_loess. Data should be always log2 transformed first. |
 | `normalization.reference_tag` | tag for median_normalization_by_tag. Looks for matches in the fasta_column, fails if column not defined. Default: null. |
 | `normalization.loess_span` | LOESS smoothing span for loess normalizations. Default: 0.9. |
 
@@ -140,7 +141,8 @@ Can be used to inject an additional .tsv/.csv/.parquet dataset.
 |------|------------|
 | `imputation.method` | Imputation method. Options include lc_conmed, mean, median, knn, tnknn, mindet, minprob, randomforest. Required in all analysis types except pelsa. |
 | `imputation.lc_conmed_lod_k` | Number of lowest global datapoints to estimate LOD. Default: 10. |
-| `imputation.lc_conmed_in_min_obs` | Min. number of observations per condition to use MAR (left-censoring) instead of MNAR (conditional median). Default : 1. |
+| `imputation.lc_conmed_in_min_obs` | Min. number of observations per condition to use MNAR (left-censoring) instead of MAR (conditional median). Default : 1. |
+| `imputation.lc_conmed_frac_min_obs` | Min. fraction of observations per condition to use MNAR (left-censoring) instead of MAR (conditional median). Requires imputation.lc_conmed_in_min_obs to be set to null. Default : null. |
 | `imputation.lc_conmed_lc_shift` | Shift below LOD for MNAR estimation. Default: 0.20. |
 | `imputation.lc_conmed_lc_sd_width` | Jitter width for MNAR estimation. Default: 0.05. |
 | `imputation.lc_conmed_jitter_frac` | Multiplier of pooled SD for MAR estimation. Default: 0.20. |
@@ -191,6 +193,21 @@ Can be used to inject an additional .tsv/.csv/.parquet dataset.
 | `pelsa.bounds.back` | Lower and upper bounds for the right/back plateau in log2-ratio units. Must span `0`. Example: `[-15.0, 15.0]`. |
 | `pelsa.bounds.pec50_margin_log10` | Allowed pEC50 margin outside the observed log10 concentration range. `0.0` keeps pEC50 within the measured range. |
 | `pelsa.bounds.response_margin_fraction` | Extra margin allowed around the observed response range when bounding plateaus. `0.0` keeps plateaus inside the observed response range. |
+| `kinase_activity.method` | Kinase activity method. Currently supported: `"ksea"`. |
+| `kinase_activity.min_substrates` | Minimum number of matched phosphosites with usable values required to test a kinase in a contrast. Default: `5`. |
+| `kinase_activity.substrate_database` | Path or ordered list of paths to kinase–substrate databases. Relationships are combined and deduplicated (first relationship kept); database order does not add statistical weight. |
+| `kinase_activity.database_columns` | Maps the standardized KSEA fields below to column names shared by the configured database files. |
+| `kinase_activity.database_columns.kinase` | Kinase name column; used as a fallback identifier when no gene or UniProt accession is available. |
+| `kinase_activity.database_columns.kinase_uniprot` | Kinase UniProt accession column. Kinase isoform suffixes are collapsed for activity scoring (e.g. `P27448-3` -> `P27448`). |
+| `kinase_activity.database_columns.kinase_gene` | Kinase gene-symbol column and preferred identity for kinase-level activity results. |
+| `kinase_activity.database_columns.substrate_uniprot` | Substrate UniProt accession column used for primary phosphosite matching. Substrate isoforms are retained. |
+| `kinase_activity.database_columns.substrate_site` | Substrate phosphorylation-site column in residue notation, such as `S473`, `T308` or `Y15`. |
+| `kinase_activity.database_columns.substrate_gene` | Substrate gene-symbol column, used with the site only when that database row has no substrate UniProt accession. |
+| `kinase_activity.database_columns.source` | Relationship source or provenance column displayed and exported with matched kinase–substrate assignments. |
+
+KSEA reports activity at the kinase-gene level. Accession-only kinase rows are assigned to a gene when the mapping is unambiguous; otherwise the normalized accession is retained. Substrates are matched using UniProt accession + site, with gene + site used only as a fallback when the accession is missing.
+
+Duplicate kinase–substrate-site relationships within or across databases contribute only once, while all database sources are retained.
 
 ---
 
