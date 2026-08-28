@@ -152,5 +152,3 @@ If you use ProteoFlux in your work, please cite:
 
 ProteoFlux (latest version).  
 Zenodo. https://doi.org/10.5281/zenodo.18640998
-
-A peer-reviewed publication is currently under submission.
