@@ -500,17 +500,17 @@ def run_clustering(
     sc.tl.pca(E, n_comps=n_comps)
     adata.uns[UNS_PCA] = E.uns.get("pca", {})
 
-    # Neighbors on PCA space
-    if "neighbors" not in E.uns:
-        nn = int(round(E.n_obs ** 0.5))
-        nn = max(10, min(30, nn))
-        nn = min(nn, E.n_obs - 1)
-        sc.pp.neighbors(E, n_neighbors=nn, use_rep="X_pca")
-
-    # UMAP (exported for the viewer toggle)
+    # Neighbors and UMAP are not meaningful for tiny pilot datasets. In
+    # particular, n_neighbors=1 leaves no columns after Scanpy removes each
+    # observation's self-neighbor and crashes while constructing the graph.
     if umap_kwargs is None:
         umap_kwargs = {}
     if not small_n:
+        if "neighbors" not in E.uns:
+            nn = int(round(E.n_obs ** 0.5))
+            nn = max(10, min(30, nn))
+            nn = min(nn, E.n_obs - 1)
+            sc.pp.neighbors(E, n_neighbors=nn, use_rep="X_pca")
         try:
             sc.tl.umap(E, **umap_kwargs)
         except Exception:
