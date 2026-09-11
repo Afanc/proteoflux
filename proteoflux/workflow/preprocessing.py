@@ -767,6 +767,10 @@ class Preprocessor:
         }
         if self.analysis_type in {"phospho", "pelsa"}:
             keep_cols.update({"PARENT_PEPTIDE_ID", "PARENT_PROTEIN"})
+        if self.analysis_type == "phospho":
+            # Compact, accession-aligned site identities are required for
+            # correct multi-protein-group KSEA matching and FASTA lookup.
+            keep_cols.update({"ACCESSION_SITES"})
         if self.analysis_type == "pelsa":
             keep_cols.update({"PEPTIDE_START", "PEPTIDE_END", "PEPTIDE_LENGTH"})
         if self.analysis_type != "proteomics":
@@ -2199,4 +2203,3 @@ class Preprocessor:
             log_info(
                 "Covariate centering: per-feature median across all samples applied."
             )
-

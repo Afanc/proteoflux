@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 from proteoflux.analysis.stats_ops import bh_qvalues
+from proteoflux.analysis.kinase_sequences import parse_accession_sites
 from proteoflux.utils.utils import log_info, log_time, log_warning
 from scipy.stats import norm
 
@@ -174,10 +175,7 @@ def _parse_config(config: dict) -> dict[str, Any] | None:
 
     method = str(method).strip().lower()
     if method != "ksea":
-        raise ValueError(
-            "analysis.kinase_activity.method currently supports only 'ksea'; "
-            f"received {method!r}."
-        )
+        return None
 
     database_value = kinase_cfg.get("substrate_database")
     if isinstance(database_value, (str, Path)):
@@ -782,102 +780,89 @@ def _build_feature_site_table(adata: ad.AnnData) -> tuple[pd.DataFrame, int]:
         if gene_column is not None
         else [""] * n_features
     )
+    compact_values = (
+        [_scalar_text(value) for value in adata.var["ACCESSION_SITES"].tolist()]
+        if "ACCESSION_SITES" in adata.var.columns
+        else [""] * n_features
+    )
 
-    def identifier_list(column: str) -> pl.Expr:
-        return (
-            pl.col(column)
-            .str.split(";")
-            .list.eval(pl.element().str.strip_chars().str.to_uppercase())
-            .list.filter(
-                pl.element().ne("")
-                & ~pl.element().is_in(sorted(_MISSING_IDENTIFIER_TOKENS))
+    def identifiers(value: str) -> list[str]:
+        return list(
+            dict.fromkeys(
+                item.strip().upper()
+                for item in value.split(";")
+                if item.strip().upper() not in _MISSING_IDENTIFIER_TOKENS
             )
-            .list.unique()
-            .list.sort()
         )
 
-    features = pl.DataFrame(
-        {
-            "feature_index": np.arange(n_features, dtype=np.int64),
-            "phosphosite_id": feature_names,
-            "_parent_value": parent_values,
-            "_gene_value": gene_values,
-        }
-    ).with_columns(
-        pl.col("phosphosite_id")
-        .str.extract(r"^(.*)\|([^|]+)$", group_index=1)
-        .fill_null("")
-        .str.strip_chars()
-        .alias("_index_parent"),
-        pl.col("phosphosite_id")
-        .str.extract(r"^(.*)\|([^|]+)$", group_index=2)
-        .fill_null("")
-        .str.strip_chars()
-        .str.to_uppercase()
-        .alias("site"),
-    )
-    features = features.with_columns(
-        pl.when(pl.col("_parent_value").ne(""))
-        .then(pl.col("_parent_value"))
-        .otherwise(pl.col("_index_parent"))
-        .alias("_parent_value"),
-    ).with_columns(
-        identifier_list("_parent_value").alias("_accessions"),
-        identifier_list("_gene_value").alias("_genes"),
-    ).with_columns(
-        pl.col("_accessions").list.join(";").alias("_parent_accessions")
-    )
+    rows: list[dict[str, Any]] = []
+    valid_feature_indices: set[int] = set()
+    for feature_index, (feature, parent_value, gene_value, compact_value) in enumerate(
+        zip(feature_names, parent_values, gene_values, compact_values)
+    ):
+        mappings = parse_accession_sites(compact_value)
+        index_parent, separator, legacy_site = feature.rpartition("|")
+        legacy_match = _SITE_RE.fullmatch(legacy_site.strip()) if separator else None
+        parent_accessions = identifiers(parent_value or index_parent)
+        if not mappings and legacy_match is not None:
+            mappings = [
+                (accession, legacy_match.group(0).upper()[0], int(legacy_match.group(0)[1:]))
+                for accession in parent_accessions
+            ]
+        if not mappings:
+            continue
 
-    valid = (
-        pl.col("site").str.contains(r"^[STY]\d+$")
-        & (
-            pl.col("_accessions").list.len().gt(0)
-            | pl.col("_genes").list.len().gt(0)
-        )
-    )
-    valid_features = features.filter(valid)
-    invalid_features = int(n_features - valid_features.height)
+        valid_feature_indices.add(feature_index)
+        for accession, amino_acid, position in mappings:
+            site = f"{amino_acid}{position}"
+            rows.append(
+                {
+                    "feature_index": feature_index,
+                    "phosphosite_id": feature,
+                    "substrate_match_type": "uniprot",
+                    "substrate_id": accession,
+                    "matched_accession": accession,
+                    "site": site,
+                }
+            )
 
-    accessions = (
-        valid_features.select(
-            "feature_index",
-            "phosphosite_id",
-            "site",
-            pl.col("_accessions").alias("substrate_id"),
-        )
-        .explode("substrate_id")
-        .filter(pl.col("substrate_id").is_not_null())
-        .with_columns(
-            pl.lit("uniprot").alias("substrate_match_type"),
-            pl.col("substrate_id").alias("matched_accession"),
-        )
-    )
-    genes = (
-        valid_features.select(
-            "feature_index",
-            "phosphosite_id",
-            "site",
-            "_parent_accessions",
-            pl.col("_genes").alias("substrate_id"),
-        )
-        .explode("substrate_id")
-        .filter(pl.col("substrate_id").is_not_null())
-        .with_columns(
-            pl.lit("gene").alias("substrate_match_type"),
-            pl.col("_parent_accessions").alias("matched_accession"),
-        )
-        .drop("_parent_accessions")
-    )
+        genes = identifiers(gene_value)
+        mapping_by_accession: dict[str, list[tuple[str, int]]] = {}
+        for accession, amino_acid, position in mappings:
+            mapping_by_accession.setdefault(accession, []).append((amino_acid, position))
 
-    feature_sites = pl.concat(
-        [accessions.select(columns), genes.select(columns)],
-        how="vertical_relaxed",
-        rechunk=False,
-    )
-    return (
-        pd.DataFrame(feature_sites.to_dict(as_series=False), columns=columns),
-        invalid_features,
-    )
+        gene_site_rows: list[tuple[str, str, str]] = []
+        if genes and len(genes) == len(parent_accessions):
+            # Protein-group gene/accession lists are positionally aligned.
+            for gene, accession in zip(genes, parent_accessions):
+                for amino_acid, position in mapping_by_accession.get(accession, []):
+                    gene_site_rows.append((gene, f"{amino_acid}{position}", accession))
+        elif len(genes) == 1:
+            # One gene can legitimately have several accession/isoform mappings.
+            for accession, amino_acid, position in mappings:
+                gene_site_rows.append((genes[0], f"{amino_acid}{position}", accession))
+        elif genes and len({f"{aa}{position}" for _, aa, position in mappings}) == 1:
+            # A shared absolute site is safe even if list alignment is unavailable.
+            site = f"{mappings[0][1]}{mappings[0][2]}"
+            for gene in genes:
+                gene_site_rows.append(
+                    (gene, site, ";".join(accession for accession, _, _ in mappings))
+                )
+
+        for gene, site, matched_accession in dict.fromkeys(gene_site_rows):
+            rows.append(
+                {
+                    "feature_index": feature_index,
+                    "phosphosite_id": feature,
+                    "substrate_match_type": "gene",
+                    "substrate_id": gene,
+                    "matched_accession": matched_accession,
+                    "site": site,
+                }
+            )
+
+    feature_sites = pd.DataFrame(rows, columns=columns).drop_duplicates(ignore_index=True)
+    return feature_sites, int(n_features - len(valid_feature_indices))
 
 
 def _match_substrates(

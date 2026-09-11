@@ -743,6 +743,109 @@ class DataHarmonizer:
         )
 
     @staticmethod
+    def _modified_phospho_positions(sequence: str | None) -> str:
+        """Return peptide-local positions explicitly phosphorylated in a modified sequence.
+
+        PTM_POSITIONS_STR contains localization *candidates* (including zero-probability
+        sites), so it cannot be used to mark co-phosphorylated residues for PhosX. The
+        modified peptide sequence is the authoritative phosphoform representation.
+        """
+        if sequence is None:
+            return ""
+
+        text = str(sequence).strip()
+        if not text:
+            return ""
+
+        residue_position = 0
+        last_residue_position: int | None = None
+        last_residue = ""
+        phospho_positions: list[int] = []
+        index = 0
+        while index < len(text):
+            char = text[index]
+            if char.isalpha():
+                residue_position += 1
+                last_residue_position = residue_position
+                last_residue = char.upper()
+                index += 1
+                continue
+
+            if char in {"[", "("}:
+                closing = "]" if char == "[" else ")"
+                depth = 1
+                end = index + 1
+                while end < len(text) and depth:
+                    if text[end] == char:
+                        depth += 1
+                    elif text[end] == closing:
+                        depth -= 1
+                    end += 1
+                if depth:
+                    break
+                annotation = text[index + 1 : end - 1].casefold()
+                if (
+                    "phospho" in annotation
+                    and last_residue_position is not None
+                    and last_residue in {"S", "T", "Y"}
+                ):
+                    phospho_positions.append(last_residue_position)
+                index = end
+                continue
+            index += 1
+
+        return ";".join(str(value) for value in dict.fromkeys(phospho_positions))
+
+    @staticmethod
+    def _accession_sites_for_local_position(values: dict) -> str:
+        """Build aligned ``ACCESSION:SITE`` pairs for one peptide-local site."""
+        accessions = [
+            item.strip().upper()
+            for item in str(values.get("UNIPROT") or "").split(";")
+            if item.strip()
+        ]
+        starts_raw = str(values.get("PEPTIDE_STARTS") or "")
+        locations_raw = str(values.get("PTM_PROTEINLOCATIONS") or "")
+        canonical_site = str(values.get("CANONICAL_SITE") or "").strip().upper()
+        try:
+            local_position = int(values.get("SITE_POS"))
+        except (TypeError, ValueError):
+            local_position = -1
+
+        starts: list[int | None] = []
+        for item in starts_raw.split(";"):
+            try:
+                starts.append(int(float(item.strip())))
+            except (TypeError, ValueError):
+                starts.append(None)
+        location_groups = [item.strip() for item in locations_raw.split(";")]
+
+        pairs: list[str] = []
+        aligned = (
+            bool(accessions)
+            and len(starts) == len(accessions)
+            and len(location_groups) == len(accessions)
+        )
+        if aligned:
+            for accession, peptide_start, location_group in zip(
+                accessions, starts, location_groups
+            ):
+                if peptide_start is None:
+                    continue
+                for amino_acid, absolute_position in re.findall(
+                    r"([STY])(\d+)", location_group.upper()
+                ):
+                    if int(absolute_position) - peptide_start + 1 == local_position:
+                        pairs.append(f"{accession}:{amino_acid}{absolute_position}")
+
+        # A single-accession row is unambiguous even when a vendor did not
+        # serialize PEPTIDE_START/PTM locations as aligned lists.
+        if not pairs and len(accessions) == 1 and re.fullmatch(r"[STY]\d+", canonical_site):
+            pairs.append(f"{accessions[0]}:{canonical_site}")
+
+        return ";".join(dict.fromkeys(pairs))
+
+    @staticmethod
     def _coerce_scalar_float(v):
         """Coerce semicolon-delimited or list-like values to a single float (deterministic)."""
         if v is None:
@@ -966,6 +1069,12 @@ class DataHarmonizer:
         )
 
         df = df.with_columns(
+            pl.col("PEPTIDE_LSEQ")
+            .map_elements(self._modified_phospho_positions, return_dtype=pl.Utf8)
+            .alias("PHOSPHOFORM_POSITIONS")
+        )
+
+        df = df.with_columns(
             pl.when(
                 pl.col("PTM_PROBS_STR").is_not_null()
                 & (pl.col("PTM_PROBS_STR").cast(pl.Utf8).str.strip_chars() != "")
@@ -1029,6 +1138,8 @@ class DataHarmonizer:
             df.with_columns(
                 pl.col("PTM_PROTEINLOCATIONS")
                   .cast(pl.Utf8)
+                  .str.split(";")
+                  .list.get(0, null_on_oob=True)
                   .str.extract_all(r"[STY]\d+")
                   .alias("_prot_sites")
             )
@@ -1057,6 +1168,20 @@ class DataHarmonizer:
                 on=["_ROW_ID", "SITE_POS"],
                 how="inner",
             )
+            .with_columns(
+                pl.struct(
+                    pl.col("UNIPROT"),
+                    pl.col("_PEPTIDE_STARTS_STR").alias("PEPTIDE_STARTS"),
+                    pl.col("PTM_PROTEINLOCATIONS"),
+                    pl.col("_prot_sites").alias("CANONICAL_SITE"),
+                    pl.col("SITE_POS"),
+                )
+                .map_elements(
+                    self._accession_sites_for_local_position,
+                    return_dtype=pl.Utf8,
+                )
+                .alias("ACCESSION_SITES")
+            )
         )
 
         # RETAIN policy: collect matched sites back into one composite row.
@@ -1070,6 +1195,7 @@ class DataHarmonizer:
                 pl.col("_prot_sites").alias("_prot_sites_kept"),
                 pl.col("SITE_POS").alias("_site_pos_kept"),
                 pl.col("LOC_PROB").alias("_site_prob_kept"),
+                pl.col("ACCESSION_SITES").unique().sort().alias("_accession_sites_kept"),
             )
 
             dfk = (
@@ -1084,6 +1210,9 @@ class DataHarmonizer:
                   .list.eval(pl.element().cast(pl.Utf8))
                   .list.join(",")
                   .alias("_site_pos_joined"),
+                pl.col("_accession_sites_kept")
+                  .list.join(";")
+                  .alias("ACCESSION_SITES"),
                 # scalar LOC_PROB for downstream: use the MAX across kept sites.
                     pl.col("_site_prob_kept").list.min().alias("LOC_PROB"),
                 )
@@ -1105,6 +1234,7 @@ class DataHarmonizer:
                     "_prot_sites_kept",
                     "_site_pos_kept",
                     "_site_prob_kept",
+                    "_accession_sites_kept",
                     "_prot_sites_joined",
                     "_site_pos_joined",
                 ],
@@ -1184,6 +1314,14 @@ class DataHarmonizer:
 
         df = self._standardize_then_inject(df)
         df = self._coerce_meta_floats(df)
+        if self.analysis_type == "phospho" and "PEPTIDE_START" in df.columns:
+            # Preserve accession-aligned starts before the legacy scalar column
+            # is normalised for existing downstream consumers.
+            df = df.with_columns(
+                pl.col("PEPTIDE_START")
+                .cast(pl.Utf8, strict=False)
+                .alias("_PEPTIDE_STARTS_STR")
+            )
         df = self._coerce_peptide_positions(df)
 
         if self.convert_numeric_ptms and ("PEPTIDE_LSEQ" in df.columns):

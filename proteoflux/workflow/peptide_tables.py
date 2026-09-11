@@ -457,6 +457,7 @@ def build_peptide_tables(
                 pl.col("FILENAME"),
                 pl.col("SIGNAL"),
                 pl.col("CHARGE"),
+                pl.col("PHOSPHOFORM_POSITIONS"),
             )
             .drop_nulls(["SITE_ID", "PEPTIDE_INDEX", "CHARGE"])
             .with_columns(
@@ -505,8 +506,23 @@ def build_peptide_tables(
     if analysis == "phospho":
         prec_id_map = (
             prec_base
-            .select(["PREC_ID", "SITE_ID", "PEPTIDE_INDEX", "CHARGE"])
-            .unique(subset=["PREC_ID"], maintain_order=True)
+            .group_by("PREC_ID", maintain_order=True)
+            .agg(
+                pl.col("SITE_ID").first(),
+                pl.col("PEPTIDE_INDEX").first(),
+                pl.col("CHARGE").first(),
+                pl.col("PHOSPHOFORM_POSITIONS")
+                .drop_nulls()
+                .unique()
+                .sort()
+                .alias("_phosphoform_variants"),
+            )
+            .with_columns(
+                pl.col("_phosphoform_variants")
+                .list.join("|")
+                .alias("PHOSPHOFORM_POSITIONS")
+            )
+            .drop("_phosphoform_variants")
         )
     else:
         prec_id_map = (
@@ -517,7 +533,15 @@ def build_peptide_tables(
 
     prec_wide = prec_pivot.join(prec_id_map, on="PREC_ID", how="left")
 
-    id_cols = {"PREC_ID", "INDEX", "PEPTIDE_SEQ", "CHARGE", "SITE_ID", "PEPTIDE_INDEX"}
+    id_cols = {
+        "PREC_ID",
+        "INDEX",
+        "PEPTIDE_SEQ",
+        "CHARGE",
+        "SITE_ID",
+        "PEPTIDE_INDEX",
+        "PHOSPHOFORM_POSITIONS",
+    }
     prec_sample_cols = [
         c
         for c, dt in zip(prec_wide.columns, prec_wide.dtypes)
@@ -574,4 +598,3 @@ def build_peptide_tables(
         )
 
     return pep_wide, pep_centered
-

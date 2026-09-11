@@ -13,6 +13,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Tuple
 from proteoflux.utils.utils import logger, log_time
+from proteoflux.analysis.kinase_sequences import kinase_tenmer_export_table
 from importlib.metadata import version as _pkg_version, PackageNotFoundError
 
 
@@ -222,6 +223,9 @@ class DEExporter:
                 "PEPTIDE_START",
                 "PEPTIDE_END",
                 "PEPTIDE_LENGTH",
+                "ACCESSION_SITES",
+                "KINASE_10MER",
+                "KINASE_10MER_SOURCE",
             ]
             if c in ad.var.columns
         ]
@@ -486,7 +490,7 @@ class DEExporter:
         if is_phospho:
             if "PARENT_PEPTIDE_ID" in ad.var.columns and "PARENT_PEPTIDE_ID" not in summary_df.columns:
                 summary_df.insert(0, "PARENT_PEPTIDE_ID", ad.var["PARENT_PEPTIDE_ID"])
-            order = [c for c in ["PARENT_PEPTIDE_ID", "PARENT_PROTEIN", "GENE_NAMES", "FASTA_HEADERS", "PROTEIN_DESCRIPTIONS"] if c in summary_df.columns]
+            order = [c for c in ["PARENT_PEPTIDE_ID", "PARENT_PROTEIN", "ACCESSION_SITES", "KINASE_10MER", "KINASE_10MER_SOURCE", "GENE_NAMES", "FASTA_HEADERS", "PROTEIN_DESCRIPTIONS"] if c in summary_df.columns]
             other = [c for c in summary_df.columns if c not in order]
             summary_df = summary_df[order + other]
 
@@ -494,7 +498,7 @@ class DEExporter:
             # RAW stats -> ADJUSTED stats -> covariate part -> observed/consistency -> intensities -> locscore -> FT
             cols = list(summary_df.columns)
 
-            meta = [c for c in ["PARENT_PEPTIDE_ID", "PARENT_PROTEIN", "GENE_NAMES", "FASTA_HEADERS", "PROTEIN_DESCRIPTIONS", "PARENT_PROTEIN_UNIPROT_AC"] if c in cols]
+            meta = [c for c in ["PARENT_PEPTIDE_ID", "PARENT_PROTEIN", "PARENT_PROTEIN_UNIPROT_AC", "ACCESSION_SITES", "KINASE_10MER", "KINASE_10MER_SOURCE", "GENE_NAMES", "FASTA_HEADERS", "PROTEIN_DESCRIPTIONS"] if c in cols]
 
             raw_fc = [c for c in cols if c.startswith("RAW_log2FC_")]
             raw_p  = [c for c in cols if c.startswith("RAW_PVALUE_")]
@@ -573,6 +577,7 @@ class DEExporter:
 
         # Peptide tables
         pep_wide_df, pep_centered_df = self._peptide_frames()
+        kinase_tenmers = kinase_tenmer_export_table(ad) if is_phospho else None
 
         # proper indexing
         for df_ in (id_qval, id_pep, spectral_counts, ibaq):
@@ -606,7 +611,12 @@ class DEExporter:
             "- Identification Qvalue: PSM-level q-values from the search engine, if available.\n"
             "- Identification PEP: posterior error probability from the search engine, if available.\n"
             f"{spectral_counts_desc}"
-            "- Peptides (raw): wide peptide-by-sample matrix, if available.\n"
+            + (
+                "- Kinase 10-mers: phosphosite windows (-5..+4), source, known-residue count, and expanded positions.\n"
+                if is_phospho and kinase_tenmers is not None
+                else ""
+            )
+            + "- Peptides (raw): wide peptide-by-sample matrix, if available.\n"
         )
 
         # Tables to export
@@ -616,6 +626,7 @@ class DEExporter:
             "Identification PEP": id_pep if id_pep is not None else None,
             "Spectral Counts": spectral_counts if spectral_counts is not None else None,
             "IBAQ Values": ibaq if ibaq is not None else None,
+            "Kinase 10-mers": kinase_tenmers,
             "Peptides (raw)": (
                 None
                 if str(preproc.get("analysis_type", "proteomics")).lower() in {"phospho", "pelsa"}
@@ -633,22 +644,26 @@ class DEExporter:
     @log_time("Exporting .h5ad")
     def export_adata(self, h5ad_path: str) -> None:
         """Write a compact .h5ad with categorical metadata and summarized preprocessing config."""
+        # AnnData's default string-to-categorical conversion mutates the object
+        # being written. Keep the in-memory analysis untouched because table and
+        # PDF exports may still follow this write.
+        output = self.adata.copy()
         for col in ["CONDITION", "GENE_NAMES", "PROTEIN_DESCRIPTIONS",
                     "FASTA_HEADERS", "ASSAY", "PARENT_PEPTIDE_ID", "PARENT_PROTEIN",
                     "CONDITION_ORIG", "ALIGN_KEY", "UNIPROT"]:
-            if col in self.adata.obs.columns:
-                self.adata.obs[col] = self.adata.obs[col].astype("category")
-            if col in self.adata.var.columns:
-                self.adata.var[col] = self.adata.var[col].astype("category")
+            if col in output.obs.columns:
+                output.obs[col] = output.obs[col].astype("category")
+            if col in output.var.columns:
+                output.var[col] = output.var[col].astype("category")
 
-        analysis_meta = self.adata.uns.get("analysis", {}) or {}
+        analysis_meta = output.uns.get("analysis", {}) or {}
         for col in analysis_meta.get("batch_effect_columns", []) or []:
-            if col in self.adata.obs.columns:
-                series = self.adata.obs[col]
+            if col in output.obs.columns:
+                series = output.obs[col]
                 if not pd.api.types.is_numeric_dtype(series):
-                    self.adata.obs[col] = series.astype("category")
+                    output.obs[col] = series.astype("category")
 
-        meta = self.adata.uns.get("proteoflux", {})
+        meta = output.uns.get("proteoflux", {})
 
         if not isinstance(meta, dict):
             meta = {}
@@ -658,7 +673,7 @@ class DEExporter:
             pf_version = "0+unknown"
         meta.setdefault("pf_version", pf_version)
         meta.setdefault("created_at", datetime.now().isoformat(timespec="seconds") + "Z")
-        self.adata.uns["proteoflux"] = meta
+        output.uns["proteoflux"] = meta
 
         def _strip_values(d):
             if isinstance(d, dict) and "values" in d:
@@ -669,7 +684,7 @@ class DEExporter:
                     d["values_count"] = None
                 d.pop("values", None)
 
-        pre = self.adata.uns.get("preprocessing", {})
+        pre = output.uns.get("preprocessing", {})
         flt = (pre or {}).get("filtering", {})
 
         for key in ("cont", "qvalue", "pep", "prec", "meta_cont", "meta_qvalue", "meta_pep", "meta_prec"):
@@ -677,4 +692,8 @@ class DEExporter:
             _strip_values(sub)
 
         with ad.settings.override(allow_write_nullable_strings=True):
-            self.adata.write(h5ad_path, compression="gzip")
+            output.write(
+                h5ad_path,
+                compression="gzip",
+                convert_strings_to_categoricals=False,
+            )

@@ -651,6 +651,18 @@ class Dataset:
         prec_cent_mat = dfs_ir.get("precursors_centered")
 
         if (prec_wide_mat is not None) and (prec_cent_mat is not None):
+            if self.analysis_type == "phospho":
+                # Precursor tables are assembled before localization filtering.
+                # Keep their rows strictly aligned to the retained AnnData
+                # features so dropped sites cannot survive as orphan records.
+                retained_sites = self.adata.var_names.astype(str).tolist()
+                prec_wide_mat = prec_wide_mat.filter(
+                    pl.col("SITE_ID").is_in(retained_sites)
+                )
+                prec_cent_mat = prec_cent_mat.filter(
+                    pl.col("SITE_ID").is_in(retained_sites)
+                )
+
             prec_cols = [c for c in sample_names if c in prec_wide_mat.columns]
             use_cols_pw = ["PREC_ID"] + prec_cols
             use_cols_pc = ["PREC_ID"] + prec_cols
@@ -667,7 +679,13 @@ class Dataset:
             assert list(prec_idx) == list(prec_idx2)
 
             if self.analysis_type == "phospho":
-                meta_cols = ["PREC_ID", "SITE_ID", "PEPTIDE_INDEX", "CHARGE"]
+                meta_cols = [
+                    "PREC_ID",
+                    "SITE_ID",
+                    "PEPTIDE_INDEX",
+                    "CHARGE",
+                    "PHOSPHOFORM_POSITIONS",
+                ]
             else:
                 meta_cols = ["PREC_ID", "INDEX", "PEPTIDE_SEQ", "CHARGE"]
 
@@ -681,7 +699,8 @@ class Dataset:
 
             if prec_meta.isna().any().any():
                 # reindex introduces NaNs if a PREC_ID is missing; fail-fast with examples
-                miss = prec_meta.index[prec_meta["INDEX"].isna()].astype(str).tolist()[:10]
+                required_meta = "SITE_ID" if self.analysis_type == "phospho" else "INDEX"
+                miss = prec_meta.index[prec_meta[required_meta].isna()].astype(str).tolist()[:10]
                 raise ValueError(f"Missing precursor metadata for PREC_ID (examples={miss})")
 
             # hard shape invariants (run-or-crash)
@@ -695,6 +714,9 @@ class Dataset:
             if self.analysis_type == "phospho":
                 prec_protein_index = prec_meta["SITE_ID"].astype(str).tolist()
                 prec_seq = prec_meta["PEPTIDE_INDEX"].astype(str).tolist()
+                prec_phosphoforms = (
+                    prec_meta["PHOSPHOFORM_POSITIONS"].fillna("").astype(str).tolist()
+                )
             else:
                 prec_protein_index = prec_meta["INDEX"].astype(str).tolist()
                 prec_seq = prec_meta["PEPTIDE_SEQ"].astype(str).tolist()
@@ -709,6 +731,8 @@ class Dataset:
                 "raw": np.asarray(prec_raw, dtype=np.float32),
                 "centered": np.asarray(prec_cent, dtype=np.float32),
             }
+            if self.analysis_type == "phospho":
+                self.adata.uns["precursors"]["phosphoform_positions"] = prec_phosphoforms
 
         # Analysis parameters
         self.adata.uns["analysis"] = {
@@ -870,4 +894,3 @@ if __name__ == "__main__":
 
     adata = dataset.get_anndata()
     print(adata)
-
