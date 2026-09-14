@@ -638,7 +638,15 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     """
 
     injected_runs = (config or {}).get("dataset", {}).get("inject_runs") or {}
-    has_covariate_cfg = any(bool(run.get("is_covariate")) for _, run in injected_runs.items())
+    has_covariate_cfg = any(
+        isinstance(run, dict)
+        and bool(run.get("is_covariate"))
+        and (
+            bool(run.get("input_file"))
+            or run.get("reuse_main_input_file") is True
+        )
+        for run in injected_runs.values()
+    )
 
     # Read design & detect pilot mode (≤1 replicate for a condition)
     obs = adata.obs.copy()

@@ -48,6 +48,7 @@ class Dataset:
         )
 
         self.inject_runs_cfg: dict = dataset_cfg.get("inject_runs", {}) or {}
+        self._validate_injected_run_config()
 
         # Preprocessing config and setup
         preprocessing_cfg = deepcopy(kwargs.get("preprocessing", {}) or {})
@@ -75,7 +76,14 @@ class Dataset:
         cov_assays = [
             str(name)
             for name, cfg in (self.inject_runs_cfg or {}).items()
-            if cfg and bool(cfg.get("is_covariate", False))
+            if (
+                cfg
+                and bool(cfg.get("is_covariate", False))
+                and (
+                    bool(cfg.get("input_file"))
+                    or cfg.get("reuse_main_input_file") is True
+                )
+            )
         ]
 
         cov_block = deepcopy(preprocessing_cfg.get("covariates", {}) or {})
@@ -115,8 +123,89 @@ class Dataset:
     def is_phospho(self) -> bool:
         return self.analysis_type == "phospho"
 
+    def _validate_injected_run_config(self) -> None:
+        """Validate file-backed and same-input injected-run sources."""
+        if not isinstance(self.inject_runs_cfg, dict):
+            raise ValueError("dataset.inject_runs must be a mapping or null.")
+
+        reused_assays: list[str] = []
+        active_covariates: list[str] = []
+
+        for inject_name, inject_cfg in self.inject_runs_cfg.items():
+            if inject_cfg is None:
+                continue
+            if not isinstance(inject_cfg, dict):
+                raise ValueError(
+                    f"dataset.inject_runs.{inject_name} must be a mapping or null."
+                )
+
+            reuse_value = inject_cfg.get("reuse_main_input_file", False)
+            if not isinstance(reuse_value, bool):
+                raise ValueError(
+                    f"dataset.inject_runs.{inject_name}.reuse_main_input_file "
+                    "must be true or false."
+                )
+
+            input_file = inject_cfg.get("input_file")
+            has_input_file = input_file not in (None, "")
+            is_covariate = bool(inject_cfg.get("is_covariate", False))
+            if is_covariate and (has_input_file or reuse_value):
+                active_covariates.append(str(inject_name))
+
+            if not reuse_value:
+                continue
+
+            reused_assays.append(str(inject_name))
+            if has_input_file:
+                raise ValueError(
+                    f"dataset.inject_runs.{inject_name} cannot set both "
+                    "input_file and reuse_main_input_file: true."
+                )
+            if not self.is_phospho:
+                raise ValueError(
+                    "reuse_main_input_file is available only for phosphoproteomics."
+                )
+            if str(self.input_layout).strip().lower() != "long":
+                raise ValueError(
+                    "reuse_main_input_file currently requires dataset.input_layout: long."
+                )
+            if not is_covariate:
+                raise ValueError(
+                    f"dataset.inject_runs.{inject_name}.is_covariate must be true "
+                    "when reuse_main_input_file is enabled."
+                )
+            indexing_type = normalize_analysis_type(
+                inject_cfg.get("indexing_type", "peptidomics")
+            )
+            if indexing_type != "peptidomics":
+                raise ValueError(
+                    f"dataset.inject_runs.{inject_name}.indexing_type must be "
+                    "'peptidomics' when reuse_main_input_file is enabled."
+                )
+            if not self._dataset_cfg_original.get("ptm_sites_column"):
+                raise ValueError(
+                    "reuse_main_input_file requires dataset.ptm_sites_column so "
+                    "phosphorylated and nonphosphorylated rows can be separated."
+                )
+
+        if len(reused_assays) > 1:
+            raise ValueError(
+                "Only one injected run may reuse the main input file. "
+                f"Configured assays: {reused_assays}."
+            )
+        if reused_assays and len(active_covariates) > 1:
+            raise ValueError(
+                "The same-input protein background cannot be combined with a "
+                "separate covariate input. Configure only one covariate source."
+            )
+
     @log_time("Runs Injection")
-    def _load_injected_runs(self) -> list[pl.DataFrame]:
+    def _load_injected_runs(
+        self,
+        *,
+        main_input: pl.DataFrame,
+        main_table: pl.DataFrame,
+    ) -> list[pl.DataFrame]:
         """Load, harmonize, and tag each configured injected run."""
 
         frames = []
@@ -124,39 +213,49 @@ class Dataset:
         for inject_name, inject_cfg in self.inject_runs_cfg.items():
             if not inject_cfg:
                 continue
+            reuse_main = inject_cfg.get("reuse_main_input_file") is True
             fpath = inject_cfg.get("input_file")
-            if not fpath:
-                # null path → skip cleanly
+            if reuse_main:
+                df_inj = main_input
+            elif fpath:
+                df_inj = self._load_rawdata(fpath)
+            else:
                 continue
 
-            # 1) load raw (same as primary)
-            df_inj = self._load_rawdata(fpath)
-
-            # 2) build a per-injection harmonizer config
-            #    start from the original dataset section so column mappings are identical by default
+            # Start from the main dataset mappings so injected inputs use the
+            # same canonical column names unless an override is configured.
             eff_cfg = deepcopy(self._dataset_cfg_original)
             eff_cfg["input_layout"] = inject_cfg.get(
                 "input_layout", eff_cfg.get("input_layout", self.input_layout)
-            )
-            eff_cfg["analysis_type"] = normalize_analysis_type(
-                inject_cfg.get("analysis_type", self.analysis_type)
             )
 
             # Injected runs: analysis_type is used for *indexing strategy* (harmonizer),
             # not to redefine the main dataset analysis.
             idx_type = inject_cfg.get("indexing_type", None)
+            if idx_type is None:
+                idx_type = (
+                    "peptidomics"
+                    if reuse_main
+                    else inject_cfg.get("analysis_type", self.analysis_type)
+                )
 
             eff_cfg["analysis_type"] = normalize_analysis_type(idx_type)
 
-            eff_cfg["annotation_file"] = inject_cfg.get("annotation_file", None)
-
-            # Main and injected files usually use different filenames.
-            # Do not inherit dataset.exclude_runs into injected datasets.
-            eff_cfg["exclude_runs"] = inject_cfg.get("exclude_runs") or []
+            if reuse_main:
+                eff_cfg["annotation_file"] = inject_cfg.get(
+                    "annotation_file", eff_cfg.get("annotation_file")
+                )
+                # Derived rows must retain the same excluded-run universe as
+                # the corresponding phosphosite rows.
+                eff_cfg["exclude_runs"] = (
+                    self._dataset_cfg_original.get("exclude_runs") or []
+                )
+            else:
+                eff_cfg["annotation_file"] = inject_cfg.get("annotation_file", None)
+                # Separate inputs do not inherit exclusions from the main file.
+                eff_cfg["exclude_runs"] = inject_cfg.get("exclude_runs") or []
             eff_cfg["is_covariate_run"] = bool((inject_cfg or {}).get("is_covariate", False))
 
-            # This is the ONLY supported way to map different raw columns for injected runs
-            # while keeping the preprocessing code operating on canonical QVALUE/PEP/PRECURSORS_EXP.
             col_over = inject_cfg.get("column_overrides") or {}
             if col_over is not None and not isinstance(col_over, dict):
                 raise ValueError(
@@ -188,35 +287,127 @@ class Dataset:
                 )
             eff_cfg.update(col_over)
 
-            # Keep peptide identity normalization consistent with the main dataset:
-            # canonical source is preprocessing config.
+            # Keep peptide identity normalization consistent with the main dataset.
             eff_cfg["collapse_met_oxidation"] = bool(self.preprocessor.collapse_met_oxidation)
             eff_cfg["collapse_all_ptms"] = bool(self.preprocessor.collapse_all_ptms)
 
-            # 3) harmonize with its own annot (no cross-merge!)
             inj_harmonizer = DataHarmonizer(eff_cfg)
             df_inj = inj_harmonizer.harmonize(df_inj)
 
-            # 4) provenance tags (create THEN cast)
+            if reuse_main:
+                required_background_columns = {
+                    "FILENAME",
+                    "PARENT_PROTEIN",
+                    "PTM_SITES_STR",
+                }
+                missing_background_columns = sorted(
+                    required_background_columns - set(df_inj.columns)
+                )
+                if missing_background_columns:
+                    raise ValueError(
+                        "The reused main input is missing canonical background "
+                        f"columns: {missing_background_columns}. Check the dataset "
+                        "column mappings."
+                    )
+
+                rows_before = df_inj.height
+                normalized_sites = (
+                    pl.col("PTM_SITES_STR")
+                    .cast(pl.Utf8, strict=False)
+                    .fill_null("")
+                    .str.strip_chars()
+                    .str.to_lowercase()
+                )
+                df_inj = df_inj.filter(
+                    normalized_sites.is_in(["", "na", "nan", "none", "null"])
+                )
+                if df_inj.height == 0:
+                    raise ValueError(
+                        f"Injected run '{inject_name}' found no nonphosphorylated "
+                        "rows in the main input file."
+                    )
+
+                main_samples = set(
+                    main_table.get_column("FILENAME")
+                    .drop_nulls()
+                    .cast(pl.Utf8)
+                    .to_list()
+                )
+                background_samples = set(
+                    df_inj.get_column("FILENAME")
+                    .drop_nulls()
+                    .cast(pl.Utf8)
+                    .to_list()
+                )
+                missing_samples = sorted(main_samples - background_samples)
+                if missing_samples:
+                    raise ValueError(
+                        f"Injected run '{inject_name}' has no nonphosphorylated "
+                        "rows for main samples: "
+                        f"{missing_samples[:10]}"
+                        + (" ..." if len(missing_samples) > 10 else "")
+                    )
+
+                main_parents = set(
+                    main_table.get_column("PARENT_PROTEIN")
+                    .drop_nulls()
+                    .cast(pl.Utf8)
+                    .to_list()
+                )
+                background_parents = set(
+                    df_inj.get_column("PARENT_PROTEIN")
+                    .drop_nulls()
+                    .cast(pl.Utf8)
+                    .to_list()
+                )
+                matched_parents = main_parents & background_parents
+                if not matched_parents:
+                    raise ValueError(
+                        f"Injected run '{inject_name}' has no parent-protein "
+                        "overlap with the phosphosite table."
+                    )
+
+                safe_name = re.sub(
+                    r"[^A-Za-z0-9_]+", "_", str(inject_name)
+                ).strip("_") or "protein_background"
+                filename_suffix = f"__{safe_name}"
+                df_inj = df_inj.with_columns(
+                    pl.concat_str(
+                        [
+                            pl.col("FILENAME").cast(pl.Utf8),
+                            pl.lit(filename_suffix),
+                        ]
+                    ).alias("FILENAME")
+                )
+                log_info(
+                    f"Injected run '{inject_name}' reused the main input: "
+                    f"selected={df_inj.height}/{rows_before} "
+                    "nonphosphorylated rows, "
+                    f"matched_parent_proteins={len(matched_parents)}/"
+                    f"{len(main_parents)}."
+                )
+
             if inject_name not in df_inj.columns:
                 df_inj = df_inj.with_columns(pl.lit(True).alias(inject_name))
 
             df_inj = df_inj.with_columns(pl.col(inject_name).cast(pl.Boolean))
 
-            if "ASSAY" not in df_inj.columns:
+            if reuse_main:
+                df_inj = df_inj.with_columns(
+                    pl.lit(str(inject_name)).alias("ASSAY")
+                )
+            elif "ASSAY" not in df_inj.columns:
                 df_inj = df_inj.with_columns(pl.lit(str(inject_name)).alias("ASSAY"))
 
             is_cov = bool((inject_cfg or {}).get("is_covariate", False))
             df_inj = df_inj.with_columns(pl.lit(is_cov).alias("IS_COVARIATE"))
 
-            # logging: shape & covariate status
             log_info(
                 f"Injected run '{inject_name}': rows={len(df_inj)}, "
                 f"assay='{df_inj.select(pl.col('ASSAY').first()).item()}', "
                 f"is_covariate={is_cov}"
             )
 
-            # normalize dtypes we care about (avoids mixed Utf8/Null later)
             df_inj = df_inj.with_columns(pl.col("ASSAY").cast(pl.Utf8))
 
             frames.append(df_inj)
@@ -274,12 +465,20 @@ class Dataset:
 
         return pl.concat(fixed, how="vertical", rechunk=True)
 
-    def _maybe_concat_injected_runs(self, df_main: pl.DataFrame) -> pl.DataFrame:
+    def _maybe_concat_injected_runs(
+        self,
+        df_main: pl.DataFrame,
+        *,
+        main_input: pl.DataFrame,
+    ) -> pl.DataFrame:
         """Optionally load + harmonize injected runs and concat them onto the primary table."""
         if not self.inject_runs_cfg:
             return df_main
 
-        injected_frames = self._load_injected_runs()
+        injected_frames = self._load_injected_runs(
+            main_input=main_input,
+            main_table=df_main,
+        )
         if not injected_frames:
             return df_main
 
@@ -305,14 +504,14 @@ class Dataset:
     def _load_and_process(self):
         """Load raw data, harmonize, inject runs, preprocess, convert."""
 
-        # Load data
-        self.rawinput = self._load_rawdata(self.file_path)
+        main_input = self._load_rawdata(self.file_path)
 
-        # Harmonize data
-        self.rawinput = self.harmonizer.harmonize(self.rawinput)
+        self.rawinput = self.harmonizer.harmonize(main_input)
 
-        # Inject runs (if any)
-        self.rawinput = self._maybe_concat_injected_runs(self.rawinput)
+        self.rawinput = self._maybe_concat_injected_runs(
+            self.rawinput,
+            main_input=main_input,
+        )
 
         # Apply preprocessing
         self.preprocessed_data = self._apply_preprocessing(self.rawinput)
@@ -751,7 +950,7 @@ class Dataset:
             # Always expose the legacy key for viewers
             self.adata.uns["consistent_peptides_per_condition"] = consistent_payload
 
-            # If we actually used precursors, also expose the more precise name
+            # Expose the precise key when precursor consistency was used.
             if uns_consistent_key == "consistent_precursors_per_condition":
                 self.adata.uns["consistent_precursors_per_condition"] = consistent_payload
 
@@ -834,6 +1033,17 @@ class Dataset:
             self.adata.uns["preprocessing"]["phospho"]["multisite_collapse_policy"] = (
                 self.phospho_multisite_collapse_policy
             )
+
+        reused_assays = [
+            str(name)
+            for name, cfg in self.inject_runs_cfg.items()
+            if cfg and cfg.get("reuse_main_input_file") is True
+        ]
+        if reused_assays:
+            self.adata.uns["preprocessing"]["covariate_source"] = {
+                "assay": reused_assays[0],
+                "source": "main_input_nonphosphorylated",
+            }
 
     def _attach_uns_drilldown_peptides(
         self,

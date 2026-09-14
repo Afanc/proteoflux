@@ -360,10 +360,10 @@ class Preprocessor:
                 "Cannot compute missed cleavages: missing required column 'SIGNAL'."
             )
 
-        # In peptidomics wide inputs (e.g. FragPipe), missing values are often encoded as 0.0
-        # after melting to long format. If we don't drop those rows, every sample can end up
-        # with the same peptide set -> identical missed-cleavage fractions.
-        # For DIA-style proteomics/phospho we keep the workflow-like behavior (no SIGNAL gating).
+        # Peptidomics wide inputs can encode missing values as 0.0 after melting.
+        # Excluding those rows prevents identical peptide sets and identical
+        # missed-cleavage fractions from being assigned to every sample.
+        # DIA-style proteomics and phosphoproteomics retain rows without SIGNAL gating.
         at = self.analysis_type
 
         signal_present_filter = pl.lit(True)
@@ -784,6 +784,43 @@ class Preprocessor:
             .agg([pl.first(c).alias(c) for c in existing if c != "INDEX"])
             .sort("INDEX")
         )
+
+        if self.analysis_type == "phospho" and "PEPTIDE_LSEQ" in df_full.columns:
+            sequence_rows = df_full
+            if "IS_COVARIATE" in sequence_rows.columns:
+                sequence_rows = sequence_rows.filter(
+                    ~pl.col("IS_COVARIATE")
+                    .cast(pl.Boolean, strict=False)
+                    .fill_null(False)
+                )
+
+            modified_sequences = (
+                sequence_rows.select(["INDEX", "PEPTIDE_LSEQ"])
+                .with_columns(
+                    pl.col("PEPTIDE_LSEQ")
+                    .cast(pl.Utf8, strict=False)
+                    .str.strip_chars()
+                    .alias("MODIFIED_SEQ")
+                )
+                .filter(
+                    pl.col("MODIFIED_SEQ").is_not_null()
+                    & (pl.col("MODIFIED_SEQ") != "")
+                )
+                .group_by("INDEX", maintain_order=True)
+                .agg(
+                    pl.col("MODIFIED_SEQ")
+                    .unique()
+                    .sort()
+                    .alias("_MODIFIED_SEQUENCES")
+                )
+                .with_columns(
+                    pl.col("_MODIFIED_SEQUENCES")
+                    .list.join(" | ")
+                    .alias("MODIFIED_SEQ")
+                )
+                .drop("_MODIFIED_SEQUENCES")
+            )
+            base_meta = base_meta.join(modified_sequences, on="INDEX", how="left")
 
         if self.analysis_type == "pelsa" and "PARENT_PROTEIN" not in base_meta.columns and "UNIPROT" in base_meta.columns:
             base_meta = base_meta.with_columns(
@@ -1720,19 +1757,32 @@ class Preprocessor:
                 log_info("Filtering (phospho localization)")
                 cols = [c for c in locprob_pivot.columns if c != "INDEX"]
                 lp_mat = locprob_pivot.select(cols).to_numpy()
+                finite = np.isfinite(lp_mat)
                 if self.phospho_loc_mode == "soft":
-                    keep = np.nanmax(lp_mat, axis=1) >= self.phospho_loc_thr
+                    site_scores = np.max(
+                        np.where(finite, lp_mat, -np.inf), axis=1
+                    )
+                    aggregation = "max"
                 else:
-                    keep = np.nanmin(lp_mat, axis=1) >= self.phospho_loc_thr
-                keep = np.asarray(keep, dtype=bool)
+                    site_scores = np.min(
+                        np.where(finite, lp_mat, np.inf), axis=1
+                    )
+                    aggregation = "min"
+                site_scores = np.where(finite.any(axis=1), site_scores, np.nan)
+                keep = np.isfinite(site_scores) & (
+                    site_scores >= self.phospho_loc_thr
+                )
 
                 kept_n = int(keep.sum())
                 total_n = int(lp_mat.shape[0])
                 dropped_dict = {
                     "mode": self.phospho_loc_mode,
+                    "aggregation": aggregation,
                     "threshold": self.phospho_loc_thr,
                     "number_kept": kept_n,
                     "number_dropped": int(total_n - kept_n),
+                    "number_unscored": int((~np.isfinite(site_scores)).sum()),
+                    "raw_values": np.asarray(site_scores, dtype=np.float32),
                 }
                 self.intermediate_results.add_metadata(
                     "filtering", "meta_loc", dropped_dict

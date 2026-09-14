@@ -337,7 +337,7 @@ class DEExporter:
                 "PEPTIDE_START",
                 "PEPTIDE_END",
                 "PEPTIDE_LENGTH",
-                "ACCESSION_SITES",
+                "MODIFIED_SEQ",
                 SITE_15MER_COLUMN,
             ]
             if c in ad.var.columns
@@ -631,7 +631,7 @@ class DEExporter:
                     "PARENT_PEPTIDE_ID",
                     "PARENT_PROTEIN",
                     "PARENT_PROTEIN_UNIPROT_AC",
-                    "ACCESSION_SITES",
+                    "MODIFIED_SEQ",
                     SITE_15MER_COLUMN,
                     "MAX_LOC_PROB",
                     "N_PEPTIDES_USED",
