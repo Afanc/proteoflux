@@ -1107,7 +1107,6 @@ class ReportPlotter:
             )
         )
         top_annotated = int(pdf_cfg.get("volcano_top_annotated", 10))
-        annotate_imputed = bool(pdf_cfg.get("volcano_annotate_infinite", True))
         show_imputed = bool(pdf_cfg.get("volcano_show_fully_imputed", True))
 
         for contrast_index, name in enumerate(self.contrast_names):
@@ -1166,7 +1165,7 @@ class ReportPlotter:
 
             for direction_mask in (logfc > 0, logfc < 0):
                 annotation_pools = [measured]
-                if show_imputed and annotate_imputed:
+                if show_imputed:
                     annotation_pools.append(imputed1 | imputed2)
 
                 # Select independently so top_annotated means X observed plus
