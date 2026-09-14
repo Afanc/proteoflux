@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import re
 from typing import Any
 
@@ -543,6 +544,7 @@ def run_phosx_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         total=len(contrasts),
         desc=" PhosX contrasts",
         ncols=80,
+        file=sys.stdout,
     )
     for contrast_index, contrast in contrast_progress:
         scores = log2fc[:, contrast_index]

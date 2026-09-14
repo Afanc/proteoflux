@@ -2,19 +2,21 @@
 
 This module assembles a single “Summary” table (metadata, log2FC, q/p, missingness,
 intensities, and phospho-specific fields when relevant) and optional identification
-tables. Behavior, column names, and sheet names are kept identical to the existing
-implementation—only readability and documentation are improved.
+and evidence tables.
 """
 import h5py
 import anndata as ad
 import pandas as pd
 import numpy as np
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Tuple
 from proteoflux.utils.utils import logger, log_time
-from proteoflux.analysis.kinase_sequences import kinase_tenmer_export_table
 from importlib.metadata import version as _pkg_version, PackageNotFoundError
+
+
+SITE_15MER_COLUMN = "SITE_15MER"
 
 
 class DEExporter:
@@ -98,6 +100,118 @@ class DEExporter:
         centered_df = centered_df[leading_c + others_c]
 
         return raw_df, centered_df
+
+    def _phosphosite_evidence_frames(
+        self,
+    ) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
+        """Build compact site-level counts and a wide precursor provenance table.
+
+        ``N_PEPTIDES_USED`` counts distinct unmodified peptide sequences, while
+        ``N_PRECURSORS_USED`` counts the peptide/site/charge precursor IDs that
+        contributed at least one observed value. Sequence differences commonly
+        capture cleavage variants without claiming that every difference is a
+        missed cleavage.
+        """
+        feature_index = pd.Index(self.adata.var_names.astype(str), name="PHOSPHOSITE")
+
+        n_sites = pd.Series(
+            [
+                max(1, len(re.findall(r"[STY]\d+", feature.rsplit("|", 1)[-1])))
+                for feature in feature_index
+            ],
+            index=feature_index,
+            dtype="Int64",
+            name="N_PHOSPHOSITES",
+        )
+        counts = pd.DataFrame(index=feature_index)
+        counts["N_PEPTIDES_USED"] = pd.Series(0, index=feature_index, dtype="Int64")
+        counts["N_PRECURSORS_USED"] = pd.Series(0, index=feature_index, dtype="Int64")
+        counts["N_PHOSPHOSITES"] = n_sites
+
+        payload = self.adata.uns.get("precursors")
+        if not isinstance(payload, dict):
+            return counts, None
+
+        site_values = list(payload.get("protein_index", []))
+        peptide_values = list(payload.get("peptide_seq", []))
+        precursor_values = list(payload.get("rows", []))
+        if not (
+            len(site_values) == len(peptide_values) == len(precursor_values)
+        ):
+            raise ValueError(
+                "AnnData uns['precursors'] evidence metadata is not aligned."
+            )
+
+        used = np.ones(len(site_values), dtype=bool)
+        precursor_raw = payload.get("raw")
+        if precursor_raw is not None:
+            raw_values = np.asarray(precursor_raw)
+            if raw_values.ndim != 2 or raw_values.shape[0] != len(site_values):
+                raise ValueError(
+                    "AnnData uns['precursors']['raw'] is not aligned to its rows."
+                )
+            try:
+                used = np.isfinite(raw_values.astype(float, copy=False)).any(axis=1)
+            except (TypeError, ValueError):
+                used = pd.DataFrame(raw_values).notna().any(axis=1).to_numpy()
+
+        retained = set(feature_index)
+        peptides_by_site: dict[str, set[str]] = {}
+        precursors_by_site: dict[str, set[str]] = {}
+        for site_value, peptide_value, precursor_value, is_used in zip(
+            site_values,
+            peptide_values,
+            precursor_values,
+            used,
+        ):
+            site = str(site_value)
+            if not is_used or site not in retained:
+                continue
+            peptide_index = str(peptide_value)
+            peptide = re.sub(r"\|p[^|/]+$", "", peptide_index, flags=re.IGNORECASE)
+            precursor = str(precursor_value)
+            if peptide:
+                peptides_by_site.setdefault(site, set()).add(peptide)
+            if precursor:
+                precursors_by_site.setdefault(site, set()).add(precursor)
+
+        counts["N_PEPTIDES_USED"] = pd.Series(
+            {site: len(values) for site, values in peptides_by_site.items()},
+            dtype="Int64",
+        ).reindex(feature_index, fill_value=0)
+        counts["N_PRECURSORS_USED"] = pd.Series(
+            {site: len(values) for site, values in precursors_by_site.items()},
+            dtype="Int64",
+        ).reindex(feature_index, fill_value=0)
+
+        max_peptides = max((len(values) for values in peptides_by_site.values()), default=0)
+        max_precursors = max((len(values) for values in precursors_by_site.values()), default=0)
+        if max_peptides == 0 and max_precursors == 0:
+            return counts, None
+
+        ordered_peptides = {
+            site: sorted(values) for site, values in peptides_by_site.items()
+        }
+        ordered_precursors = {
+            site: sorted(values) for site, values in precursors_by_site.items()
+        }
+        evidence_columns: dict[str, list[str]] = {}
+        for position in range(max_peptides):
+            evidence_columns[f"PEPTIDE_{position + 1}"] = [
+                values[position] if position < len(values) else ""
+                for values in (
+                    ordered_peptides.get(site, []) for site in feature_index
+                )
+            ]
+        for position in range(max_precursors):
+            evidence_columns[f"PRECURSOR_{position + 1}"] = [
+                values[position] if position < len(values) else ""
+                for values in (
+                    ordered_precursors.get(site, []) for site in feature_index
+                )
+            ]
+        evidence = pd.DataFrame(evidence_columns, index=feature_index)
+        return counts, evidence
 
     def _pelsa_curve_summary(self) -> Optional[pd.DataFrame]:
         pelsa = self.adata.uns.get("pelsa", {})
@@ -224,8 +338,7 @@ class DEExporter:
                 "PEPTIDE_END",
                 "PEPTIDE_LENGTH",
                 "ACCESSION_SITES",
-                "KINASE_10MER",
-                "KINASE_10MER_SOURCE",
+                SITE_15MER_COLUMN,
             ]
             if c in ad.var.columns
         ]
@@ -286,9 +399,10 @@ class DEExporter:
             observed_df = pd.DataFrame(cols, index=ad.var_names)
             max_observed_col = observed_df.max(axis=1).rename("MAX_OBSERVED")
 
-        # Per-condition number of consistent peptides (precomputed in preprocessing, stored in .var)
+        # Per-condition number of consistent peptides/precursors (precomputed in
+        # preprocessing and stored in .var).
         consistent_df = None
-        cons_cols = [c for c in ad.var.columns if c.startswith("CONSISTENT_PEPTIDE_")]
+        cons_cols = [c for c in ad.var.columns if c.startswith("CONSISTENT_")]
         max_consistent_col = None
         if cons_cols:
             consistent_df = ad.var[cons_cols].copy()
@@ -356,8 +470,29 @@ class DEExporter:
         log2_int_cols = X.add_prefix("Processed_log2_Intensities") if X is not None else None
         raw_int_cols  = raw.add_prefix("Raw_Intensities") if raw is not None else None
 
+        phospho_evidence_counts = None
+        phospho_evidence_table = None
+        max_locprob = None
+        if is_phospho:
+            phospho_evidence_counts, phospho_evidence_table = (
+                self._phosphosite_evidence_frames()
+            )
+            if "locprob" in ad.layers:
+                loc_values = pd.DataFrame(
+                    ad.layers["locprob"],
+                    index=ad.obs_names,
+                    columns=ad.var_names,
+                ).T
+                max_locprob = loc_values.max(axis=1, skipna=True).rename(
+                    "MAX_LOC_PROB"
+                )
+
         # Always include metadata; include log2FC only if contrasts exist
         blocks = [meta_df]
+        if phospho_evidence_counts is not None:
+            blocks.append(phospho_evidence_counts)
+        if max_locprob is not None:
+            blocks.append(max_locprob)
         if log2fc_pref is not None:
             blocks.append(log2fc_pref)
 
@@ -454,7 +589,7 @@ class DEExporter:
                 cov_part = pd.DataFrame(ad.varm["cov_part"], index=ad.var.index, columns=self.contrasts).add_prefix("COVARIATE_PART_")
                 blocks.append(cov_part)
 
-            # Loc scores per sample (no max)
+            # Localization scores per sample; MAX_LOC_PROB is kept with metadata.
             if "locprob" in ad.layers:
                 loc = pd.DataFrame(ad.layers["locprob"], index=ad.obs_names, columns=ad.var_names).T
                 loc_pref = loc.add_prefix("LOCSCORE_")
@@ -490,7 +625,24 @@ class DEExporter:
         if is_phospho:
             if "PARENT_PEPTIDE_ID" in ad.var.columns and "PARENT_PEPTIDE_ID" not in summary_df.columns:
                 summary_df.insert(0, "PARENT_PEPTIDE_ID", ad.var["PARENT_PEPTIDE_ID"])
-            order = [c for c in ["PARENT_PEPTIDE_ID", "PARENT_PROTEIN", "ACCESSION_SITES", "KINASE_10MER", "KINASE_10MER_SOURCE", "GENE_NAMES", "FASTA_HEADERS", "PROTEIN_DESCRIPTIONS"] if c in summary_df.columns]
+            order = [
+                c
+                for c in [
+                    "PARENT_PEPTIDE_ID",
+                    "PARENT_PROTEIN",
+                    "PARENT_PROTEIN_UNIPROT_AC",
+                    "ACCESSION_SITES",
+                    SITE_15MER_COLUMN,
+                    "MAX_LOC_PROB",
+                    "N_PEPTIDES_USED",
+                    "N_PRECURSORS_USED",
+                    "N_PHOSPHOSITES",
+                    "GENE_NAMES",
+                    "FASTA_HEADERS",
+                    "PROTEIN_DESCRIPTIONS",
+                ]
+                if c in summary_df.columns
+            ]
             other = [c for c in summary_df.columns if c not in order]
             summary_df = summary_df[order + other]
 
@@ -498,7 +650,7 @@ class DEExporter:
             # RAW stats -> ADJUSTED stats -> covariate part -> observed/consistency -> intensities -> locscore -> FT
             cols = list(summary_df.columns)
 
-            meta = [c for c in ["PARENT_PEPTIDE_ID", "PARENT_PROTEIN", "PARENT_PROTEIN_UNIPROT_AC", "ACCESSION_SITES", "KINASE_10MER", "KINASE_10MER_SOURCE", "GENE_NAMES", "FASTA_HEADERS", "PROTEIN_DESCRIPTIONS"] if c in cols]
+            meta = [c for c in order if c in cols]
 
             raw_fc = [c for c in cols if c.startswith("RAW_log2FC_")]
             raw_p  = [c for c in cols if c.startswith("RAW_PVALUE_")]
@@ -577,8 +729,6 @@ class DEExporter:
 
         # Peptide tables
         pep_wide_df, pep_centered_df = self._peptide_frames()
-        kinase_tenmers = kinase_tenmer_export_table(ad) if is_phospho else None
-
         # proper indexing
         for df_ in (id_qval, id_pep, spectral_counts, ibaq):
             if df_ is not None:
@@ -598,7 +748,7 @@ class DEExporter:
             readme_title = "ProteoFlux Differential Expression Export"
             summary_desc = (
                 "- Summary: metadata, Log2FC, NRSC, NRSC misalignment, intensities, "
-                "Q/P-values, and missingness.\n"
+                "Q/P-values, missingness, and phosphosite evidence summaries.\n"
             )
             spectral_counts_desc = (
                 "- Spectral Counts: run-evidence counts per protein x sample.\n"
@@ -612,8 +762,8 @@ class DEExporter:
             "- Identification PEP: posterior error probability from the search engine, if available.\n"
             f"{spectral_counts_desc}"
             + (
-                "- Kinase 10-mers: phosphosite windows (-5..+4), source, known-residue count, and expanded positions.\n"
-                if is_phospho and kinase_tenmers is not None
+                "- Phosphosite Evidence: peptide sequences and peptide/site/charge precursors contributing to each phosphosite.\n"
+                if is_phospho and phospho_evidence_table is not None
                 else ""
             )
             + "- Peptides (raw): wide peptide-by-sample matrix, if available.\n"
@@ -626,7 +776,7 @@ class DEExporter:
             "Identification PEP": id_pep if id_pep is not None else None,
             "Spectral Counts": spectral_counts if spectral_counts is not None else None,
             "IBAQ Values": ibaq if ibaq is not None else None,
-            "Kinase 10-mers": kinase_tenmers,
+            "Phosphosite Evidence": phospho_evidence_table,
             "Peptides (raw)": (
                 None
                 if str(preproc.get("analysis_type", "proteomics")).lower() in {"phospho", "pelsa"}

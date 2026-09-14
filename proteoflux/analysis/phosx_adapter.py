@@ -8,6 +8,7 @@ loop and caching sequence-only work across contrasts.
 
 from __future__ import annotations
 
+import sys
 import multiprocessing as mp
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -223,7 +224,7 @@ def _fast_empirical_distribution(
     if n_workers == 1:
         _init_null_worker(weights, hit_indices)
         progress = tqdm(
-            total=n_permutations, desc=description, ncols=80, leave=False
+            total=n_permutations, desc=description, ncols=80, leave=False, file=sys.stdout,
         )
         try:
             for chunk in chunks:
@@ -239,7 +240,7 @@ def _fast_empirical_distribution(
             initargs=(weights, hit_indices),
         ) as pool:
             progress = tqdm(
-                total=n_permutations, desc=description, ncols=80, leave=False
+                total=n_permutations, desc=description, ncols=80, leave=False, file=sys.stdout,
             )
             try:
                 for chunk, output in zip(

@@ -29,6 +29,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 from scipy.cluster import hierarchy as sch
 import matplotlib.patches as mpatches
+from matplotlib.lines import Line2D
 from anndata import AnnData
 from typing import Optional, List, Union, Dict
 from proteoflux.utils.utils import logger, log_time
@@ -980,99 +981,259 @@ class ReportPlotter:
         self.pdf.savefig(fig)
         plt.close(fig)
 
+    def _default_volcano_masks(
+        self,
+        contrast: str,
+        contrast_index: int,
+        pdf_cfg: dict,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return the three feature masks used by the default ProteoViewer volcano."""
+        group1, group2 = contrast.split("_vs_", 1)
+        conditions = self.adata.obs["CONDITION"].astype(str).to_numpy()
+        idx1 = conditions == group1
+        idx2 = conditions == group2
+        rep1 = int(idx1.sum())
+        rep2 = int(idx2.sum())
+
+        raw = self.adata.layers.get("raw", self.adata.X)
+        raw = raw.toarray() if hasattr(raw, "toarray") else np.asarray(raw)
+        n1 = np.sum(~np.isnan(raw[idx1, :]), axis=0).astype(int)
+        n2 = np.sum(~np.isnan(raw[idx2, :]), axis=0).astype(int)
+
+        missing1 = n1 == 0
+        missing2 = n2 == 0
+        miss_df = pd.DataFrame(self.missingness).reindex(self.adata.var_names)
+        if group1 in miss_df.columns:
+            missing1 |= pd.to_numeric(
+                miss_df[group1], errors="coerce"
+            ).fillna(0).to_numpy() >= rep1
+        if group2 in miss_df.columns:
+            missing2 |= pd.to_numeric(
+                miss_df[group2], errors="coerce"
+            ).fillna(0).to_numpy() >= rep2
+
+        measured = ~missing1 & ~missing2
+        imputed1 = missing1 & ~missing2
+        imputed2 = missing2 & ~missing1
+
+        default_min = min(rep1, rep2)
+        min_per_condition = int(
+            pdf_cfg.get(
+                "volcano_min_per_condition",
+                pdf_cfg.get("volcano_min_nonimputed_per_condition", default_min),
+            )
+        )
+        # Match the viewer helper exactly: for observed-in-both, at least one
+        # condition must meet the threshold; one-sided points test their
+        # measured condition.
+        measured &= (n1 >= min_per_condition) | (n2 >= min_per_condition)
+        imputed1 &= n2 >= min_per_condition
+        imputed2 &= n1 >= min_per_condition
+
+        min_consistent = int(
+            pdf_cfg.get("volcano_min_consistent_precursors", 0)
+        )
+        analysis_mode = str(
+            (self.adata.uns.get("preprocessing", {}) or {}).get(
+                "analysis_type", self.analysis_type
+            )
+        ).lower()
+        consistent_prefix = (
+            "CONSISTENT_PEPTIDE"
+            if analysis_mode in {"dia", "dda", "proteomics"}
+            else "CONSISTENT_PRECURSOR"
+        )
+        key1 = f"{consistent_prefix}_{group1}"
+        key2 = f"{consistent_prefix}_{group2}"
+        if key1 in self.adata.var.columns and key2 in self.adata.var.columns:
+            c1 = pd.to_numeric(
+                self.adata.var[key1], errors="coerce"
+            ).fillna(0).to_numpy()
+            c2 = pd.to_numeric(
+                self.adata.var[key2], errors="coerce"
+            ).fillna(0).to_numpy()
+            consistent_keep = np.maximum(c1, c2) >= min_consistent
+            measured &= consistent_keep
+            imputed1 &= consistent_keep
+            imputed2 &= consistent_keep
+
+        if "nrsc_misalignment" in self.adata.varm:
+            max_misalignment = float(
+                pdf_cfg.get("volcano_max_nrsc_misalignment", 1.50)
+            )
+            values = np.asarray(self.adata.varm["nrsc_misalignment"])[
+                :, contrast_index
+            ].astype(float, copy=False)
+            alignment_keep = np.isfinite(values) & (values <= max_misalignment)
+            measured &= alignment_keep
+            imputed1 &= alignment_keep
+            imputed2 &= alignment_keep
+
+        has_covariate = bool(self.adata.uns.get("has_covariate", False))
+        if has_covariate and "raw_covariate" in self.adata.layers:
+            default_ft_min = max(rep1, rep2)
+            min_ft = int(
+                pdf_cfg.get(
+                    "volcano_min_ft_per_condition",
+                    pdf_cfg.get(
+                        "volcano_min_nonimputed_ft_per_condition",
+                        default_ft_min,
+                    ),
+                )
+            )
+            if min_ft > 0:
+                raw_ft = self.adata.layers["raw_covariate"]
+                raw_ft = (
+                    raw_ft.toarray()
+                    if hasattr(raw_ft, "toarray")
+                    else np.asarray(raw_ft)
+                )
+                n1_ft = np.sum(~np.isnan(raw_ft[idx1, :]), axis=0).astype(int)
+                n2_ft = np.sum(~np.isnan(raw_ft[idx2, :]), axis=0).astype(int)
+                ft_keep = (n1_ft >= min_ft) | (n2_ft >= min_ft)
+                measured &= ft_keep
+                imputed1 &= ft_keep
+                imputed2 &= ft_keep
+
+        return measured, imputed1, imputed2
+
     def _plot_volcano_plots(self):
-        """Volcano plots (one per contrast). eBayes-only; skip in pilot mode."""
-
+        """Plot viewer-equivalent default volcanoes for every contrast."""
         pdf_cfg = self.export_config.get("pdf_report", {}) or {}
-
         sign_threshold = float(
             pdf_cfg.get(
                 "volcano_sign_threshold",
                 self.analysis_config.get("sign_threshold", 0.05),
             )
         )
-        volcano_top_annotated = int(pdf_cfg.get("volcano_top_annotated", 10))
-        volcano_annotate_infinite = bool(pdf_cfg.get("volcano_annotate_infinite", False))
+        top_annotated = int(pdf_cfg.get("volcano_top_annotated", 10))
+        annotate_imputed = bool(pdf_cfg.get("volcano_annotate_infinite", True))
+        show_imputed = bool(pdf_cfg.get("volcano_show_fully_imputed", True))
 
-        for i, name in enumerate(self.contrast_names):
-            logfc = self.log2fc[:, i]
-            # choose source: eBayes if available, else raw
-            qvals_src = self.q_ebayes.iloc[:, i]
-            pvals_src = self.p_ebayes.iloc[:, i]
+        for contrast_index, name in enumerate(self.contrast_names):
+            group1, group2 = name.split("_vs_", 1)
+            logfc = pd.to_numeric(
+                pd.Series(np.asarray(self.log2fc)[:, contrast_index]),
+                errors="coerce",
+            ).to_numpy(dtype=float)
+            qvals = pd.to_numeric(
+                self.q_ebayes.iloc[:, contrast_index], errors="coerce"
+            ).fillna(1.0).clip(lower=1e-300, upper=1.0).to_numpy(dtype=float)
+            neg_log_q = -np.log10(qvals)
 
-            group1, group2 = name.split("_vs_")
+            measured, imputed1, imputed2 = self._default_volcano_masks(
+                name, contrast_index, pdf_cfg
+            )
+            finite = np.isfinite(logfc) & np.isfinite(neg_log_q)
+            measured &= finite
+            imputed1 &= finite
+            imputed2 &= finite
 
-            # Map missingness from DataFrame
-            miss_df = self.missingness
-            missing_a = miss_df[group1].values >= 1.0
-            missing_b = miss_df[group2].values >= 1.0
-            both_missing = missing_a & missing_b
+            significant_up = (qvals < sign_threshold) & (logfc > 0)
+            significant_down = (qvals < sign_threshold) & (logfc < 0)
+            colors = np.where(
+                significant_up,
+                "red",
+                np.where(significant_down, "blue", "gray"),
+            )
 
-            color = np.full(logfc.shape[0], "gray", dtype=object)
+            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+            ax.scatter(
+                logfc[measured],
+                neg_log_q[measured],
+                c=colors[measured],
+                alpha=0.7,
+                s=10,
+                marker="o",
+            )
+            if show_imputed:
+                ax.scatter(
+                    logfc[imputed1],
+                    neg_log_q[imputed1],
+                    c=colors[imputed1],
+                    alpha=0.65,
+                    s=14,
+                    marker="^",
+                )
+                ax.scatter(
+                    logfc[imputed2],
+                    neg_log_q[imputed2],
+                    c=colors[imputed2],
+                    alpha=0.65,
+                    s=14,
+                    marker="v",
+                )
 
-            def plot_panel(ax, qvals_for_y, qvals_for_pick, title):
-                # Points:
-                # - "finite": observed in both groups (not fully imputed in either group)
-                # - "semi-infinite": missing in exactly one group (fully imputed in >=1 group)
-                # - "both-missing": missing in both groups (drop)
-                finite_mask = ~(missing_a | missing_b)
-                semi_inf_mask = (~both_missing) & (~finite_mask)
+            for direction_mask in (logfc > 0, logfc < 0):
+                annotation_pools = [measured]
+                if show_imputed and annotate_imputed:
+                    annotation_pools.append(imputed1 | imputed2)
 
-                # Avoid NaNs killing the y-axis transform
-                qy = qvals_for_y.fillna(1.0)
-                qp = qvals_for_pick.fillna(1.0)
-
-                # Base scatter: finite points as circles
-                base_color = color[finite_mask]
-                base_logfc = logfc[finite_mask]
-                base_q = qy.iloc[finite_mask]
-                ax.scatter(base_logfc, -np.log10(base_q), c=base_color, alpha=0.7, s=10)
-
-                # If we include semi-infinite points, overplot them with a distinct marker.
-                if volcano_annotate_infinite and np.any(semi_inf_mask):
-                    q_semi = qy.iloc[semi_inf_mask]
-                    ax.scatter(
-                        logfc[semi_inf_mask],
-                        -np.log10(q_semi),
-                        c="gray",
-                        alpha=0.5,
-                        s=12,
-                        marker="^",
-                    )
-
-                ax.axhline(-np.log10(sign_threshold), color="black", linestyle="--", linewidth=0.8)
-                ax.axvline(0, color="black", linestyle="--", linewidth=0.8)
-
-                # annotate top hits, excluding any protein missing in either group
-                for direction in ["up", "down"]:
-                    dir_mask = (logfc > 0) if direction == "up" else (logfc < 0)
-
-                    # If enabled, allow annotating semi-infinite points too (but never both-missing).
-                    annot_mask = (~both_missing) if volcano_annotate_infinite else finite_mask
-                    sig_mask = annot_mask & dir_mask & (qp < sign_threshold)
-
-                    # pick top by smallest q-value
-                    top_idx = np.argsort(qp[sig_mask])[:volcano_top_annotated]
-
-                    selected = np.where(sig_mask)[0][top_idx]
-
-                    for j in selected:
+                # Select independently so top_annotated means X observed plus
+                # X one-sided fully imputed features in each direction. Rank
+                # every eligible feature by q-value; significance controls the
+                # point colour, but must not silently empty an annotation pool.
+                for annotation_pool in annotation_pools:
+                    candidates = annotation_pool & direction_mask
+                    selected = np.flatnonzero(candidates)
+                    selected = selected[
+                        np.argsort(qvals[selected])[:top_annotated]
+                    ]
+                    for feature_index in selected:
                         ax.text(
-                            logfc[j],
-                            -np.log10(qy.iloc[j]),
-                            self.protein_names.iloc[j],
+                            logfc[feature_index],
+                            neg_log_q[feature_index],
+                            str(self.protein_names.iloc[feature_index]),
                             fontsize=6,
-                            ha="right" if logfc[j] > 0 else "left",
+                            ha="right" if logfc[feature_index] > 0 else "left",
                             va="bottom",
                         )
 
-                ax.set_xlabel("log2FC")
-                ax.set_ylabel("-log10(q)")
-                ax.set_title(title)
-
-            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
-            # Use q on both axes/selection (consistent with ylabel)
-            plot_panel(ax, qvals_src, qvals_src, f"{name}")
+            ax.axhline(
+                -np.log10(sign_threshold),
+                color="black",
+                linestyle="--",
+                linewidth=0.8,
+            )
+            ax.axvline(0, color="black", linestyle="--", linewidth=0.8)
+            ax.set_xlabel("log2FC")
+            ax.set_ylabel("-log10(q)")
+            ax.set_title(name)
+            legend_handles = [
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    linestyle="none",
+                    color="0.45",
+                    markersize=5,
+                    label="Observed in both",
+                )
+            ]
+            if show_imputed:
+                legend_handles.extend(
+                    [
+                        Line2D(
+                            [0],
+                            [0],
+                            marker="^",
+                            linestyle="none",
+                            color="0.45",
+                            markersize=5,
+                            label=f"Fully imputed in {group1}",
+                        ),
+                        Line2D(
+                            [0],
+                            [0],
+                            marker="v",
+                            linestyle="none",
+                            color="0.45",
+                            markersize=5,
+                            label=f"Fully imputed in {group2}",
+                        ),
+                    ]
+                )
+            ax.legend(handles=legend_handles, frameon=False, fontsize=8)
 
             fig.tight_layout()
             self.pdf.savefig(fig)
