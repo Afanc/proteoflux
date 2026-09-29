@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import sys
 import re
+import sys
 from typing import Any
 
 import anndata as ad
@@ -19,21 +19,27 @@ from proteoflux.analysis.kinase_sequences import (
     parse_accession_sites,
 )
 from proteoflux.analysis.phosx_adapter import (
-    PhosXSession,
     REQUIRED_PHOSX_VERSION,
+    PhosXSession,
     create_phosx_session,
     run_phosx_in_memory,
     validate_phosx_installation,
     validate_phosx_resources,
 )
+from proteoflux.utils.kinases_mapping import (
+    KINASE_IDENTIFIER_SOURCE,
+    KINASE_IDENTIFIER_SOURCE_SHA256,
+    PHOSX_KINASE_IDENTIFIERS,
+)
 from proteoflux.utils.utils import log_info, log_time, log_warning
 
-
 _SEQUENCE_RE = re.compile(r"^[GPAVLIMCFYWHKRQNEDSTsty_]{10}$")
+
 _RESULT_COLUMNS = [
     "contrast",
     "method",
     "kinase_id",
+    "kinase_model_id",
     "kinase",
     "kinase_gene",
     "kinase_uniprot",
@@ -54,11 +60,35 @@ _RESULT_COLUMNS = [
 _SUBSTRATE_COLUMNS = [
     "contrast",
     "kinase_id",
+    "kinase_model_id",
+    "kinase_gene",
+    "kinase_uniprot",
     "phosphosite_id",
     "matched_accession",
     "database_source",
 ]
-_CONDITION_KINASE_COLUMNS = ["condition", "kinase_id", "n_substrates"]
+_CONDITION_KINASE_COLUMNS = [
+    "condition",
+    "kinase_id",
+    "kinase_model_id",
+    "kinase_gene",
+    "kinase_uniprot",
+    "n_substrates",
+]
+
+
+def _kinase_identifiers(model_id: Any) -> tuple[str, str, str]:
+    """Return the PhosX model ID, canonical HGNC symbol, and UniProt accession."""
+    model = str(model_id)
+    canonical = PHOSX_KINASE_IDENTIFIERS.get(model)
+    if canonical is None:
+        raise RuntimeError(
+            f"PhosX returned unmapped PSSM model identifier {model!r}. "
+            "Update PHOSX_KINASE_IDENTIFIERS for custom PSSM resources; "
+            "ProteoFlux deliberately performs no runtime network lookup."
+        )
+    gene, uniprot = canonical
+    return model, gene, uniprot
 
 
 def _integer(value: Any, name: str, default: int, minimum: int = 1) -> int:
@@ -101,7 +131,7 @@ def _parse_config(config: dict) -> dict[str, Any] | None:
     min_substrates = cfg.get("min_substrates", cfg.get("min_n_hits"))
     resource_overrides = cfg.get("phosx_resources") or {}
     if not isinstance(resource_overrides, dict):
-        raise ValueError("analysis.kinase_activity.phosx_resources must be a mapping.")
+        raise TypeError("analysis.kinase_activity.phosx_resources must be a mapping.")
 
     parsed = {
         "n_permutations": _integer(
@@ -206,7 +236,8 @@ def _fully_imputed_mask(adata: ad.AnnData, contrasts: list[str]) -> np.ndarray:
     result = np.zeros((adata.n_vars, len(contrasts)), dtype=bool)
     if "raw" not in adata.layers:
         log_warning(
-            "PhosX cannot exclude fully imputed sites because adata.layers['raw'] is missing."
+            "PhosX cannot exclude fully imputed sites because "
+            "adata.layers['raw'] is missing."
         )
         return result
     raw_layer = adata.layers["raw"]
@@ -270,7 +301,9 @@ def _condition_kinase_data(
         return _empty_condition_data()
 
     raw_layer = adata.layers["raw"]
-    raw = raw_layer.toarray() if hasattr(raw_layer, "toarray") else np.asarray(raw_layer)
+    raw = (
+        raw_layer.toarray() if hasattr(raw_layer, "toarray") else np.asarray(raw_layer)
+    )
     raw = np.asarray(raw, dtype=float)
     if raw.shape != (adata.n_obs, adata.n_vars):
         raise ValueError(
@@ -287,9 +320,7 @@ def _condition_kinase_data(
 
     family_data: list[tuple[np.ndarray, pd.DataFrame]] = []
     if not parameters["tyr_only"]:
-        indices = np.flatnonzero(
-            considered & np.isin(central_residues, ["S", "T"])
-        )
+        indices = np.flatnonzero(considered & np.isin(central_residues, ["S", "T"]))
         assignments, _ = session.assignments(
             sequences.iloc[indices].tolist(),
             family_name="S/T",
@@ -322,18 +353,18 @@ def _condition_kinase_data(
             selected = observed[feature_indices]
             if not selected.any() or assignments.empty:
                 continue
-            selected_assignments = assignments.to_numpy(
-                dtype=np.uint8, copy=False
-            )[selected]
+            selected_assignments = assignments.to_numpy(dtype=np.uint8, copy=False)[
+                selected
+            ]
             matched_sites += int(
                 np.count_nonzero(np.any(selected_assignments != 0, axis=1))
             )
             counts = selected_assignments.sum(axis=0, dtype=np.int64)
             for kinase, count in zip(assignments.columns, counts):
                 if count:
-                    kinase_counts[str(kinase)] = kinase_counts.get(str(kinase), 0) + int(
-                        count
-                    )
+                    kinase_counts[str(kinase)] = kinase_counts.get(
+                        str(kinase), 0
+                    ) + int(count)
 
         eligible = {
             kinase: count
@@ -350,20 +381,24 @@ def _condition_kinase_data(
                 "eligible_kinases": len(eligible),
             }
         )
-        membership_rows.extend(
-            {
-                "condition": condition,
-                "kinase_id": kinase,
-                "n_substrates": count,
-            }
-            for kinase, count in eligible.items()
-        )
+        for kinase, count in eligible.items():
+            model_id, gene, uniprot = _kinase_identifiers(kinase)
+            membership_rows.append(
+                {
+                    "condition": condition,
+                    # kinase_id remains the stable, unique PSSM model key.  Use the
+                    # canonical fields for joins to other kinase-analysis methods.
+                    "kinase_id": model_id,
+                    "kinase_model_id": model_id,
+                    "kinase_gene": gene,
+                    "kinase_uniprot": uniprot,
+                    "n_substrates": count,
+                }
+            )
 
     summary = pd.DataFrame(summary_rows)
     summary.index = pd.Index(summary["condition"].astype(str), name="condition_id")
-    memberships = pd.DataFrame(
-        membership_rows, columns=_CONDITION_KINASE_COLUMNS
-    )
+    memberships = pd.DataFrame(membership_rows, columns=_CONDITION_KINASE_COLUMNS)
     if memberships.empty:
         memberships.index = pd.Index([], dtype=str, name="condition_kinase_id")
     else:
@@ -410,6 +445,7 @@ def _assignment_rows(
         )
     rows: list[dict[str, str]] = []
     for kinase in assignments.columns:
+        model_id, gene, uniprot = _kinase_identifiers(kinase)
         hit_positions = np.flatnonzero(
             pd.to_numeric(assignments[kinase], errors="coerce")
             .fillna(0)
@@ -421,7 +457,10 @@ def _assignment_rows(
             rows.append(
                 {
                     "contrast": contrast,
-                    "kinase_id": str(kinase),
+                    "kinase_id": model_id,
+                    "kinase_model_id": model_id,
+                    "kinase_gene": gene,
+                    "kinase_uniprot": uniprot,
                     "phosphosite_id": str(item["phosphosite_id"]),
                     "matched_accession": _accessions(str(item[ACCESSION_SITES_COLUMN])),
                     "database_source": f"PhosX {REQUIRED_PHOSX_VERSION} bundled PSSM",
@@ -433,10 +472,12 @@ def _assignment_rows(
 def _result_rows(
     activity: pd.DataFrame,
     substrate_counts: pd.Series,
+    substrate_means: pd.Series,
     contrast: str,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for kinase, values in activity.iterrows():
+        model_id, gene, uniprot = _kinase_identifiers(kinase)
         pvalue = pd.to_numeric(
             pd.Series([values.get("p value")]), errors="coerce"
         ).iloc[0]
@@ -450,17 +491,23 @@ def _result_rows(
         legacy = pd.to_numeric(
             pd.Series([values.get("Legacy Activity Score")]), errors="coerce"
         ).iloc[0]
+        kinase_mean = pd.to_numeric(
+            pd.Series([substrate_means.get(model_id)]), errors="coerce"
+        ).iloc[0]
         tested = bool(np.isfinite(pvalue))
         rows.append(
             {
                 "contrast": contrast,
                 "method": "phosx",
-                "kinase_id": str(kinase),
-                "kinase": str(kinase),
-                "kinase_gene": str(kinase),
-                "kinase_uniprot": "",
-                "n_substrates": int(substrate_counts.get(str(kinase), 0)),
-                "kinase_mean_log2fc": np.nan,
+                "kinase_id": model_id,
+                "kinase_model_id": model_id,
+                "kinase": gene,
+                "kinase_gene": gene,
+                "kinase_uniprot": uniprot,
+                "n_substrates": int(substrate_counts.get(model_id, 0)),
+                "kinase_mean_log2fc": (
+                    float(kinase_mean) if np.isfinite(kinase_mean) else np.nan
+                ),
                 "global_mean_log2fc": np.nan,
                 "global_sd_log2fc": np.nan,
                 "effect": float(ks) if np.isfinite(ks) else np.nan,
@@ -495,7 +542,8 @@ def run_phosx_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         raise ValueError("PhosX is only supported for analysis_type='phospho'.")
     if TENMER_COLUMN not in adata.var.columns:
         raise ValueError(
-            "PhosX requires prepared kinase sequence windows in adata.var['KINASE_10MER']."
+            "PhosX requires prepared kinase sequence windows in "
+            "adata.var['KINASE_10MER']."
         )
 
     contrasts = [str(value) for value in adata.uns.get("contrast_names", [])]
@@ -561,7 +609,15 @@ def run_phosx_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         input_frame = input_frame.loc[input_frame["Score"].ne(0)].reset_index(drop=True)
         if input_frame.empty:
             raise ValueError(
-                f"PhosX contrast {contrast!r} has no finite, non-zero, sequence-eligible sites."
+                f"PhosX contrast {contrast!r} has no finite, non-zero, "
+                "sequence-eligible sites."
+            )
+        duplicate_sites = input_frame["phosphosite_id"].duplicated(keep=False)
+        if duplicate_sites.any():
+            examples = input_frame.loc[duplicate_sites, "phosphosite_id"].unique()[:5]
+            raise ValueError(
+                "PhosX requires unique adata.var_names so assigned-site means are "
+                f"unambiguous; duplicate examples: {examples.tolist()}."
             )
 
         contrast_seed = int(
@@ -613,11 +669,24 @@ def run_phosx_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
             substrate_counts = substrate_frame.groupby("kinase_id")[
                 "phosphosite_id"
             ].nunique()
+            score_by_site = input_frame.set_index("phosphosite_id")["Score"]
+            assigned_scores = substrate_frame["phosphosite_id"].map(score_by_site)
+            if assigned_scores.isna().any():
+                raise RuntimeError(
+                    "PhosX substrate assignments could not be mapped back to all "
+                    "contrast log2FC values."
+                )
+            substrate_means = assigned_scores.groupby(
+                substrate_frame["kinase_id"], sort=False
+            ).mean()
             all_substrates.extend(substrate_frame.to_dict("records"))
         else:
             substrate_counts = pd.Series(dtype=int)
+            substrate_means = pd.Series(dtype=float)
 
-        all_results.extend(_result_rows(run.activity, substrate_counts, contrast))
+        all_results.extend(
+            _result_rows(run.activity, substrate_counts, substrate_means, contrast)
+        )
         summaries.append(
             {
                 "contrast": contrast,
@@ -629,9 +698,9 @@ def run_phosx_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
                     )
                 ),
                 "zero_log2fc_removed": int(np.count_nonzero(eligible & (scores == 0))),
-                "input_sites": int(len(input_frame)),
-                "ser_thr_sites": int(len(ranked_st)),
-                "tyr_sites": int(len(ranked_y)),
+                "input_sites": len(input_frame),
+                "ser_thr_sites": len(ranked_st),
+                "tyr_sites": len(ranked_y),
                 "assigned_sites": int(
                     substrate_frame["phosphosite_id"].nunique()
                     if not substrate_frame.empty
@@ -675,14 +744,25 @@ def run_phosx_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         "schema_version": 1,
         "method": "phosx",
         "phosx_version": REQUIRED_PHOSX_VERSION,
+        "kinase_identifier_source": KINASE_IDENTIFIER_SOURCE,
+        "kinase_identifier_source_sha256": KINASE_IDENTIFIER_SOURCE_SHA256,
+        "kinase_id_semantics": (
+            "PhosX PSSM model identifier; use kinase_uniprot (preferred) or "
+            "kinase_gene for cross-method joins"
+        ),
         "min_substrates": parsed["min_n_hits"],
         "log2fc_varm_key": log2fc_key,
         "log2fc_source": log2fc_source,
         "background_rule": (
-            "valid 10-mer, finite non-zero contrast log2FC; fully imputed contrast cells excluded"
+            "valid 10-mer, finite non-zero contrast log2FC; fully imputed "
+            "contrast cells excluded"
         ),
         "pvalue_rule": "PhosX one-sided empirical KS permutation p value",
         "fdr_scope": "PhosX BH within each contrast and kinase family",
+        "kinase_mean_log2fc_rule": (
+            "arithmetic mean contrast log2FC across unique quantified "
+            "phosphosites assigned to the PhosX PSSM model"
+        ),
         "parameters": {
             "n_permutations": parsed["n_permutations"],
             "random_seed": parsed["random_seed"],

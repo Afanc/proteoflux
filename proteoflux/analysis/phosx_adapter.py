@@ -8,9 +8,10 @@ loop and caching sequence-only work across contrasts.
 
 from __future__ import annotations
 
-import sys
 import multiprocessing as mp
+import sys
 from dataclasses import dataclass, field
+from importlib.metadata import version as distribution_version
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +57,7 @@ def _imports() -> dict[str, Any]:
             "PhosX analysis requires the pinned dependency phosx==0.23.0."
         ) from exc
 
-    installed = str(getattr(phosx, "__version__", ""))
+    installed = distribution_version("phosx")
     if installed != REQUIRED_PHOSX_VERSION:
         raise RuntimeError(
             "ProteoFlux's PhosX adapter is pinned to phosx==0.23.0; "
@@ -224,7 +225,11 @@ def _fast_empirical_distribution(
     if n_workers == 1:
         _init_null_worker(weights, hit_indices)
         progress = tqdm(
-            total=n_permutations, desc=description, ncols=80, leave=False, file=sys.stdout,
+            total=n_permutations,
+            desc=description,
+            ncols=80,
+            leave=False,
+            file=sys.stdout,
         )
         try:
             for chunk in chunks:
@@ -240,7 +245,11 @@ def _fast_empirical_distribution(
             initargs=(weights, hit_indices),
         ) as pool:
             progress = tqdm(
-                total=n_permutations, desc=description, ncols=80, leave=False, file=sys.stdout,
+                total=n_permutations,
+                desc=description,
+                ncols=80,
+                leave=False,
+                file=sys.stdout,
             )
             try:
                 for chunk, output in zip(
