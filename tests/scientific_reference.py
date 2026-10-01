@@ -47,9 +47,7 @@ def scientific_payload(adata):
                "contrasts": contrasts, "X": portable(obj.X),
                "obs": frame_payload(obj.obs), "var": frame_payload(obj.var),
                "layers": {k: portable(v) for k, v in sorted(obj.layers.items()) if k != "centered"},
-               # covariate_p has a confirmed ambiguous producer defect, tested
-               # separately as desired behavior rather than blessed by a golden.
-               "varm": {k: portable(v) for k, v in sorted(obj.varm.items()) if k not in {"PCs", "covariate_p"}},
+               "varm": {k: portable(v) for k, v in sorted(obj.varm.items()) if k != "PCs"},
                "analysis": portable(obj.uns.get("analysis", {})),
                "analysis_type": obj.uns["preprocessing"]["analysis_type"]}
     for key in ("pilot_study_mode", "has_covariate", "missingness_source", "missingness_rule",
@@ -96,7 +94,7 @@ def scientific_payload(adata):
 
 def probability_field(name):
     return name in {"p_raw", "q_raw", "p_ebayes", "q_ebayes", "pvalue", "qvalue",
-                    "curve_p_value", "curve_q_value", "covariate_q"} or name.endswith(
+                    "curve_p_value", "curve_q_value", "covariate_p", "covariate_q"} or name.endswith(
                         ("_p_raw", "_q_raw", "_p_ebayes", "_q_ebayes"))
 
 

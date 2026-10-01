@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 from numpy.testing import assert_allclose, assert_array_equal
 from pandas.testing import assert_frame_equal
+from scipy.stats import false_discovery_control, t as student_t
 
 from proteoflux.export.de_exporter import DEExporter
 from proteoflux.analysis.clustering import run_clustering, run_clustering_missingness
@@ -70,6 +71,22 @@ def test_h5ad_export_does_not_mutate_analysis_object(tmp_path, workflow_results)
     assert_frame_equal(obj.var, var)
     assert_reference(scientific_payload(obj), before)
     assert_reference(scientific_payload(ad.read_h5ad(path)), before)
+
+
+@pytest.mark.parametrize("name", ["phospho", "phospho_reuse", "phosx"])
+def test_serialized_slope_diagnostics_are_distinct_from_ft_contrasts(name, workflow_results):
+    # These objects have already passed through the real pipeline and H5AD writer.
+    obj, config = workflow_results(name)
+    for key in ("covariate_beta", "covariate_se", "covariate_t", "covariate_p", "covariate_q"):
+        assert obj.varm[key].shape == (obj.n_vars, 1)
+    p = 2 * student_t.sf(abs(obj.varm["covariate_t"][:, 0]), obj.n_obs-2)
+    assert_allclose(obj.varm["covariate_p"][:, 0], p, rtol=1e-12, atol=1e-14)
+    assert_allclose(obj.varm["covariate_q"][:, 0], false_discovery_control(p), rtol=1e-12, atol=1e-14)
+    summary = pd.read_excel(config["exports"]["path_table"], sheet_name="Summary", index_col=0)
+    for key, prefix in (("ft_p_ebayes", "FT_PVALUE_"), ("ft_q_ebayes", "FT_QVALUE_")):
+        assert obj.varm[key].shape == (obj.n_vars, len(obj.uns["contrast_names"]))
+        for j, contrast in enumerate(obj.uns["contrast_names"]):
+            assert_allclose(summary.loc[obj.var_names, prefix+contrast], obj.varm[key][:, j], rtol=1e-12, atol=1e-14)
 
 
 def test_workbook_observed_counts_and_sample_column_contract(workflow_results):

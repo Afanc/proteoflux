@@ -21,7 +21,7 @@ def compare_full_results(actual, expected, *, rtol=3e-6, atol=2e-6):
     assert_reference(portable(actual.uns.get("contrast_names", [])), portable(expected.uns.get("contrast_names", [])))
     assert_reference(portable(actual.uns.get("analysis", {})), portable(expected.uns.get("analysis", {})))
     arrays = {"X": (actual.X, expected.X)}
-    for container, exclude in (("layers", {"centered"}), ("varm", {"PCs", "covariate_p"})):
+    for container, exclude in (("layers", {"centered"}), ("varm", {"PCs"})):
         left, right = getattr(actual, container), getattr(expected, container)
         assert set(left)-exclude == set(right)-exclude, container+" keys"
         for name in set(left)-exclude:

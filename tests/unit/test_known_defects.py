@@ -52,14 +52,6 @@ def test_optional_covariate_slope_modes_can_run(tmp_path, mode):
     assert result.varm["log2fc"].shape[1] == 2
 
 
-@pytest.mark.xfail(raises=AssertionError, reason="covariate_p is overwritten with FT contrast p-values and gains a third axis")
-def test_covariate_p_has_one_diagnostic_per_feature(tmp_path):
-    from tests.fixtures.workflows import phospho_workflow
-    config = phospho_workflow(tmp_path, kinase=False)
-    out = run_limma_pipeline(Dataset(**config).get_anndata(), config)
-    assert out.varm["covariate_p"].shape == (out.n_vars, 1)
-
-
 @pytest.mark.xfail(raises=NameError, reason="PyArrow CSV loader refers to unimported pv_csv")
 def test_pyarrow_delimited_loader_can_read_supported_input(protein_config):
     protein_config["dataset"]["load_method"] = "pyarrow"

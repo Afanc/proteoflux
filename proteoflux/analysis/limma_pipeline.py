@@ -1087,8 +1087,9 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         fully_mask=fully_ft,
     )
     cov_coefs = limma_cov["coefs"]
-    cov_p = limma_cov["p_ebayes"] if not pilot_mode else None
-    cov_q = limma_cov["q_ebayes"] if not pilot_mode else None
+    # FT contrast probabilities are distinct from the stage-1 slope diagnostics.
+    ft_p = limma_cov["p_ebayes"] if not pilot_mode else None
+    ft_q = limma_cov["q_ebayes"] if not pilot_mode else None
 
     # Covariate part per contrast
     cov_part = _covariate_part_per_contrast(
@@ -1135,6 +1136,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     out.varm[VARM_COV_PART] = cov_part
 
     # Stage-1 covariate stats (per feature)
+    # beta is the applied slope; SE/t/p/q describe the estimate before beta_mode.
     if not pilot_mode:
         out.varm[VARM_COVARIATE_BETA] = beta1[:, None]
         out.varm[VARM_COVARIATE_SE] = cov_se[:, None]
@@ -1166,8 +1168,8 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     out.varm[VARM_FT_LOG2FC] = cov_coefs
 
     if not pilot_mode:
-        out.varm[VARM_FT_Q_EBAYES] = cov_q
-        out.varm[VARM_FT_P_EBAYES] = cov_p
+        out.varm[VARM_FT_Q_EBAYES] = ft_q
+        out.varm[VARM_FT_P_EBAYES] = ft_p
 
     # Describe decomposition rule once for the viewer
     out.uns["decomposition_rule"] = "raw_log2fc ≈ log2fc (adjusted) + cov_part"
