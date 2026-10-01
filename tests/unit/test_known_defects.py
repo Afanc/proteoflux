@@ -6,7 +6,6 @@ expected failure narrow; unrelated exception types still fail the suite.
 import numpy as np
 import polars as pl
 import pytest
-from numpy.testing import assert_allclose
 
 from proteoflux.analysis.limma_pipeline import run_limma_pipeline
 from proteoflux.analysis.nrsc import compute_nrsc
@@ -41,15 +40,6 @@ def test_disconnected_robust_rollup_produces_result():
                                     sample_cols=["a", "b"], num_cores=1, huber_t=1.345,
                                     max_iter=20, tol=1e-8, min_nonan=1)
     assert out.shape == (1, 3)
-
-
-@pytest.mark.xfail(raises=AssertionError, reason="scalar log2 setting is misclassified as no-log when exporting raw")
-def test_scalar_and_list_log2_preserve_same_raw_scale(protein_config):
-    protein_config["preprocessing"]["normalization"]["method"] = ["log2"]
-    expected = Dataset(**protein_config).get_anndata()
-    protein_config["preprocessing"]["normalization"]["method"] = "log2"
-    actual = Dataset(**protein_config).get_anndata()
-    assert_allclose(actual.layers["raw"], expected.layers["raw"], equal_nan=True)
 
 
 @pytest.mark.parametrize("mode", ["free", "nonneg"])

@@ -2094,7 +2094,7 @@ class Preprocessor:
 
         has_log_step = any(
             (mth or "").lower() in {"log2", "log10", "log", "ln"}
-            for mth in (self.normalization.get("method") or [])
+            for mth in normalization_method
         )
 
         if not has_log_step:
