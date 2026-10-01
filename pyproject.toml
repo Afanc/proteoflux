@@ -71,3 +71,17 @@ namespaces = false
 [project.urls]
 Repository = "https://github.com/afanc/proteoflux"
 Issues = "https://github.com/afanc/proteoflux/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+xfail_strict = true
+markers = [
+  "unit: independently checked algorithms and edge cases",
+  "integration: workflows spanning input, processing, analysis and export",
+  "regression: compact numerical references protecting current behavior",
+  "contract: configuration, labelled matrices and downstream result contracts",
+  "slow: expensive optional validation (enable with --run-slow)",
+  "full: local full-data regression (enable with --full-regression manifest.json)",
+  "known_bug: desired behavior currently blocked by a narrowly specified defect",
+]
