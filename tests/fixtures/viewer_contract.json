@@ -1,0 +1,10 @@
+{
+  "provenance": "Read-only audit of ProteoViewer 4a20d0a; no imports from or runtime dependency on that checkout.",
+  "consumers": ["components/overview_plots.py:plot_peptide_trends_centered", "components/plot_utils.py:get_volcano_classification_masks", "tabs/overview_tab_phospho.py:_make_adata_views", "tabs/kinases_tab.py", "components/selection_export.py:build_pelsa_selection_df"],
+  "differential_varm": ["log2fc", "q_ebayes", "p_ebayes"],
+  "evidence": ["rows", "cols", "protein_index", "peptide_seq", "raw", "centered"],
+  "kinase_results": ["contrast", "kinase_id", "kinase", "kinase_gene", "kinase_uniprot", "n_substrates", "kinase_mean_log2fc", "global_mean_log2fc", "effect", "activity_score", "pvalue", "qvalue", "tested"],
+  "kinase_substrates": ["contrast", "kinase_id", "phosphosite_id", "matched_accession", "database_source"],
+  "kinase_condition_kinases": ["condition", "kinase_id", "n_substrates"],
+  "pelsa_curve_results": ["peptide_id", "curve_fold_change_log2", "curve_p_value", "curve_q_value", "pec50", "significant_peptides_per_parent"]
+}
