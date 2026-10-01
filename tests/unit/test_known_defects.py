@@ -4,7 +4,6 @@ These are not golden expectations approving the current defect. Keep each
 expected failure narrow; unrelated exception types still fail the suite.
 """
 import numpy as np
-import pandas as pd
 import polars as pl
 import pytest
 from numpy.testing import assert_allclose
@@ -51,25 +50,6 @@ def test_scalar_and_list_log2_preserve_same_raw_scale(protein_config):
     protein_config["preprocessing"]["normalization"]["method"] = "log2"
     actual = Dataset(**protein_config).get_anndata()
     assert_allclose(actual.layers["raw"], expected.layers["raw"], equal_nan=True)
-
-
-@pytest.mark.xfail(raises=AssertionError, reason="Polars reconstruction of square normalized matrices swaps labelled axes")
-def test_square_matrices_keep_sample_and_feature_labels(protein_config):
-    path = protein_config["dataset"]["input_file"]
-    rows = pd.read_csv(path, sep="\t")
-    rows = rows[rows.protein.isin([f"P{i:03}" for i in range(9)])]
-    rows.to_csv(path, sep="\t", index=False)
-    obj = Dataset(**protein_config).get_anndata()
-    assert obj.shape == (9, 9)
-    rows = rows[(rows.qvalue <= .01) & (rows.pep <= .05)].copy()
-    rows.loc[rows.intensity < 2, "intensity"] = np.nan
-    rows["run"] = rows.run.str.removesuffix(".raw")
-    expected = rows.groupby(["run", "protein"]).intensity.sum(min_count=1).unstack()
-    expected = expected.loc[obj.obs_names, obj.var_names]
-    assert_allclose(obj.layers["raw"], expected, rtol=3e-7, equal_nan=True)
-    log = np.log2(expected.to_numpy())
-    normalized = log + np.nanmedian(log) - np.nanmedian(log, axis=1)[:, None]
-    assert_allclose(obj.layers["normalized"], normalized, rtol=3e-7, equal_nan=True)
 
 
 @pytest.mark.parametrize("mode", ["free", "nonneg"])

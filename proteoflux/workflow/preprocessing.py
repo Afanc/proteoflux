@@ -2086,9 +2086,10 @@ class Preprocessor:
             else:
                 raise ValueError(f"Invalid normalization method: {method}")
 
-        df = df.with_columns(pl.DataFrame(mat, schema=numeric_cols))
+        # Arrays retain feature rows and sample columns, regardless of memory order.
+        df = df.with_columns(pl.DataFrame(mat, schema=numeric_cols, orient="row"))
         postlog_df = df.with_columns(
-            pl.DataFrame(postlog_mat, schema=numeric_cols)
+            pl.DataFrame(postlog_mat, schema=numeric_cols, orient="row")
         )
 
         has_log_step = any(
@@ -2103,7 +2104,7 @@ class Preprocessor:
             numeric_cols_main = self.intermediate_results.columns
             self.intermediate_results.dfs["raw_df"] = (
                 self.intermediate_results.dfs["raw_df"].with_columns(
-                    pl.DataFrame(raw_lin, schema=numeric_cols_main)
+                    pl.DataFrame(raw_lin, schema=numeric_cols_main, orient="row")
                 )
             )
             original_mat = raw_lin
@@ -2160,7 +2161,7 @@ class Preprocessor:
                 not_imp
             )
             out_df = df_norm.with_columns(
-                pl.DataFrame(imp_mat, schema=sample_cols)
+                pl.DataFrame(imp_mat, schema=sample_cols, orient="row")
             )
             imp_only = np.where(np.isnan(not_imp), imp_mat, np.nan)
             self.intermediate_results.add_matrix(
@@ -2223,7 +2224,7 @@ class Preprocessor:
                 not_imp
             )
             cov_imp_by_key = cov_norm_by_key.with_columns(
-                pl.DataFrame(imp_key, schema=sample_cols)
+                pl.DataFrame(imp_key, schema=sample_cols, orient="row")
             )
 
             cov_imp_broadcast = idx2key.join(
@@ -2242,7 +2243,7 @@ class Preprocessor:
             row_meds = np.nanmedian(cov_mat, axis=1, keepdims=True)
             cov_mat_centered = cov_mat - row_meds
             centered_cov_df = cov_imp_broadcast.with_columns(
-                pl.DataFrame(cov_mat_centered, schema=sample_cols)
+                pl.DataFrame(cov_mat_centered, schema=sample_cols, orient="row")
             )
             self.intermediate_results.dfs[
                 "centered_covariate"
