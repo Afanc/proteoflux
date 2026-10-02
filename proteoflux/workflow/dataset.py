@@ -42,6 +42,11 @@ class Dataset:
 
         self.file_path = dataset_cfg.get("input_file", None)
         self.load_method = dataset_cfg.get("load_method", "polars")
+        if self.load_method != "polars":
+            raise ValueError(
+                "dataset.load_method must be 'polars'; other delimited-file loaders "
+                "are no longer supported."
+            )
         self.input_layout = dataset_cfg.get("input_layout", "long")
         self.analysis_type = normalize_analysis_type(
             dataset_cfg.get("analysis_type", "proteomics")
@@ -608,7 +613,7 @@ class Dataset:
 
     @log_time("Data Loading")
     def _load_rawdata(self, file_path: str) -> Union[pl.DataFrame, pd.DataFrame]:
-        """Load raw data from CSV / TSV / Parquet using Polars or PyArrow backends."""
+        """Load CSV/TSV using Polars, or Parquet using PyArrow then Polars."""
         # --- Parquet (fast path, no delimiter logic)
         if file_path.endswith((".parquet", ".pq")):
             table = pv_parquet.read_table(file_path)
@@ -622,25 +627,15 @@ class Dataset:
 
         delimiter = "\t" if file_path.endswith(".tsv") else ","
 
-        if self.load_method == "polars":
-            with open(file_path, "r", newline="") as fh:
-                header = next(csv.reader(fh, delimiter=delimiter))
-            schema_overrides = self._build_polars_schema_overrides(header)
-            return self._read_csv_polars(
-                file_path,
-                delimiter,
-                header,
-                schema_overrides,
-            )
-        elif self.load_method == "pyarrow":
-            parse_options = pv_csv.ParseOptions(delimiter=delimiter)
-            arrow_table = pv_csv.read_csv(file_path, parse_options=parse_options)
-            return pl.from_arrow(arrow_table)
-        elif self.load_method == "pandas":
-            df = pd.read_csv(file_path, delimiter=delimiter)
-            return pl.from_pandas(df)
-        else:
-            raise ValueError(f"Unknown load method: {self.load_method}")
+        with open(file_path, "r", newline="") as fh:
+            header = next(csv.reader(fh, delimiter=delimiter))
+        schema_overrides = self._build_polars_schema_overrides(header)
+        return self._read_csv_polars(
+            file_path,
+            delimiter,
+            header,
+            schema_overrides,
+        )
 
     @log_time("Data Processing")
     def _apply_preprocessing(self, df: pl.DataFrame) -> pl.DataFrame:

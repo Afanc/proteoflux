@@ -10,7 +10,6 @@ from numpy.testing import assert_allclose
 from scipy.stats import false_discovery_control
 
 from proteoflux.analysis.limma_pipeline import run_limma_pipeline
-from proteoflux.workflow.dataset import Dataset
 from proteoflux.workflow.preprocessing import Preprocessor
 from proteoflux.workflow.rollup.robust_regression import pivot_df_robust_regression
 from tests.unit.test_statistics import expression
@@ -54,9 +53,3 @@ def test_fully_imputed_background_diagnostics_apply_bh_after_neutralization(cova
     p = result.varm["covariate_p"][:, 0]
     assert p[feature] == 1
     assert_allclose(result.varm["covariate_q"][:, 0], false_discovery_control(p), rtol=1e-12, atol=1e-14)
-
-
-@pytest.mark.xfail(raises=NameError, reason="PyArrow CSV loader refers to unimported pv_csv")
-def test_pyarrow_delimited_loader_can_read_supported_input(protein_config):
-    protein_config["dataset"]["load_method"] = "pyarrow"
-    assert Dataset(**protein_config).get_anndata().n_vars == 12

@@ -19,7 +19,8 @@ pytestmark = pytest.mark.contract
 
 
 @pytest.mark.parametrize("suffix", [".csv", ".tsv", ".parquet", ".pq"])
-def test_supported_file_containers_preserve_labels_values_and_missingness(tmp_path, suffix):
+@pytest.mark.parametrize("explicit_polars", [False, True], ids=["default", "explicit-polars"])
+def test_supported_file_containers_preserve_labels_values_and_missingness(tmp_path, suffix, explicit_polars):
     config = base_config(tmp_path)
     frame = protein_rows()
     canonical = tmp_path/"canonical.tsv"
@@ -32,10 +33,23 @@ def test_supported_file_containers_preserve_labels_values_and_missingness(tmp_pa
     else:
         frame.to_csv(path, sep="\t" if suffix == ".tsv" else ",", index=False)
     config["dataset"]["input_file"] = str(path)
+    if explicit_polars:
+        config["dataset"]["load_method"] = "polars"
     actual = Dataset(**config).get_anndata()[expected.obs_names, expected.var_names]
     for key in ("raw", "qvalue", "pep", "normalized", "spectral_counts"):
         assert_allclose(actual.layers[key], expected.layers[key], rtol=3e-7, equal_nan=True)
     assert_allclose(actual.X, expected.X, rtol=3e-7)
+
+
+@pytest.mark.parametrize("method", ["pyarrow", "pandas", "unknown", None])
+@pytest.mark.parametrize("suffix", [".tsv", ".parquet"])
+def test_only_polars_load_method_is_accepted_before_file_io(tmp_path, method, suffix):
+    config = base_config(tmp_path)
+    config["dataset"].update(input_file=str(tmp_path/("does-not-exist"+suffix)), load_method=method)
+    # Invalid config must not silently select another backend, even for Parquet
+    # (whose format-specific reader remains PyArrow).
+    with pytest.raises(ValueError, match=r"dataset\.load_method.*polars"):
+        Dataset(**config)
 
 
 @pytest.mark.parametrize("template", ["spectronaut-proteomics", "diann-proteomics", "fragpipe-peptidomics"])
