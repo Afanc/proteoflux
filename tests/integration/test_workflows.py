@@ -19,6 +19,42 @@ def test_workflow_scientific_reference(name, workflow_results):
     assert set(summary.index.astype(str)) == set(obj.var_names)
 
 
+def test_robust_rollup_workflow_preserves_connected_quantities_and_component_ratios(tmp_path):
+    import anndata as ad
+    from proteoflux.main import run_pipeline
+    from tests.fixtures.workflows import protein_workflow
+
+    config = protein_workflow(tmp_path)
+    config["preprocessing"]["protein_rollup_method"] = "robust_regression"
+    rows = pd.read_csv(config["dataset"]["input_file"], sep="\t")
+    # P000: one peptide in A/B and a different peptide in C, with no bridge.
+    first = sorted(rows.loc[rows.protein == "P000", "sequence"].unique())[0]
+    remove = (rows.protein == "P000") & ((rows.sequence == first) == (rows.condition == "C"))
+    rows.loc[remove, "intensity"] = np.nan
+    rows.to_csv(config["dataset"]["input_file"], sep="\t", index=False)
+    run_pipeline(config)
+    result = ad.read_h5ad(config["exports"]["path_h5ad"])
+    raw = pd.DataFrame(result.layers["raw"], index=result.obs_names, columns=result.var_names)
+
+    observed = rows[(rows.qvalue <= .01) & (rows.pep <= .05)].copy()
+    observed.loc[observed.intensity < 2, "intensity"] = np.nan
+    observed["run"] = observed.run.str.removesuffix(".raw")
+    observed["log_intensity"] = np.log2(observed.intensity)
+    expected = np.exp2(observed.groupby(["run", "protein"]).log_intensity.mean().unstack())
+    connected = raw.columns[raw.columns != "P000"]
+    # Both peptides in every connected protein differ by exactly twofold:
+    # the sum-coded model yields their geometric mean, not their linear sum.
+    assert_allclose(raw[connected], expected.reindex(index=raw.index, columns=connected), rtol=3e-6, equal_nan=True)
+    for sequence, component in observed[observed.protein == "P000"].groupby("sequence"):
+        source = component.set_index("run").intensity.reindex(raw.index)
+        keep = source.notna() & raw.P000.notna()
+        assert keep.sum() >= 2
+        assert_allclose(raw.P000[keep]/raw.P000[keep].iloc[0], source[keep]/source[keep].iloc[0], rtol=3e-6)
+    summary = pd.read_excel(config["exports"]["path_table"], sheet_name="Summary", index_col=0)
+    exported = summary.loc[raw.columns, ["Raw_Intensities"+s for s in raw.index]].to_numpy().T
+    assert_allclose(exported, raw, rtol=3e-6, equal_nan=True)
+
+
 @pytest.mark.parametrize("mode", ["free", "nonneg"])
 def test_optional_covariate_slope_modes_can_run(tmp_path, mode):
     import anndata as ad

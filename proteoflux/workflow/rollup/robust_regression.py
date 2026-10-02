@@ -354,7 +354,8 @@ def _fit_rlm_numpy_irls_explicit(
     huber_t: float,
     max_iter: int,
     tol: float,
-) -> tuple[int, str, list[float]]:
+) -> tuple[np.ndarray, int]:
+    beta, _, _, _ = np.linalg.lstsq(x, y, rcond=None)
 
     for it in range(1, max_iter + 1):
         resid = y - x @ beta

@@ -35,14 +35,18 @@ def test_optional_spectral_counts_can_be_absent():
     assert compute_nrsc(obj, ["A_vs_B"]) is None
 
 
-@pytest.mark.xfail(raises=UnboundLocalError, reason="disconnected robust-regression IRLS reads beta before initialization")
-def test_disconnected_robust_rollup_produces_result():
+@pytest.mark.xfail(raises=AssertionError, reason="Disconnected QR pruning makes absolute protein quantities fail uniform intensity scaling")
+def test_disconnected_robust_rollup_preserves_uniform_intensity_scaling():
     peptides = pl.DataFrame({"protein": ["P", "P"], "peptide": ["first", "second"],
                              "a": [8., None], "b": [None, 32.]})
-    out = pivot_df_robust_regression(pep_wide=peptides, protein_col="protein", peptide_col="peptide",
-                                    sample_cols=["a", "b"], num_cores=1, huber_t=1.345,
-                                    max_iter=20, tol=1e-8, min_nonan=1)
-    assert out.shape == (1, 3)
+    def rollup(frame):
+        return pivot_df_robust_regression(pep_wide=frame, protein_col="protein", peptide_col="peptide",
+                                         sample_cols=["a", "b"], num_cores=1, huber_t=1.345,
+                                         max_iter=20, tol=1e-8, min_nonan=1).select("a", "b").to_numpy()
+    baseline = rollup(peptides)
+    scaled = rollup(peptides.with_columns(pl.col("a", "b") * 2))
+    # Changing intensity units must not turn a twofold scale factor into fourfold.
+    assert_allclose(scaled, 2*baseline, rtol=1e-10, equal_nan=True)
 
 
 @pytest.mark.parametrize("mode", ["free", "nonneg"])
