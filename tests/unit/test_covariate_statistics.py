@@ -1,12 +1,14 @@
 """Stage-1 association diagnostics are distinct from FT contrast tests."""
 from copy import deepcopy
 
+import anndata as ad
 import numpy as np
 import pytest
 from numpy.testing import assert_allclose, assert_array_equal
 from scipy.stats import false_discovery_control, linregress, t as student_t
 
 from proteoflux.analysis.limma_pipeline import run_limma_pipeline
+from proteoflux.export.de_exporter import DEExporter
 from proteoflux.workflow.dataset import Dataset
 from tests.fixtures.workflows import phospho_workflow
 from tests.unit.test_statistics import expression
@@ -110,6 +112,54 @@ def test_covariate_p_has_one_diagnostic_per_feature(tmp_path):
     out = run_limma_pipeline(Dataset(**config).get_anndata(), config)
     assert out.varm["covariate_p"].shape == (out.n_vars, 1)
     assert out.varm["covariate_q"].shape == (out.n_vars, 1)
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize("mode", ["free", "nonneg"])
+def test_fully_imputed_background_diagnostics_apply_bh_after_neutralization(covariate_experiment, tmp_path, mode):
+    obj, config = covariate_experiment
+    config["ancova"] = {"beta_mode": mode}
+    baseline = run_limma_pipeline(obj, config)
+    feature = np.argmin(baseline.varm["covariate_p"][:, 0])
+    # A non-flat imputed analysis vector is not evidence of observed background.
+    obj.layers["raw_covariate"][:, feature] = np.nan
+    result = run_limma_pipeline(obj, config)
+    p = result.varm["covariate_p"][:, 0]
+    assert p[feature] == 1
+    expected_p = baseline.varm["covariate_p"][:, 0].copy()
+    expected_p[feature] = 1
+    assert_array_equal(p, expected_p)
+    expected_q = false_discovery_control(p)
+    assert_allclose(result.varm["covariate_q"][:, 0], expected_q, rtol=1e-12, atol=1e-14)
+    # Correct diagnostics must survive the actual H5AD exporter with their labels.
+    path = tmp_path/"slope-diagnostics.h5ad"
+    DEExporter(result, output_path=None, config=config).export_adata(str(path))
+    restored = ad.read_h5ad(path)
+    assert_array_equal(restored.var_names, obj.var_names)
+    assert restored.varm["covariate_q"].shape == (obj.n_vars, 1)
+    assert_array_equal(restored.varm["covariate_p"][:, 0], p)
+    assert_allclose(restored.varm["covariate_q"][:, 0], expected_q, rtol=1e-12, atol=1e-14)
+
+
+@pytest.mark.parametrize("mode", ["fixed1", "free", "nonneg"])
+@pytest.mark.parametrize("missing", ["partial", "multiple", "all"])
+def test_slope_diagnostic_bh_retains_full_feature_universe(covariate_experiment, mode, missing):
+    obj, config = covariate_experiment
+    config["ancova"] = {"beta_mode": mode, "ridge_lambda": 0}
+    expected_p = np.array([linregress(obj.layers["centered_covariate"][:, g], obj.X[:, g]).pvalue
+                           for g in range(obj.n_vars)])
+    if missing == "partial":
+        obj.layers["raw_covariate"][0, [0, -1]] = np.nan
+    elif missing == "multiple":
+        obj.layers["raw_covariate"][:, [0, -1]] = np.nan
+    else:
+        obj.layers["raw_covariate"][:] = np.nan
+    if mode != "fixed1":
+        expected_p[np.isnan(obj.layers["raw_covariate"]).all(axis=0)] = 1
+    # BH includes neutralized sites; it must not silently shrink the test family.
+    result = run_limma_pipeline(obj, config)
+    assert_allclose(result.varm["covariate_p"][:, 0], expected_p, rtol=1e-10, atol=1e-14)
+    assert_allclose(result.varm["covariate_q"][:, 0], false_discovery_control(expected_p), rtol=1e-10, atol=1e-14)
 
 
 def test_missing_spectral_counts_do_not_change_covariate_results(covariate_experiment):

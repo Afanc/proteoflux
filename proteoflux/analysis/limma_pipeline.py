@@ -1004,7 +1004,8 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
             beta1[no_adjust] = 0.0
             cov_t[no_adjust] = 0.0
             cov_p[no_adjust] = 1.0
-            cov_q[no_adjust] = 1.0
+            # Neutralized p-values also change BH ranks for other features.
+            cov_q = bh_qvalues(cov_p[:, None])[:, 0]
 
 
     # Recompute residuals with possibly modified betas
