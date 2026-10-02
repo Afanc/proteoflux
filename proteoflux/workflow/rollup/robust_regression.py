@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import sys
+import warnings
 from typing import Sequence
 
 import numpy as np
@@ -9,6 +10,23 @@ import pandas as pd
 import polars as pl
 import scipy.linalg as la
 from tqdm import tqdm
+
+
+class DisconnectedObservationError(ValueError):
+    """Sample abundances cannot be aligned across observation components."""
+
+
+class DisconnectedObservationWarning(UserWarning):
+    """Returned abundances use independent scales in different components."""
+
+
+def _validate_disconnected_policy(disconnected_policy: str) -> None:
+    if disconnected_policy not in ("raise", "component"):
+        raise ValueError(
+            "robust_regression: disconnected_policy must be 'raise' or 'component', "
+            f"got {disconnected_policy!r}"
+        )
+
 
 def _find_nameswitch_indices(arr: np.ndarray) -> np.ndarray:
     change_indices = np.where(arr[:-1] != arr[1:])[0] + 1
@@ -173,22 +191,22 @@ def _solve_weighted_ls_normal_eq(
         return beta
 
 
-def _is_connected_observation_graph(
+def _observation_component_codes(
     sample_codes: np.ndarray,
     peptide_codes: np.ndarray,
     n_samples: int,
     n_peptides: int,
-) -> bool:
+) -> np.ndarray:
     """
-    Connectivity of the bipartite graph:
+    Label each observation's component in the bipartite graph:
       sample nodes 0..n_samples-1
       peptide nodes n_samples..n_samples+n_peptides-1
 
-    For the additive sample+peptide model, disconnected components are the
-    main source of non-identifiability beyond the usual constraint.
+    Labels follow the order of the active sample codes. Unobserved samples
+    and peptides do not create components.
     """
-    if n_samples == 0 or n_peptides == 0:
-        return False
+    if n_samples == 0 or n_peptides == 0 or sample_codes.size == 0:
+        return np.empty(0, dtype=np.int32)
 
     n_nodes = n_samples + n_peptides
     parent = np.arange(n_nodes, dtype=np.int32)
@@ -208,16 +226,26 @@ def _is_connected_observation_graph(
     for s, p in zip(sample_codes.tolist(), peptide_codes.tolist(), strict=False):
         union(int(s), n_samples + int(p))
 
-    roots = set()
-    active_samples = np.unique(sample_codes)
-    active_peptides = np.unique(peptide_codes)
+    root_to_component: dict[int, int] = {}
+    sample_components = np.full(n_samples, -1, dtype=np.int32)
+    for s in np.unique(sample_codes).tolist():
+        root = find(int(s))
+        component = root_to_component.setdefault(root, len(root_to_component))
+        sample_components[s] = component
 
-    for s in active_samples.tolist():
-        roots.add(find(int(s)))
-    for p in active_peptides.tolist():
-        roots.add(find(n_samples + int(p)))
+    return sample_components[sample_codes]
 
-    return len(roots) == 1
+
+def _is_connected_observation_graph(
+    sample_codes: np.ndarray,
+    peptide_codes: np.ndarray,
+    n_samples: int,
+    n_peptides: int,
+) -> bool:
+    components = _observation_component_codes(
+        sample_codes, peptide_codes, n_samples, n_peptides
+    )
+    return bool(components.size and np.all(components == components[0]))
 
 
 def _structured_predict(
@@ -432,7 +460,9 @@ def _fit_one_protein(
     max_iter: int,
     tol: float,
     min_nonan: int,
+    disconnected_policy: str = "raise",
 ) -> tuple[int, str, list[float]]:
+    _validate_disconnected_policy(disconnected_policy)
 
     y_linear, sample_codes, peptide_codes, observed_sample_names, sample_counts = (
         _extract_observed_long_arrays(
@@ -446,39 +476,16 @@ def _fit_one_protein(
 
     y = np.log2(y_linear)
 
-    n_obs = float(y.size)
     n_samples = len(observed_sample_names)
     n_peptides = int(peptide_codes.max()) + 1 if peptide_codes.size else 0
 
-    fast_path = False
+    component_codes = _observation_component_codes(
+        sample_codes, peptide_codes, n_samples, n_peptides
+    )
+    n_components = int(component_codes.max()) + 1
 
-    if (
-        n_peptides > 0
-        and _is_connected_observation_graph(
-            sample_codes=sample_codes,
-            peptide_codes=peptide_codes,
-            n_samples=n_samples,
-            n_peptides=n_peptides,
-        )
-    ):
-        fast_path = True
-        colnames = (
-            [_sample_coef_col(s) for s in observed_sample_names]
-            + [f"C(peptide, Sum)[S.{i}]" for i in range(max(0, n_peptides - 1))]
-        )
-        x = None
-    else:
-        x, colnames = _build_sum_coded_design(
-            sample_codes=sample_codes,
-            peptide_codes=peptide_codes,
-            observed_sample_names=observed_sample_names,
-        )
-        x, colnames = _prune_design_full_rank(x, colnames)
-
-        if x.shape[1] == 0:
-            return idx, protein_id, [np.nan] * len(sample_cols)
-
-    if fast_path:
+    if n_components == 1:
+        # Keep the established connected fit unchanged.
         beta, _ = _fit_rlm_numpy_irls_structured(
             sample_codes=sample_codes,
             peptide_codes=peptide_codes,
@@ -489,17 +496,61 @@ def _fit_one_protein(
             n_samples=n_samples,
             n_peptides=n_peptides,
         )
+        beta_map = {
+            _sample_coef_col(sample): float(beta[i])
+            for i, sample in enumerate(observed_sample_names)
+        }
     else:
-        assert x is not None
-        beta, _ = _fit_rlm_numpy_irls_explicit(
-            x=x,
-            y=y,
-            huber_t=huber_t,
-            max_iter=max_iter,
-            tol=tol,
+        component_samples = [
+            np.unique(sample_codes[component_codes == component])
+            for component in range(n_components)
+        ]
+        sample_groups = [
+            [observed_sample_names[int(s)] for s in samples]
+            for samples in component_samples
+        ]
+        message = (
+            f"robust_regression: protein {protein_id!r} has {n_components} "
+            f"disconnected observation components (sample groups: {sample_groups!r}). "
+            "Relative protein abundances across these components are not identifiable."
+        )
+        if disconnected_policy == "raise":
+            raise DisconnectedObservationError(
+                message + " Use disconnected_policy='component' only if estimates "
+                "on independent component scales are explicitly intended."
+            )
+
+        warnings.warn(
+            message + " Returning component-wise estimates with peptide effects "
+            "centered separately in each component; compare samples only within "
+            "the same component.",
+            DisconnectedObservationWarning,
+            stacklevel=2,
         )
 
-    beta_map = {name: float(beta[i]) for i, name in enumerate(colnames)}
+        beta_map = {}
+        for component, samples in enumerate(component_samples):
+            mask = component_codes == component
+            _, local_sample_codes = np.unique(sample_codes[mask], return_inverse=True)
+            peptides, local_peptide_codes = np.unique(
+                peptide_codes[mask], return_inverse=True
+            )
+            # Each component gets its own sum-to-zero peptide constraint.
+            # All sample columns are retained; QR pruning would change their meaning.
+            beta, _ = _fit_rlm_numpy_irls_structured(
+                sample_codes=local_sample_codes,
+                peptide_codes=local_peptide_codes,
+                y=y[mask],
+                huber_t=huber_t,
+                max_iter=max_iter,
+                tol=tol,
+                n_samples=len(samples),
+                n_peptides=len(peptides),
+            )
+            for i, sample in enumerate(samples):
+                beta_map[_sample_coef_col(observed_sample_names[int(sample)])] = float(
+                    beta[i]
+                )
 
     out_vals: list[float] = []
     for sample in sample_cols:
@@ -568,7 +619,24 @@ def pivot_df_robust_regression(
     max_iter: int,
     tol: float,
     min_nonan: int,
+    disconnected_policy: str = "raise",
 ) -> pl.DataFrame:
+    """Roll up peptides using robust additive sample and peptide effects.
+
+    ``disconnected_policy='raise'`` (default) rejects a protein when its
+    observed sample/peptide graph is disconnected. There is no evidence
+    aligning protein abundance between those components.
+
+    ``disconnected_policy='component'`` explicitly opts into fitting each
+    component with a separate sum-to-zero peptide constraint. A warning lists
+    the sample groups. Returned quantities are comparable only within each
+    group; the output schema does not retain component labels, so this mode
+    must not feed unrestricted between-sample comparisons downstream.
+
+    Missing, non-finite and non-positive observations remain excluded, and
+    ``min_nonan`` still applies to each sample's observed peptide count.
+    """
+    _validate_disconnected_policy(disconnected_policy)
     required = {protein_col, peptide_col, *sample_cols}
     missing = sorted(required - set(pep_wide.columns))
     if missing:
@@ -614,6 +682,7 @@ def pivot_df_robust_regression(
                 max_iter,
                 tol,
                 min_nonan,
+                disconnected_policy,
             )
         )
 

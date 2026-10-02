@@ -98,6 +98,46 @@ Can be used to inject an additional .tsv/.csv/.parquet dataset.
 | `robust_regression_max_iter` | Maximum number of IRLS iterations for robust regression summarization. Default: `20`. |
 | `robust_regression_tol` | Convergence tolerance for robust regression summarization. Default: `1e-8`. |
 | `robust_regression_min_nonan` | Minimum number of observed peptide-level values required in a sample to report a protein quantity for that sample. Below this threshold, the output is set to `NA`. Default: `1`. |
+| `robust_regression_disconnected_policy` | Handling of disconnected sample/peptide observations in proteomics robust rollup: `raise` (default) or `component`. See below. |
+
+### Disconnected observations in robust regression
+
+These settings belong under `preprocessing` in YAML or the dictionary passed to
+`run_pipeline` / `Dataset`:
+
+```yaml
+preprocessing:
+  protein_rollup_method: robust_regression
+  robust_regression_disconnected_policy: raise
+```
+
+A protein is disconnected when its observed peptides link separate sample groups
+with no shared-peptide path between the groups. Positive finite measurements
+define these links after filtering and peptide aggregation. The relative protein
+abundance scale between such groups cannot be identified from those observations.
+
+- `raise` stops preprocessing with `DisconnectedObservationError`, identifying
+  the protein and sample groups. This is the default when the key is omitted.
+- `component` explicitly opts into fitting each component with its own zero-sum
+  peptide-effect constraint. It retains every sample coefficient subject to
+  `robust_regression_min_nonan`, and emits `DisconnectedObservationWarning` with
+  the sample groups. Estimates are comparable **only within the same component**.
+
+Component mode does **not** automatically restrict downstream contrasts, variance
+estimation, normalization or plots. Between-component fold changes remain
+unsupported. Component membership is protein-specific; selecting one contrast
+does not prove it is supported for every protein. Use this mode only when the
+downstream analysis respects those limits. H5AD/XLSX do not store component
+membership or mark unsupported comparisons. H5AD records the chosen policy in
+`uns["preprocessing"]["quantification"]["robust_regression_disconnected_policy"]`
+for proteomics robust rollup.
+
+Direct Python callers of
+`proteoflux.workflow.rollup.robust_regression.pivot_df_robust_regression` use the
+keyword argument `disconnected_policy="raise"` or `"component"` (also defaulting
+to `"raise"`). Other values, including null, are rejected. Connected fits retain
+their existing behavior under either policy. This setting does not apply to
+sum/directLFQ rollup or the phospho background's separate rollup method.
 
 ---
 

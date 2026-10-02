@@ -153,9 +153,24 @@ def test_runtime_defaults_are_distinct_from_template_settings():
     assert runtime.protein_rollup_method == "sum"
     assert runtime.filter_pep == .2 and runtime.min_linear_intensity is None
     assert runtime.directlfq_cores == 4
+    assert runtime.robust_regression_disconnected_policy == "raise"
     assert configured.protein_rollup_method == "directlfq"
     assert configured.filter_pep == .05 and configured.min_linear_intensity == 2
     assert configured.directlfq_cores == 8
+
+
+@pytest.mark.parametrize("policy", ["raise", "component"])
+def test_robust_disconnected_policy_is_a_preprocessing_option(policy):
+    configured = Preprocessor({"protein_rollup_method": "robust_regression",
+                               "robust_regression_disconnected_policy": policy})
+    assert configured.robust_regression_disconnected_policy == policy
+
+
+@pytest.mark.parametrize("policy", [None, False, "", "ignore", ["component"]])
+def test_invalid_robust_disconnected_policy_fails_before_file_io(policy):
+    with pytest.raises(ValueError, match="preprocessing.robust_regression_disconnected_policy"):
+        Dataset(dataset={"input_file": "not-present.tsv"},
+                preprocessing={"robust_regression_disconnected_policy": policy})
 
 
 @pytest.mark.parametrize("config, message", [
@@ -189,3 +204,5 @@ def test_cli_templates_copy_packaged_config_verbatim(tmp_path):
         result = runner.invoke(app, ["init", name, "--path", str(path)])
         assert result.exit_code == 0, result.output
         assert path.read_bytes() == resources.files("proteoflux.templates").joinpath(name+".yaml").read_bytes()
+        if name.endswith("-proteomics"):
+            assert yaml.safe_load(path.read_text())["preprocessing"]["robust_regression_disconnected_policy"] == "raise"

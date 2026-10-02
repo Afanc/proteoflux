@@ -19,21 +19,41 @@ def test_workflow_scientific_reference(name, workflow_results):
     assert set(summary.index.astype(str)) == set(obj.var_names)
 
 
-def test_robust_rollup_workflow_preserves_connected_quantities_and_component_ratios(tmp_path):
+@pytest.mark.parametrize("disconnected, policy", [(False, None), (True, None), (True, "raise"), (True, "component")])
+def test_robust_rollup_workflow_preserves_connected_quantities_and_component_ratios(tmp_path, disconnected, policy):
     import anndata as ad
+    from pathlib import Path
     from proteoflux.main import run_pipeline
+    from proteoflux.workflow.rollup.robust_regression import DisconnectedObservationError, DisconnectedObservationWarning
     from tests.fixtures.workflows import protein_workflow
 
     config = protein_workflow(tmp_path)
     config["preprocessing"]["protein_rollup_method"] = "robust_regression"
+    if policy is not None:
+        config["preprocessing"]["robust_regression_disconnected_policy"] = policy
     rows = pd.read_csv(config["dataset"]["input_file"], sep="\t")
-    # P000: one peptide in A/B and a different peptide in C, with no bridge.
-    first = sorted(rows.loc[rows.protein == "P000", "sequence"].unique())[0]
-    remove = (rows.protein == "P000") & ((rows.sequence == first) == (rows.condition == "C"))
-    rows.loc[remove, "intensity"] = np.nan
-    rows.to_csv(config["dataset"]["input_file"], sep="\t", index=False)
-    run_pipeline(config)
+    if disconnected:
+        # P000: one peptide in A/B and a different peptide in C, with no bridge.
+        first = sorted(rows.loc[rows.protein == "P000", "sequence"].unique())[0]
+        remove = (rows.protein == "P000") & ((rows.sequence == first) == (rows.condition == "C"))
+        rows.loc[remove, "intensity"] = np.nan
+        rows.to_csv(config["dataset"]["input_file"], sep="\t", index=False)
+        if policy != "component":
+            with pytest.raises(DisconnectedObservationError, match="protein 'P000'.*sample groups"):
+                run_pipeline(config)
+            assert not Path(config["exports"]["path_h5ad"]).exists()
+            assert not Path(config["exports"]["path_table"]).exists()
+            return
+        # Only A/B share this protein's component. Restrict variance fitting too.
+        config["analysis"].update(only_contrasts=["B_vs_A"], separate_contrasts=True)
+        with pytest.warns(DisconnectedObservationWarning, match="protein 'P000'"):
+            run_pipeline(config)
+    else:
+        run_pipeline(config)
     result = ad.read_h5ad(config["exports"]["path_h5ad"])
+    assert result.uns["preprocessing"]["quantification"]["robust_regression_disconnected_policy"] == (policy or "raise")
+    if disconnected:
+        assert list(result.uns["contrast_names"]) == ["B_vs_A"]
     raw = pd.DataFrame(result.layers["raw"], index=result.obs_names, columns=result.var_names)
 
     observed = rows[(rows.qvalue <= .01) & (rows.pep <= .05)].copy()
@@ -41,10 +61,10 @@ def test_robust_rollup_workflow_preserves_connected_quantities_and_component_rat
     observed["run"] = observed.run.str.removesuffix(".raw")
     observed["log_intensity"] = np.log2(observed.intensity)
     expected = np.exp2(observed.groupby(["run", "protein"]).log_intensity.mean().unstack())
-    connected = raw.columns[raw.columns != "P000"]
     # Both peptides in every connected protein differ by exactly twofold:
     # the sum-coded model yields their geometric mean, not their linear sum.
-    assert_allclose(raw[connected], expected.reindex(index=raw.index, columns=connected), rtol=3e-6, equal_nan=True)
+    # Disconnected P000 has one peptide per component, hence zero peptide effect.
+    assert_allclose(raw, expected.reindex(index=raw.index, columns=raw.columns), rtol=3e-6, equal_nan=True)
     for sequence, component in observed[observed.protein == "P000"].groupby("sequence"):
         source = component.set_index("run").intensity.reindex(raw.index)
         keep = source.notna() & raw.P000.notna()

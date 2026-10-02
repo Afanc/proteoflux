@@ -213,6 +213,15 @@ class Preprocessor:
         self.robust_regression_min_nonan = int(
             config.get("robust_regression_min_nonan", 1)
         )
+        self.robust_regression_disconnected_policy = config.get(
+            "robust_regression_disconnected_policy", "raise"
+        )
+        if self.robust_regression_disconnected_policy not in ("raise", "component"):
+            raise ValueError(
+                "preprocessing.robust_regression_disconnected_policy must be "
+                "'raise' or 'component', "
+                f"got {self.robust_regression_disconnected_policy!r}"
+            )
 
         # Huber tuning constant. 1.345 is the standard Huber default.
         self.robust_regression_huber_t = float(
@@ -1475,6 +1484,11 @@ class Preprocessor:
         ir.add_metadata("quantification", "peptide_rollup_method", self.peptide_rollup_method)
         if self.analysis_type not in {"peptidomics", "pelsa"}:
             ir.add_metadata("quantification", "protein_rollup_method", self.protein_rollup_method)
+        if self.analysis_type == "proteomics" and self.protein_rollup_method == "robust_regression":
+            ir.add_metadata(
+                "quantification", "robust_regression_disconnected_policy",
+                self.robust_regression_disconnected_policy,
+            )
 
         # Covariate pivots and broadcast
         with log_indent():
@@ -1676,6 +1690,7 @@ class Preprocessor:
                 max_iter=self.robust_regression_max_iter,
                 tol=self.robust_regression_tol,
                 min_nonan=self.robust_regression_min_nonan,
+                disconnected_policy=self.robust_regression_disconnected_policy,
             )
         elif method in {"top3", "top_3"}:
             intensity = self._pivot_df_top_n(
