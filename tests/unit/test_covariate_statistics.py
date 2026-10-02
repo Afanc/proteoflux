@@ -4,7 +4,7 @@ from copy import deepcopy
 import numpy as np
 import pytest
 from numpy.testing import assert_allclose, assert_array_equal
-from scipy.stats import false_discovery_control, linregress
+from scipy.stats import false_discovery_control, linregress, t as student_t
 
 from proteoflux.analysis.limma_pipeline import run_limma_pipeline
 from proteoflux.workflow.dataset import Dataset
@@ -110,3 +110,80 @@ def test_covariate_p_has_one_diagnostic_per_feature(tmp_path):
     out = run_limma_pipeline(Dataset(**config).get_anndata(), config)
     assert out.varm["covariate_p"].shape == (out.n_vars, 1)
     assert out.varm["covariate_q"].shape == (out.n_vars, 1)
+
+
+@pytest.mark.parametrize("mode", ["free", "nonneg"])
+@pytest.mark.parametrize("separate", [False, True])
+def test_fitted_modes_match_independent_two_stage_regression(covariate_experiment, mode, separate):
+    obj, config = covariate_experiment
+    config["ancova"] = {"beta_mode": mode, "ridge_lambda": 0}
+    config["analysis"]["separate_contrasts"] = separate
+    cov = obj.layers["centered_covariate"]
+    fits = [linregress(cov[:, g], obj.X[:, g]) for g in range(obj.n_vars)]
+    slopes = np.array([fit.slope for fit in fits])
+    assert (slopes < 0).any() and (slopes > 0).any()
+    applied = np.maximum(slopes, 0) if mode == "nonneg" else slopes
+    residuals = obj.X - np.array([fit.intercept for fit in fits]) - cov*applied
+    out = run_limma_pipeline(obj, config)
+    assert_allclose(out.varm["covariate_beta"][:, 0], applied, rtol=1e-10, atol=1e-12)
+    assert_allclose(out.layers["residuals_covariate"], residuals, rtol=1e-10, atol=1e-12)
+    # Diagnostics describe the unconstrained slope, including negative slopes
+    # clipped for residualization in nonneg mode.
+    assert_allclose(out.varm["covariate_p"][:, 0], [fit.pvalue for fit in fits], rtol=1e-10, atol=1e-14)
+    for j, contrast in enumerate(out.uns["contrast_names"]):
+        a, b = contrast.split("_vs_")
+        levels = [a, b] if separate else ["A", "B", "C"]
+        selected = obj.obs.CONDITION.isin(levels)
+        conditions = obj.obs.CONDITION[selected]
+        design = np.column_stack([conditions == level for level in levels]).astype(float)
+        beta, *_ = np.linalg.lstsq(design, residuals[selected], rcond=None)
+        contrast_vector = np.array([float(level == a)-float(level == b) for level in levels])
+        fc = contrast_vector @ beta
+        error = residuals[selected] - design @ beta
+        df = selected.sum() - np.linalg.matrix_rank(design)
+        variance = (error**2).sum(axis=0)/df
+        se = np.sqrt(variance * (contrast_vector @ np.linalg.inv(design.T @ design) @ contrast_vector))
+        assert_allclose(out.varm["log2fc"][:, j], fc, rtol=1e-10, atol=1e-12)
+        assert_allclose(out.varm["se_raw"][:, j], se, rtol=1e-10)
+        p = 2*student_t.sf(abs(fc/se), df)
+        assert_allclose(out.varm["p_raw"][:, j], p, rtol=1e-10, atol=1e-14)
+        assert_allclose(out.varm["q_raw"][:, j], false_discovery_control(p), rtol=1e-10, atol=1e-14)
+
+
+@pytest.mark.parametrize("mode,separate", [
+    ("free", False), ("nonneg", False), ("free", True),
+    pytest.param("nonneg", True, marks=[pytest.mark.known_bug,
+        pytest.mark.xfail(raises=KeyError, reason="Deferred Inmoose infinite-prior-df KeyError -2 in pairwise nonneg fit")]),
+])
+def test_fitted_modes_keep_global_slopes_and_contrast_local_background_support(covariate_experiment, mode, separate):
+    obj, config = covariate_experiment
+    config["ancova"] = {"beta_mode": mode}
+    config["analysis"] = {"only_contrasts": ["B_vs_A", "C_vs_B"], "separate_contrasts": separate}
+    baseline = run_limma_pipeline(obj, config)
+    # Last four features have positive slopes, including under nonneg.
+    assert (baseline.varm["covariate_beta"][-4:, 0] > 0).all()
+    obj.layers["raw_covariate"][:3, -1] = np.nan  # A absent; B/C still supported
+    obj.layers["raw_covariate"][:, -2] = np.nan   # no observed FT in the experiment
+    obj.layers["raw_covariate"][0, -3] = np.nan   # partial A; both contrasts supported
+    obj.layers["raw_covariate"][:6, -4] = np.nan  # only C observed
+    before_raw = obj.layers["raw_covariate"].copy()
+    out = run_limma_pipeline(obj, config)
+    raw = run_limma_pipeline(obj, {"analysis": config["analysis"]})
+    # Only an entirely imputed background suppresses the global slope.
+    keep = np.arange(obj.n_vars) != obj.n_vars-2
+    assert_array_equal(out.varm["covariate_beta"][keep], baseline.varm["covariate_beta"][keep])
+    assert out.varm["covariate_beta"][-2, 0] == 0
+    assert out.varm["covariate_t"][-2, 0] == 0
+    assert out.varm["covariate_p"][-2, 0] == 1
+    assert out.varm["covariate_q"][-2, 0] == 1
+    assert_allclose(out.layers["residuals_covariate"][:, -2], obj.X[:, -2]-obj.X[:, -2].mean(), atol=1e-12)
+    unsupported = np.zeros((obj.n_vars, 2), dtype=bool)
+    unsupported[-1, 0] = True
+    unsupported[[-2, -4], :] = True
+    for key in ("log2fc", "p_ebayes", "q_ebayes"):
+        assert_array_equal(out.varm[key][unsupported], raw.varm[key][unsupported])
+    assert_array_equal(out.varm["cov_part"][unsupported], 0)
+    assert_allclose(out.varm["log2fc"][~unsupported], baseline.varm["log2fc"][~unsupported], rtol=1e-10, atol=1e-12)
+    assert_allclose(out.varm["raw_log2fc"], out.varm["log2fc"]+out.varm["cov_part"], rtol=1e-10, atol=1e-12)
+    assert_array_equal(out.layers["raw_covariate"], before_raw)
+    assert_array_equal(obj.layers["raw_covariate"], before_raw)

@@ -952,7 +952,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
 
     # === ANCOVA options ===
     ancova_cfg        = (config or {}).get("ancova", {})
-    # Different beta modes for testing. Now hard fix to fixed1, because occam.
+    # Slope constraints apply after global stage-1 estimation.
     beta_mode         = ancova_cfg.get("beta_mode", "fixed1")      # "free" | "nonneg" | "fixed1"
     ridge_lambda_cfg  = float(ancova_cfg.get("ridge_lambda", 1e-6))  # forwarded into Stage-1 OLS
 
@@ -997,10 +997,9 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     elif beta_mode != "free":
         raise ValueError(f"Unknown ancova.beta_mode={beta_mode!r}")
 
-    # Fully imputed FT rows were already flagged; combine with low-info unless fixed1
+    # Slopes are per feature. Contrast-local FT support is handled after fitting.
     if beta_mode != "fixed1":
-        # Per-contrast: if one condition has zero non-imputed FT samples, do not adjust.
-        no_adjust = contrast_noft | imputed_all_cov[:, None]
+        no_adjust = imputed_all_cov
         if np.any(no_adjust):
             beta1[no_adjust] = 0.0
             cov_t[no_adjust] = 0.0
@@ -1062,14 +1061,13 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     raw_q = limma_raw["q_ebayes"] if not pilot_mode else None
 
     # For "no-FT" contrasts, fall back to RAW phospho (coef + p/q) in the adjusted outputs
-    if beta_mode == "fixed1":
-        if not pilot_mode:
-            limma_resid["coefs"][contrast_noft]    = raw_coefs[contrast_noft]
-            limma_resid["p_ebayes"][contrast_noft] = raw_p[contrast_noft]
-            limma_resid["q_ebayes"][contrast_noft] = raw_q[contrast_noft]
-        else:
-            limma_resid["p_ebayes"] = limma_resid["q_ebayes"] = None
-            limma_resid["coefs"][contrast_noft] = raw_coefs[contrast_noft]
+    if not pilot_mode:
+        limma_resid["coefs"][contrast_noft]    = raw_coefs[contrast_noft]
+        limma_resid["p_ebayes"][contrast_noft] = raw_p[contrast_noft]
+        limma_resid["q_ebayes"][contrast_noft] = raw_q[contrast_noft]
+    else:
+        limma_resid["p_ebayes"] = limma_resid["q_ebayes"] = None
+        limma_resid["coefs"][contrast_noft] = raw_coefs[contrast_noft]
 
     # limma on the covariate (FT) matrix itself (same design/contrasts)
     fully_ft = None
@@ -1100,8 +1098,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         contrast_names=contrast_names,
     )
     # For contrasts with no FT information, do not adjust: covariate part := 0
-    if beta_mode == "fixed1":
-        cov_part[contrast_noft] = 0.0
+    cov_part[contrast_noft] = 0.0
 
 
     # Missingness
@@ -1136,7 +1133,8 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     out.varm[VARM_COV_PART] = cov_part
 
     # Stage-1 covariate stats (per feature)
-    # beta is the applied slope; SE/t/p/q describe the estimate before beta_mode.
+    # beta is the applied slope; diagnostics retain the stage-1 estimate,
+    # with the fully-imputed-background neutralization above for fitted modes.
     if not pilot_mode:
         out.varm[VARM_COVARIATE_BETA] = beta1[:, None]
         out.varm[VARM_COVARIATE_SE] = cov_se[:, None]

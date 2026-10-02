@@ -19,6 +19,41 @@ def test_workflow_scientific_reference(name, workflow_results):
     assert set(summary.index.astype(str)) == set(obj.var_names)
 
 
+@pytest.mark.parametrize("mode", ["free", "nonneg"])
+def test_optional_covariate_slope_modes_can_run(tmp_path, mode):
+    import anndata as ad
+    from scipy.optimize import lsq_linear
+    from proteoflux.main import run_pipeline
+    from tests.fixtures.workflows import phospho_workflow
+
+    config = phospho_workflow(tmp_path, kinase=False)
+    config["ancova"] = {"beta_mode": mode}
+    run_pipeline(config)
+    result = ad.read_h5ad(config["exports"]["path_h5ad"])
+    assert result.varm["log2fc"].shape[1] == 2  # original xfail assertion
+    assert result.varm["covariate_beta"].shape == (result.n_vars, 1)
+    assert result.varm["covariate_p"].shape == (result.n_vars, 1)
+    cov = result.layers["centered_covariate"].astype(float)
+    cov -= cov.mean(axis=0)
+    feature = np.argmax(cov.std(axis=0))  # independently check a non-flat site
+    assert cov[:, feature].std(ddof=1) > .1
+    energy = (cov**2).sum(axis=0)
+    ridge = 1e-6 * np.median(energy[energy > 0])
+    # Ridge is an extra least-squares observation penalizing only the slope.
+    design = np.vstack([np.column_stack([np.ones(result.n_obs), cov[:, feature]]), [0., np.sqrt(ridge)]])
+    y = result.X[:, feature].astype(float)
+    bounds = ([-np.inf, 0. if mode == "nonneg" else -np.inf], [np.inf, np.inf])
+    fit = lsq_linear(design, np.r_[y, 0.], bounds=bounds)
+    assert fit.success
+    assert_allclose(result.varm["covariate_beta"][feature, 0], fit.x[1], rtol=3e-6, atol=2e-6)
+    assert_allclose(result.layers["residuals_covariate"][:, feature], y-fit.x[0]-fit.x[1]*cov[:, feature], rtol=3e-6, atol=2e-6)
+    if mode == "nonneg":
+        assert (result.varm["covariate_beta"] >= 0).all()
+    assert_allclose(result.varm["raw_log2fc"], result.varm["log2fc"]+result.varm["cov_part"], rtol=3e-6, atol=2e-6)
+    summary = pd.read_excel(config["exports"]["path_table"], sheet_name="Summary", index_col=0)
+    assert set(summary.index.astype(str)) == set(result.var_names)
+
+
 def test_separate_and_reused_background_align_same_observed_values(workflow_results):
     separate, _ = workflow_results("phospho")
     reused, _ = workflow_results("phospho_reuse")

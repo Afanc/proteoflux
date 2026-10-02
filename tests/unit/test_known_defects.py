@@ -6,6 +6,8 @@ expected failure narrow; unrelated exception types still fail the suite.
 import numpy as np
 import polars as pl
 import pytest
+from numpy.testing import assert_allclose
+from scipy.stats import false_discovery_control
 
 from proteoflux.analysis.limma_pipeline import run_limma_pipeline
 from proteoflux.analysis.nrsc import compute_nrsc
@@ -13,6 +15,7 @@ from proteoflux.workflow.dataset import Dataset
 from proteoflux.workflow.preprocessing import Preprocessor
 from proteoflux.workflow.rollup.robust_regression import pivot_df_robust_regression
 from tests.unit.test_statistics import expression
+from tests.unit.test_covariate_statistics import covariate_experiment
 
 pytestmark = [pytest.mark.unit, pytest.mark.known_bug]
 
@@ -43,13 +46,18 @@ def test_disconnected_robust_rollup_produces_result():
 
 
 @pytest.mark.parametrize("mode", ["free", "nonneg"])
-@pytest.mark.xfail(raises=UnboundLocalError, reason="non-fixed covariate modes use contrast_noft before assignment")
-def test_optional_covariate_slope_modes_can_run(tmp_path, mode):
-    from tests.fixtures.workflows import phospho_workflow
-    config = phospho_workflow(tmp_path, kinase=False)
+@pytest.mark.xfail(raises=AssertionError, reason="Fully imputed FT slope p-values are neutralized after BH, leaving other diagnostic q-values stale")
+def test_fully_imputed_background_diagnostics_apply_bh_after_neutralization(covariate_experiment, mode):
+    obj, config = covariate_experiment
     config["ancova"] = {"beta_mode": mode}
-    result = run_limma_pipeline(Dataset(**config).get_anndata(), config)
-    assert result.varm["log2fc"].shape[1] == 2
+    baseline = run_limma_pipeline(obj, config)
+    feature = np.argmin(baseline.varm["covariate_p"][:, 0])
+    # A non-flat imputed analysis vector is not evidence of observed background.
+    obj.layers["raw_covariate"][:, feature] = np.nan
+    result = run_limma_pipeline(obj, config)
+    p = result.varm["covariate_p"][:, 0]
+    assert p[feature] == 1
+    assert_allclose(result.varm["covariate_q"][:, 0], false_discovery_control(p), rtol=1e-12, atol=1e-14)
 
 
 @pytest.mark.xfail(raises=NameError, reason="PyArrow CSV loader refers to unimported pv_csv")
