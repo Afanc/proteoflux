@@ -10,7 +10,6 @@ from numpy.testing import assert_allclose
 from scipy.stats import false_discovery_control
 
 from proteoflux.analysis.limma_pipeline import run_limma_pipeline
-from proteoflux.analysis.nrsc import compute_nrsc
 from proteoflux.workflow.dataset import Dataset
 from proteoflux.workflow.preprocessing import Preprocessor
 from proteoflux.workflow.rollup.robust_regression import pivot_df_robust_regression
@@ -26,13 +25,6 @@ def test_equal_residual_variances_still_allow_moderation():
     obj.X = np.tile(np.array([-1., 0., 1., 0., 1., 2., -2., -1., 0.])[:, None], (1, obj.n_vars))
     result = run_limma_pipeline(obj, {})
     assert np.isfinite(result.varm["p_ebayes"]).all()
-
-
-@pytest.mark.xfail(raises=NameError, reason="nrsc missing-layer warning uses unimported log_warning")
-def test_optional_spectral_counts_can_be_absent():
-    obj = expression()
-    del obj.layers["spectral_counts"]
-    assert compute_nrsc(obj, ["A_vs_B"]) is None
 
 
 @pytest.mark.xfail(raises=AssertionError, reason="Disconnected QR pruning makes absolute protein quantities fail uniform intensity scaling")

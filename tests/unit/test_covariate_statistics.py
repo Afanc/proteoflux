@@ -112,6 +112,19 @@ def test_covariate_p_has_one_diagnostic_per_feature(tmp_path):
     assert out.varm["covariate_q"].shape == (out.n_vars, 1)
 
 
+def test_missing_spectral_counts_do_not_change_covariate_results(covariate_experiment):
+    obj, config = covariate_experiment
+    baseline = run_limma_pipeline(obj, config)
+    del obj.layers["spectral_counts"]
+    result = run_limma_pipeline(obj, config)
+    assert result.uns["has_covariate"]
+    assert "spectral_counts" not in result.layers
+    assert set(result.varm) == set(baseline.varm) - {"nrsc", "nrsc_misalignment"}
+    for key in result.varm:
+        assert_array_equal(result.varm[key], baseline.varm[key])
+    assert_array_equal(result.layers["residuals_covariate"], baseline.layers["residuals_covariate"])
+
+
 @pytest.mark.parametrize("mode", ["free", "nonneg"])
 @pytest.mark.parametrize("separate", [False, True])
 def test_fitted_modes_match_independent_two_stage_regression(covariate_experiment, mode, separate):

@@ -2,6 +2,8 @@ import anndata as ad
 import numpy as np
 from typing import Optional
 
+from proteoflux.utils.utils import log_warning
+
 def compute_nrsc(
     adata: ad.AnnData,
     contrast_names: list[str],

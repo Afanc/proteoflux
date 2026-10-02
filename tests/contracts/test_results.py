@@ -73,6 +73,45 @@ def test_h5ad_export_does_not_mutate_analysis_object(tmp_path, workflow_results)
     assert_reference(scientific_payload(ad.read_h5ad(path)), before)
 
 
+@pytest.mark.parametrize("evidence", ["absent", "zero", "observed"])
+def test_optional_spectral_evidence_through_analysis_and_exports(protein_config, tmp_path, evidence):
+    from proteoflux.analysis.limma_pipeline import run_limma_pipeline
+    from proteoflux.workflow.dataset import Dataset
+
+    # Exercise the optional AnnData analysis interface, not a claim that source
+    # files may omit peptide/charge metadata required by other preprocessing QC.
+    obj = Dataset(**protein_config).get_anndata()
+    if evidence == "absent":
+        del obj.layers["spectral_counts"]
+    elif evidence == "zero":
+        obj.layers["spectral_counts"][:] = 0
+    expected_counts = None if evidence == "absent" else obj.layers["spectral_counts"].copy()
+    result = run_limma_pipeline(obj, protein_config)
+    exporter = DEExporter(result, output_path=tmp_path/"counts.xlsx", config=protein_config)
+    table_path = exporter.export()
+    h5ad_path = tmp_path/"counts.h5ad"
+    exporter.export_adata(str(h5ad_path))
+    restored = ad.read_h5ad(h5ad_path)
+    with pd.ExcelFile(table_path) as workbook:
+        summary = pd.read_excel(workbook, sheet_name="Summary", index_col=0)
+        if evidence == "absent":
+            assert "spectral_counts" not in restored.layers
+            assert not {"nrsc", "nrsc_misalignment"} & set(restored.varm)
+            assert "Spectral Counts" not in workbook.sheet_names
+            assert not any(column.startswith("NRSC") for column in summary.columns)
+        else:
+            assert_array_equal(restored.layers["spectral_counts"], expected_counts)
+            counts = pd.read_excel(workbook, sheet_name="Spectral Counts", index_col=0)
+            assert_array_equal(counts.loc[obj.var_names, obj.obs_names].to_numpy().T, expected_counts)
+            assert {"nrsc", "nrsc_misalignment"} <= set(restored.varm)
+            assert any(column.startswith("NRSC") for column in summary.columns)
+            if evidence == "zero":
+                assert np.isnan(restored.varm["nrsc"]).all()
+                assert np.isnan(restored.varm["nrsc_misalignment"]).all()
+    assert_array_equal(restored.X, obj.X)
+    assert_array_equal(restored.layers["raw"], obj.layers["raw"])
+
+
 @pytest.mark.parametrize("name", ["phospho", "phospho_reuse", "phosx"])
 def test_serialized_slope_diagnostics_are_distinct_from_ft_contrasts(name, workflow_results):
     # These objects have already passed through the real pipeline and H5AD writer.

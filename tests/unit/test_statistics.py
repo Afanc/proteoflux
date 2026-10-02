@@ -162,3 +162,45 @@ def test_nrsc_uses_condition_totals_not_per_sample_means():
     obj.varm["log2fc"] = np.full((obj.n_vars, 1), -1.)
     obj.uns["contrast_names"] = ["A_vs_B"]
     assert_allclose(compute_nrsc_misalignment(obj, ["A_vs_B"], nrsc=nrsc), .8)
+
+
+def test_optional_spectral_counts_can_be_absent(caplog):
+    obj = expression()
+    del obj.layers["spectral_counts"]
+    before = obj.X.copy()
+    assert compute_nrsc(obj, ["A_vs_B"]) is None
+    assert "spectral_counts" not in obj.layers
+    assert "nrsc" not in obj.varm
+    assert_array_equal(obj.X, before)
+    assert any(record.levelname == "WARNING" and "Skipping nrSC" in record.message
+               and "spectral_counts" in record.message for record in caplog.records)
+
+
+def test_zero_spectral_counts_remain_distinct_from_absent_evidence(caplog):
+    obj = expression(("A",)*2+("B",)*2)
+    obj.layers["spectral_counts"][:, 0] = 0
+    before = obj.layers["spectral_counts"].copy()
+    nrsc = compute_nrsc(obj, ["A_vs_B", "B_vs_A"])
+    assert nrsc is not None
+    assert nrsc.shape == (obj.n_vars, 2)
+    assert nrsc.dtype == np.float32
+    assert np.isnan(nrsc[0]).all()  # zero total: undefined ratio, not absent layer
+    assert_array_equal(nrsc[1:], 0)  # observed equal positive counts: zero ratio
+    assert_array_equal(obj.layers["spectral_counts"], before)
+    assert not caplog.records
+
+
+@pytest.mark.parametrize("pilot", [False, True])
+def test_missing_spectral_counts_do_not_change_limma_or_pilot_results(pilot):
+    obj = expression(("A",)*3+("B",)*3+("C",) if pilot else ("A",)*3+("B",)*3+("C",)*3)
+    config = {"analysis": {"only_contrasts": ["A_vs_B"]}}
+    baseline = run_limma_pipeline(obj, config)
+    del obj.layers["spectral_counts"]
+    result = run_limma_pipeline(obj, config)
+    assert result.uns["pilot_study_mode"] == pilot
+    assert "spectral_counts" not in result.layers
+    assert set(result.varm) == set(baseline.varm) - {"nrsc", "nrsc_misalignment"}
+    for key in result.varm:
+        assert_array_equal(result.varm[key], baseline.varm[key])
+    assert_array_equal(result.X, baseline.X)
+    assert_array_equal(result.layers["raw"], baseline.layers["raw"])
