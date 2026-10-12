@@ -205,4 +205,33 @@ def test_cli_templates_copy_packaged_config_verbatim(tmp_path):
         assert result.exit_code == 0, result.output
         assert path.read_bytes() == resources.files("proteoflux.templates").joinpath(name+".yaml").read_bytes()
         if name.endswith("-proteomics"):
-            assert yaml.safe_load(path.read_text())["preprocessing"]["robust_regression_disconnected_policy"] == "raise"
+            # Templates intentionally omit this advanced option; runtime supplies it.
+            assert Preprocessor(yaml.safe_load(path.read_text())["preprocessing"]).robust_regression_disconnected_policy == "raise"
+
+
+@pytest.mark.parametrize("labels", [("drug-A", "drug A"), ("1", "C_1")])
+def test_condition_sanitization_must_not_merge_distinct_groups(protein_config, labels):
+    path = protein_config["dataset"]["input_file"]
+    frame = pd.read_csv(path, sep="\t")
+    frame["condition"] = frame.condition.replace({"A": labels[0], "B": labels[1]})
+    frame.to_csv(path, sep="\t", index=False)
+    with pytest.raises(ValueError, match="[Cc]ondition.*colli|[Cc]ondition.*same"):
+        Dataset(**protein_config)
+
+
+@pytest.mark.parametrize("column, canonical", [("sequence", "PEPTIDE_LSEQ"), ("charge", "CHARGE")])
+def test_required_precursor_columns_fail_with_actionable_validation(protein_config, column, canonical):
+    path = protein_config["dataset"]["input_file"]
+    pd.read_csv(path, sep="\t").drop(columns=column).to_csv(path, sep="\t", index=False)
+    with pytest.raises(ValueError, match=canonical):
+        Dataset(**protein_config)
+
+
+def test_packaged_phosx_requirement_and_adapter_agree():
+    import tomllib
+    from packaging.requirements import Requirement
+    from proteoflux.analysis.phosx_adapter import REQUIRED_PHOSX_VERSION, validate_phosx_installation
+    project = tomllib.loads((Path(__file__).resolve().parents[2]/"pyproject.toml").read_text())
+    requirement = next(Requirement(s) for s in project["project"]["dependencies"] if Requirement(s).name == "phosx")
+    assert REQUIRED_PHOSX_VERSION in requirement.specifier
+    validate_phosx_installation()

@@ -30,6 +30,7 @@ def test_ksea_background_deduplication_support_and_per_contrast_fdr(tmp_path):
     obj.varm["q_ebayes"] = np.ones((6, 2))  # KSEA background is not DE-significance-filtered
     rows = [("K_A", f"P{i}", "S1") for i in (3, 4, 5, 5)]
     rows += [("K_B", f"P{i}", "S1") for i in (0, 1)]
+    rows += [("K_C", f"P{i}", "S1") for i in (0, 1, 2, 3)]
     db = tmp_path/"substrates.tsv"
     database = pd.DataFrame(rows, columns=["kinase", "protein", "site"])
     database["gene"] = ""
@@ -45,13 +46,20 @@ def test_ksea_background_deduplication_support_and_per_contrast_fdr(tmp_path):
     table = result["results"].set_index(["contrast", "kinase_id"])
     z = 1.5*math.sqrt(3)/math.sqrt(3.5)  # mean(top3)=2; mean(all6)=.5; sample variance=3.5
     p = math.erfc(z/math.sqrt(2))
+    z_c = -2/math.sqrt(3.5)  # mean(bottom4)=-.5 versus background mean=.5
+    p_c = math.erfc(abs(z_c)/math.sqrt(2))
     for contrast, sign in [("A_vs_B", 1), ("B_vs_A", -1)]:
         tested = table.loc[(contrast, "K_A")]
         assert tested.n_substrates == 3
         assert tested.global_mean_log2fc == pytest.approx(sign*.5)
         assert tested.z_score == pytest.approx(sign*z)
         assert tested.pvalue == pytest.approx(p)
-        assert tested.qvalue == pytest.approx(p)  # one tested kinase per contrast
+        assert tested.qvalue == pytest.approx(min(2*p, p_c))
+        second = table.loc[(contrast, "K_C")]
+        assert second.n_substrates == 4
+        assert second.z_score == pytest.approx(sign*z_c)
+        assert second.pvalue == pytest.approx(p_c)
+        assert second.qvalue == pytest.approx(p_c)
         untested = table.loc[(contrast, "K_B")]
         assert not untested.tested and np.isnan(untested.pvalue)
     assignments = result["substrates"]

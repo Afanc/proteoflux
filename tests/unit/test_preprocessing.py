@@ -8,9 +8,26 @@ from numpy.testing import assert_allclose, assert_array_equal
 from proteoflux.workflow.dataset import Dataset
 from proteoflux.workflow.preprocessing import Preprocessor
 from proteoflux.workflow.rollup.robust_regression import pivot_df_robust_regression
+from proteoflux.workflow.normalizers.regression_normalization import regression_normalization
 from tests.fixtures.workflows import base_config
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize("regression_type", ["linear", "loess"])
+@pytest.mark.parametrize("scale", ["global", "local"])
+def test_regression_normalization_recovers_known_sample_offsets(scale, regression_type):
+    feature_signal = np.linspace(10., 30., 20)[:, None]
+    values = feature_signal + [-2., 1., 7.]
+    normalized, _ = regression_normalization(values, scale=scale,
+        regression_type=regression_type, condition_labels=["A", "A", "B"])
+    # Global reference is the row MEAN (offset 2), not median (offset 1).
+    # Local A uses its first sample (-2); singleton B is its own reference (7).
+    expected = feature_signal + ([2., 2., 2.] if scale == "global" else [-2., -2., 7.])
+    assert_allclose(normalized, expected, rtol=0, atol=1e-12)
+    repeated, _ = regression_normalization(normalized, scale=scale,
+        regression_type=regression_type, condition_labels=["A", "A", "B"])
+    assert_allclose(repeated, expected, rtol=0, atol=1e-12)
 
 
 @pytest.mark.parametrize("method", ["sum", "mean", "median", "min", "max"])
@@ -52,6 +69,31 @@ def test_directlfq_preserves_scaling_and_missing_sample_mask():
     result = processor._pivot_df_LFQ(frame, "FILENAME", "INDEX", "SIGNAL", "PEPTIDE_LSEQ")
     assert_allclose(result.select("A", "B").to_numpy(), [[12, 24]], rtol=1e-6)
     assert result["C"].item() is None
+
+
+@pytest.mark.parametrize("method", ["directlfq", "robust_regression"])
+def test_connected_rollup_is_equivariant_to_scaling_and_label_permutation(method):
+    # Exact multiplicative peptide responses: geometric mean 8, linear sum 28.
+    rows = [{"INDEX": "P", "PEPTIDE_LSEQ": p, "FILENAME": s, "SIGNAL": v*m}
+            for p, v in [("AAAK", 4.), ("CCCK", 8.), ("DDDK", 16.)]
+            for s, m in [("z", 1.), ("a", 4.), ("m", 2.)]]
+    frame = pl.DataFrame(rows)
+
+    def quantify(frame, samples):
+        if method == "directlfq":
+            return Preprocessor({"directlfq_cores": 1})._pivot_df_LFQ(
+                frame, "FILENAME", "INDEX", "SIGNAL", "PEPTIDE_LSEQ")
+        wide = frame.pivot(index=["INDEX", "PEPTIDE_LSEQ"], on="FILENAME", values="SIGNAL")
+        return pivot_df_robust_regression(pep_wide=wide, protein_col="INDEX",
+            peptide_col="PEPTIDE_LSEQ", sample_cols=samples, num_cores=1,
+            huber_t=1.345, max_iter=20, tol=1e-8, min_nonan=1)
+
+    baseline = quantify(frame, ["z", "a", "m"])
+    changed = quantify(frame.reverse().with_columns(pl.col("SIGNAL")*13), ["m", "z", "a"])
+    expected = (28. if method == "directlfq" else 8.) * np.array([[1., 4., 2.]])
+    assert baseline["INDEX"].to_list() == changed["INDEX"].to_list() == ["P"]
+    assert_allclose(baseline.select("z", "a", "m"), expected, rtol=1e-6)
+    assert_allclose(changed.select("z", "a", "m"), 13*expected, rtol=1e-6)
 
 
 def test_dataset_stages_and_identification_are_label_aligned(protein_config):
@@ -100,6 +142,16 @@ def test_shared_observed_reference_controls_normalization(tmp_path, method):
     assert_allclose(values["P"], 6)
     assert_allclose(values["Q"], 4)
     assert_allclose(values["sparse"], [12, np.nan, 8], equal_nan=True)
+    # A large change outside the complete reference intersection cannot move
+    # the reference proteins, even after changing input row/sample order.
+    changed = pd.DataFrame(rows).iloc[::-1].copy()
+    changed.loc[changed.protein == "sparse", "intensity"] *= 1024
+    changed.to_csv(config["dataset"]["input_file"], sep="\t", index=False)
+    result = Dataset(**config).get_anndata()
+    aligned = result[data.obs_names, data.var_names]
+    for feature in ("P", "Q", "R"):
+        j = data.var_names.get_loc(feature)
+        assert_allclose(aligned.layers["normalized"][:, j], data.layers["normalized"][:, j])
 
 
 def test_peptide_evidence_centering_divides_linear_values(protein_config):

@@ -19,6 +19,23 @@ pytestmark = pytest.mark.contract
 CONTRACT = json.loads((Path(__file__).parents[1]/"fixtures/viewer_contract.json").read_text())
 
 
+def test_phospho_raw_workbook_probabilities_are_from_the_unadjusted_model(workflow_results):
+    from proteoflux.analysis.limma_pipeline import run_limma_pipeline
+    obj, config = workflow_results("phospho")
+    # Same processed phospho values/design, explicitly without covariate fitting.
+    # This checks model identity, not independent validation of InMoose itself.
+    unadjusted = run_limma_pipeline(obj, {"analysis": config["analysis"]})
+    assert not unadjusted.uns["has_covariate"]
+    assert not np.allclose(unadjusted.varm["p_ebayes"], obj.varm["p_ebayes"])
+    summary = pd.read_excel(config["exports"]["path_table"], sheet_name="Summary", index_col=0)
+    for j, contrast in enumerate(obj.uns["contrast_names"]):
+        for label, key in [("PVALUE", "p_ebayes"), ("QVALUE", "q_ebayes")]:
+            assert_allclose(summary.loc[obj.var_names, f"RAW_{label}_{contrast}"],
+                            unadjusted.varm[key][:, j], rtol=1e-12, atol=1e-14)
+    assert obj.varm["raw_p_ebayes"].shape == obj.varm["raw_q_ebayes"].shape
+    assert_allclose(obj.varm["raw_p_ebayes"], unadjusted.varm["p_ebayes"], rtol=1e-12, atol=1e-14)
+
+
 @pytest.mark.parametrize("name", WORKFLOWS)
 def test_serialized_viewer_contract(name, workflow_results):
     obj, _ = workflow_results(name)

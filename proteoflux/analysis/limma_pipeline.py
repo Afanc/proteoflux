@@ -44,6 +44,7 @@ from proteoflux.analysis.adata_schema import (
     VARM_P_EBAYES,
     VARM_Q_EBAYES,
     VARM_RAW_LOG2FC,
+    VARM_RAW_P_EBAYES,
     VARM_RAW_Q_EBAYES,
     VARM_COV_PART,
     VARM_COVARIATE_BETA,
@@ -1128,6 +1129,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     # Raw model (same contrasts) - for decomposition display
     out.varm[VARM_RAW_LOG2FC] = raw_coefs
     if not pilot_mode:
+        out.varm[VARM_RAW_P_EBAYES] = raw_p
         out.varm[VARM_RAW_Q_EBAYES] = raw_q
 
     # Covariate decomposition piece

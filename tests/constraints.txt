@@ -11,4 +11,4 @@ inmoose==0.9.0
 directlfq==0.3.3
 torch==2.9.1
 scikit-learn==1.5.2
-# PhosX's immutable Git revision and 0.23.0 runtime requirement are in production.
+# PhosX's exact 0.23.1 package/runtime requirement is in production metadata.

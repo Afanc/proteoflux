@@ -56,6 +56,7 @@ def get_imputer(**kwargs) -> Any:
             perc=kwargs.get("knn_tn_perc", 0.75)
         )
     elif method == "randomforest":
+        from sklearn.experimental import enable_iterative_imputer  # noqa: F401
         return sklearn.impute.IterativeImputer(
             estimator=sklearn.ensemble.HistGradientBoostingRegressor(
                 max_depth=kwargs.get("rf_max_depth", 6),

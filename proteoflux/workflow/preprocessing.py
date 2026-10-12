@@ -280,6 +280,11 @@ class Preprocessor:
     def fit_transform(self, df: pl.DataFrame) -> PreprocessResults:
         """Run the full preprocessing pipeline and return a `PreprocessResults` bundle."""
 
+        _require_columns(
+            df, {"PEPTIDE_LSEQ", "CHARGE"},
+            context="Preprocessing (check dataset.peptide_seq_column and dataset.charge_column)",
+        )
+
         # Step 1: Filtering
         self._filter(df)
 
@@ -1003,6 +1008,18 @@ class Preprocessor:
             .map_elements(_sanitize_condition, return_dtype=pl.Utf8)
             .alias("CONDITION")
         )
+
+        collisions = (
+            condition_mapping.group_by("CONDITION")
+            .agg(pl.col("CONDITION_ORIG").n_unique().alias("N_ORIGINAL"))
+            .filter(pl.col("N_ORIGINAL") > 1)
+            .get_column("CONDITION").to_list()
+        )
+        if collisions:
+            raise ValueError(
+                "Condition names collide after sanitization: "
+                f"{sorted(collisions)!r}. Rename conditions to keep groups distinct."
+            )
 
         mapping_tmp = condition_mapping
         using_covariate = "IS_COVARIATE" in mapping_tmp.columns and mapping_tmp[
@@ -2116,10 +2133,10 @@ class Preprocessor:
             raw_lin = np.where(
                 np.isnan(original_mat), np.nan, np.exp2(original_mat)
             )
-            numeric_cols_main = self.intermediate_results.columns
-            self.intermediate_results.dfs["raw_df"] = (
-                self.intermediate_results.dfs["raw_df"].with_columns(
-                    pl.DataFrame(raw_lin, schema=numeric_cols_main, orient="row")
+            raw_key = "raw_df" if block is Block.MAIN else "raw_df_covariate"
+            self.intermediate_results.dfs[raw_key] = (
+                self.intermediate_results.dfs[raw_key].with_columns(
+                    pl.DataFrame(raw_lin, schema=numeric_cols, orient="row")
                 )
             )
             original_mat = raw_lin

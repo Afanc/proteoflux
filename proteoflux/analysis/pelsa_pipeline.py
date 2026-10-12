@@ -5,6 +5,7 @@ import pandas as pd
 import anndata as ad
 
 from proteoflux.utils.utils import log_time, log_info
+from proteoflux.utils.sequence_ops import strip_mods
 from proteoflux.analysis.pelsa_torch import fit_4pl_torch_from_ratio_df
 
 
@@ -86,6 +87,13 @@ def _build_pelsa_ratio_table(
         )
 
     conc_values = conc.to_numpy(dtype=float)
+    valid_doses = np.isfinite(conc_values) & (control_mask | (conc_values > 0))
+    if not valid_doses.all():
+        invalid_samples = adata.obs_names[~valid_doses].tolist()
+        raise ValueError(
+            "PELSA concentrations must be finite and non-control concentrations "
+            f"must be positive. Invalid samples: {invalid_samples}."
+        )
     control_log10 = _control_log10_position(conc_values[conc_values > 0])
 
     control_ref = np.apply_along_axis(_log2_mean, 0, X_log2[control_mask, :])
@@ -297,7 +305,7 @@ def _build_pelsa_localization_metadata(adata: ad.AnnData) -> dict:
             peptide_end = pd.to_numeric(var[col], errors="coerce").to_numpy(dtype=float)
             break
 
-    peptide_length = np.array([len(str(x)) for x in adata.var_names], dtype=int)
+    peptide_length = np.array([len(strip_mods(str(x))) for x in adata.var_names], dtype=int)
 
     return {
         "feature_ids": np.asarray(adata.var_names.astype(str)),

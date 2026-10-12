@@ -1,4 +1,4 @@
-"""Pinned in-memory compatibility layer for PhosX 0.23.0.
+"""Pinned in-memory compatibility layer for PhosX 0.23.1.
 
 PhosX currently exposes a file-oriented CLI and does not accept a random seed.
 This module contains all private imports and keeps PhosX's scoring and
@@ -20,7 +20,7 @@ import pandas as pd
 from tqdm import tqdm
 
 
-REQUIRED_PHOSX_VERSION = "0.23.0"
+REQUIRED_PHOSX_VERSION = "0.23.1"
 
 
 @dataclass
@@ -54,13 +54,13 @@ def _imports() -> dict[str, Any]:
         )
     except ImportError as exc:
         raise ImportError(
-            "PhosX analysis requires the pinned dependency phosx==0.23.0."
+            f"PhosX analysis requires the pinned dependency phosx=={REQUIRED_PHOSX_VERSION}."
         ) from exc
 
     installed = distribution_version("phosx")
     if installed != REQUIRED_PHOSX_VERSION:
         raise RuntimeError(
-            "ProteoFlux's PhosX adapter is pinned to phosx==0.23.0; "
+            f"ProteoFlux's PhosX adapter is pinned to phosx=={REQUIRED_PHOSX_VERSION}; "
             f"found {installed or 'unknown'!r}."
         )
     return {

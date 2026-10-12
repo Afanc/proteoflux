@@ -36,6 +36,7 @@ VARM_Q_EBAYES = "q_ebayes"
 
 # Covariate branch (phospho FT / ANCOVA)
 VARM_RAW_LOG2FC = "raw_log2fc"
+VARM_RAW_P_EBAYES = "raw_p_ebayes"
 VARM_RAW_Q_EBAYES = "raw_q_ebayes"
 VARM_COV_PART = "cov_part"
 

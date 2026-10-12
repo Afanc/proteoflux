@@ -14,8 +14,8 @@ ProteoFlux emphasizes:
 
 - Explicit data semantics  
 - Transparent preprocessing  
-- Deterministic statistical modeling  
-- Fully reproducible outputs  
+- Explicit statistical models and testing scopes
+- Seeded stochastic methods and inspectable outputs
 
 ---
 
@@ -26,24 +26,33 @@ ProteoFlux emphasizes:
 ProteoFlux takes a single YAML configuration file and produces:
 
 - Harmonized and preprocessed quantification data
-- Differential expression results using a limma-based empirical Bayes framework
+- Differential expression using the InMoose implementation of limma; separate 4PL dose-response fitting for PELSA
+- Optional KSEA or PhosX kinase activity analysis for phosphoproteomics
 - Principal component analysis (PCA), multidimensional scaling (MDS), and hierarchical clustering
-- A structured multi-page PDF report
+- An optional structured multi-page PDF report
 - Portable `.h5ad` files compatible with [ProteoViewer](https://github.com/Afanc/proteoviewer)
-- Summary tables in Excel
+- Optional summary tables in Excel
 
 ---
 
 ## Installation
 
-Python ≥ 3.9 required.
+Python ≥ 3.10 is required by the pinned core dependencies and package metadata.
+The automated test environments use Python 3.11 and 3.13; Python 3.10 is not
+covered by that matrix. Use a dedicated environment, preferably Python 3.11 or
+3.13. The scientific reference environment is listed in `tests/constraints.txt`.
+
+PhosX is pinned to 0.23.1 because ProteoFlux uses its version-specific interfaces.
+Keep the dependency versions, configuration, input ordering and random seeds
+when reproducing results; a seed alone does not make results independent of
+input order or dependency changes.
 
 ### Install from source (recommended)
 
 ```bash
 git clone https://github.com/afanc/proteoflux.git
 cd proteoflux
-pip install -e .
+python -m pip install -e .
 ```
 
 This installs ProteoFlux in editable mode.
@@ -64,7 +73,11 @@ Create a template:
 proteoflux init spectronaut-proteomics --path config.yaml
 ```
 
-Edit the file and then run the full pipeline:
+Edit paths, column mappings and analysis settings before running. Relative paths
+resolve from your current working directory, not from the YAML file’s directory.
+Template choices can differ from runtime defaults; see the configuration guide.
+
+Run the pipeline:
 
 ```bash
 proteoflux run --config config.yaml
@@ -76,9 +89,12 @@ proteoflux run --config config.yaml
 
 | File | Description |
 |------|------------|
-| `*.h5ad` | Full AnnData object with raw, normalized, imputed data, statistics, embeddings, and metadata |
-| `*.xlsx` | Differential expression summary table |
-| `*.pdf` | Multi-page QC and analysis report |
+| `*.h5ad` | Required output: processed values in `X`, raw/log/normalized layers, statistics, evidence and metadata |
+| `*.xlsx` | Optional summary and evidence tables; curve results for PELSA |
+| `*.pdf` | Optional multi-page QC and analysis report |
+
+See [output semantics](docs/RESULTS.md) for matrix axes, missingness and the meaning
+of “raw.” Preserve the original input files and YAML separately.
 
 The `.h5ad` files are compatible with [ProteoViewer](https://github.com/Afanc/proteoviewer), an interactive visualization tool for ProteoFlux outputs.
 
@@ -92,7 +108,8 @@ ProteoFlux can also be used programmatically:
 import yaml
 from proteoflux.main import run_pipeline
 
-config = yaml.safe_load(open("config.yaml")) #or use a dict
+with open("config.yaml") as stream:
+    config = yaml.safe_load(stream)  # or supply a dictionary
 run_pipeline(config)
 ```
 
@@ -103,7 +120,11 @@ This allows:
 - Use inside Jupyter notebooks
 - Custom downstream analysis of AnnData objects
 
-All behavior is controlled by the same YAML schema used by the CLI.
+The library accepts the same configuration dictionary as the CLI.
+`run_pipeline` writes the configured outputs and returns `None`. Read the saved
+object with `anndata.read_h5ad(...)` for downstream work. To obtain preprocessing
+results only, use `proteoflux.workflow.dataset.Dataset(**config).get_anndata()`;
+this does not run differential/kinase/PELSA analysis or export results.
 
 ---
 
@@ -142,7 +163,7 @@ The manuscript source is provided as [paper.md](paper.md).
 
 ## License
 
-ProteoViewer is released under the MIT License. See the LICENSE file for details.
+ProteoFlux is released under the MIT License. See the LICENSE file for details.
 
 ---
 

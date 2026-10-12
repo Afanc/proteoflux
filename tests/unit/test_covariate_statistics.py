@@ -94,8 +94,12 @@ def test_slope_diagnostics_follow_feature_labels(covariate_experiment):
     baseline = run_limma_pipeline(obj, config)
     shuffled = run_limma_pipeline(obj[[8, 0, 4, 1, 6, 3, 2, 7, 5], ::-1].copy(), config)
     aligned = shuffled[:, baseline.var_names]
-    for key in DIAGNOSTICS:
+    for key in baseline.varm:
         assert_allclose(aligned.varm[key], baseline.varm[key], rtol=1e-10, atol=1e-14)
+    # Residual sample axes must also follow labels, not merely keep their shape.
+    aligned = aligned[baseline.obs_names, :]
+    assert_allclose(aligned.layers["residuals_covariate"], baseline.layers["residuals_covariate"],
+                    rtol=1e-10, atol=1e-14)
 
 
 @pytest.mark.parametrize("indices", [[0, 1, 2], [0, 1, 2, 3, 4, 5, 6]])

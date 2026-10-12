@@ -146,3 +146,40 @@ def test_scalar_and_list_log2_preserve_same_raw_scale(protein_config):
     protein_config["preprocessing"]["normalization"]["method"] = "log2"
     actual = Dataset(**protein_config).get_anndata()
     assert_allclose(actual.layers["raw"], expected.layers["raw"], equal_nan=True)
+
+
+@pytest.mark.parametrize("method", ["none", "median_equalization"])
+def test_prelogged_background_cannot_overwrite_main_raw_or_exports(tmp_path, method):
+    config = phospho_workflow(tmp_path, kinase=False)
+    config["preprocessing"]["normalization"]["method"] = method
+    config["preprocessing"]["imputation"]["method"] = "mean"
+    originals = {}
+    for name, path in [("main", config["dataset"]["input_file"]),
+                       ("background", config["dataset"]["inject_runs"]["flowthrough"]["input_file"])]:
+        frame = pd.read_csv(path, sep="\t")
+        originals[name] = frame.copy()
+        frame["intensity"] = np.log2(frame.intensity)
+        frame.to_csv(path, sep="\t", index=False)
+    obj = Dataset(**config).get_anndata()
+    main = originals["main"]
+    main["sample"] = main.run.str.removesuffix(".raw")
+    main["feature"] = main.accession + "|" + main.locations
+    expected = main.pivot(index="sample", columns="feature", values="intensity").loc[obj.obs_names, obj.var_names]
+    bg = originals["background"]
+    bg["sample"] = bg.condition + "_" + bg.replicate.astype(str)
+    bg = bg.pivot(index="sample", columns="protein", values="intensity")
+    expected_bg = np.column_stack([bg.loc[obj.obs_names, feature.split("|")[0]] for feature in obj.var_names])
+    # Prelogged-input convention: raw quantities are reconstructed in linear units
+    # separately for each assay; neither assay supplies the other's values/mask.
+    assert_allclose(obj.layers["raw"], expected, rtol=3e-7, equal_nan=True)
+    assert_allclose(obj.layers["raw_covariate"], expected_bg, rtol=3e-7, equal_nan=True)
+    exporter = DEExporter(obj, config["exports"]["path_table"], config=config)
+    exporter.export_adata(config["exports"]["path_h5ad"])
+    exporter.export()
+    loaded = ad.read_h5ad(config["exports"]["path_h5ad"])
+    summary = pd.read_excel(config["exports"]["path_table"], sheet_name="Summary", index_col=0)
+    assert_allclose(loaded.layers["raw"], expected, rtol=3e-7, equal_nan=True)
+    assert_allclose(loaded.layers["raw_covariate"], expected_bg, rtol=3e-7, equal_nan=True)
+    for j, sample in enumerate(obj.obs_names):
+        assert_allclose(summary.loc[obj.var_names, "Raw_Intensities"+sample], expected.iloc[j], rtol=3e-7, equal_nan=True)
+        assert_allclose(summary.loc[obj.var_names, "FT_Raw_"+sample], expected_bg[j], rtol=3e-7, equal_nan=True)

@@ -45,6 +45,15 @@ def test_seeded_draws_repeat_without_modifying_observed_values():
     assert a[1, 0] == 7  # The only observed A value clamps the draw to itself.
 
 
+def test_lc_conmed_log_offset_equivariance_with_mar_and_mnar_draws():
+    x = np.array([[2., np.nan, 5., np.nan], [np.nan, 6., 7., 8.],
+                  [np.nan, 4., np.nan, 6.]])
+    baseline = imputer().fit_transform(x)
+    shifted = imputer().fit_transform(x + 3.)
+    assert_allclose(shifted, baseline + 3., rtol=0, atol=1e-12)
+    assert_array_equal(baseline[np.isfinite(x)], x[np.isfinite(x)])
+
+
 def test_all_missing_lod_and_pooled_sample_variance():
     out = imputer(lod_sd_width=0).fit_transform(np.full((2, 4), np.nan))
     assert_allclose(out, -.2, atol=1e-7)
@@ -72,3 +81,20 @@ def test_rowwise_simple_imputation_including_empty_row(method, expected):
     result = get_imputer(method=method).fit_transform(x)
     assert_allclose(result[0], [2, expected, 3, 13])
     assert_allclose(result[1], 0)
+
+
+def test_randomforest_factory_works_in_a_fresh_process_and_preserves_observations():
+    import subprocess
+    import sys
+    # Other imports can enable sklearn's experimental class and hide this defect.
+    script = '''
+import numpy as np
+from numpy.testing import assert_array_equal
+from proteoflux.workflow.imputer_factory import get_imputer
+x = np.array([[1., 2., 3.], [2., np.nan, 4.], [4., 5., 7.], [6., 8., 9.]])
+result = get_imputer(method="randomforest", rf_max_iter=2, rf_n_estimators=2).fit_transform(x)
+assert result.shape == x.shape and np.isfinite(result).all()
+assert_array_equal(result[~np.isnan(x)], x[~np.isnan(x)])
+'''
+    result = subprocess.run([sys.executable, "-B", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

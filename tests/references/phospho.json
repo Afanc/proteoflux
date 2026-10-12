@@ -479,6 +479,20 @@
         [2.742590904235838, 2.6460870107014944],
         [2.7425905863444004, 2.646087010701496]
       ],
+      "raw_p_ebayes": [
+        [0.00010494296389928355, 4.345768277636016e-07],
+        [0.00010494241270014875, 4.345763603620027e-07],
+        [0.5487243977742087, 0.21397431755499172],
+        [0.5487225618357938, 0.21397384577093015],
+        [1.214296497091061e-07, 1.9491482179599827e-08],
+        [0.0087815801675449, 9.291244303843723e-05],
+        [0.011323913604755056, 1.1993711956198462e-05],
+        [0.011323932121145934, 1.1993743191497815e-05],
+        [0.10418300145818081, 0.4361917122731144],
+        [0.10418241184353928, 0.43619073139689324],
+        [0.0002498334284434857, 0.0003237700884029595],
+        [0.0002498327398473516, 0.00032376893857853634]
+      ],
       "raw_q_ebayes": [
         [0.000419771855597108, 1.7383073110543443e-06],
         [0.000419771855597108, 1.7383073110543443e-06],
@@ -782,5 +796,6 @@
       "reason": "Restore stage-1 slope diagnostics; FT probabilities remain in ft_p_ebayes/ft_q_ebayes.",
       "validation": "Independent SciPy simple regression at ridge=0; default diagnostic t probabilities and across-site BH checked. Other reference values retained."
     }
-  ]
+  ],
+  "amendment": "Added raw_p_ebayes from an unadjusted fit to the stored X, labels and raw mask; existing raw_log2fc/raw_q_ebayes verified unchanged. No existing numerical reference changed."
 }

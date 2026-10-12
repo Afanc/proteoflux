@@ -121,6 +121,46 @@ def test_label_reordering_preserves_inference():
         assert_allclose(out.varm[key], aligned.varm[key], rtol=1e-10, atol=1e-12)
 
 
+@pytest.mark.parametrize("separate", [False, True])
+def test_contrast_reversal_and_feature_specific_log_offsets(separate):
+    obj = expression()
+    config = {"analysis": {"only_contrasts": ["B_vs_A", "A_vs_B"],
+                           "separate_contrasts": separate}}
+    out = run_limma_pipeline(obj, config)
+    assert list(out.uns["contrast_names"]) == ["B_vs_A", "A_vs_B"]
+    for key in ("log2fc", "t_raw", "t_ebayes", "nrsc"):
+        assert_allclose(out.varm[key][:, 0], -out.varm[key][:, 1], atol=1e-12)
+    for key in ("se_raw", "se_ebayes", "p_raw", "q_raw", "p_ebayes", "q_ebayes"):
+        assert_allclose(out.varm[key][:, 0], out.varm[key][:, 1], rtol=1e-10)
+    # Multiplying each protein by its own constant cannot change its contrasts.
+    shifted = obj.copy()
+    offsets = np.linspace(-3., 7., obj.n_vars)
+    shifted.X += offsets
+    shifted.layers["normalized"] += offsets
+    shifted.layers["raw"] *= np.exp2(offsets)
+    result = run_limma_pipeline(shifted, config)
+    for key in out.varm:
+        assert_allclose(result.varm[key], out.varm[key], rtol=1e-10, atol=1e-12)
+
+
+@pytest.mark.known_bug
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Undefined raw p for a constant feature contaminates all q_raw in its contrast; "
+    "missing-p testing-family policy needs an explicit decision."))
+def test_undefined_raw_test_must_not_erase_other_features_qvalues():
+    obj = expression()
+    obj.X[:, 0] = 0
+    obj.layers["raw"][:, 0] = 1  # genuinely observed, not fully imputed
+    out = run_limma_pipeline(obj, {"analysis": {"only_contrasts": ["B_vs_A"]}})
+    if not (np.isnan(out.varm["p_raw"][0, 0])
+            and np.isfinite(out.varm["p_raw"][1:, 0]).all()
+            and np.isfinite(out.varm["q_ebayes"]).all()):
+        # pytest.fail is not AssertionError: the xfail must not hide a changed
+        # reproducer or a distinct moderation failure.
+        pytest.fail("Raw-q contamination reproducer changed; reassess this xfail")
+    assert np.isfinite(out.varm["q_raw"][1:, 0]).all()
+
+
 @pytest.mark.parametrize("analysis, message", [
     ({"only_contrasts": ["A-B"]}, "separator"),
     ({"only_contrasts": ["A_vs_missing"]}, "conditions must be"),

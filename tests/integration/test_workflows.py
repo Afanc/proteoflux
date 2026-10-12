@@ -188,6 +188,27 @@ def test_phosx_family_fdr_and_feature_assignment_alignment(workflow_results):
                 assert row.kinase_mean_log2fc == pytest.approx(obj.varm["log2fc"][indices, j].mean())
 
 
+def test_phosx_label_order_and_other_contrast_cannot_change_first_contrast(workflow_results):
+    from proteoflux.analysis.phosx_pipeline import run_phosx_pipeline
+    obj, config = workflow_results("phosx")  # 127 permutations, not production scale
+    # This invariant concerns uniquely ranked sites. Tied ranks need a separate
+    # scientific tie-breaking specification, not an assumption of invariance.
+    for residue in ("S", "Y"):
+        scores = obj.varm["log2fc"][obj.var.KINASE_10MER.str[5] == residue, 0]
+        assert len(np.unique(scores)) == len(scores)
+    changed = obj[::-1, ::-1].copy()
+    changed.varm["log2fc"][:, 1] *= 5
+    actual = run_phosx_pipeline(changed, config).uns["kinase_activity"]
+    contrast = obj.uns["contrast_names"][0]
+    for key, identifiers in [("results", ["kinase_id"]),
+                             ("substrates", ["kinase_id", "phosphosite_id"])]:
+        def selected(payload):
+            frame = payload[key]
+            return frame[frame.contrast == contrast].sort_values(identifiers).reset_index(drop=True)
+        pd.testing.assert_frame_equal(selected(actual), selected(obj.uns["kinase_activity"]),
+                                      rtol=1e-12, atol=1e-12)
+
+
 def test_real_cli_uses_cwd_paths_and_legacy_export_block(tmp_path, monkeypatch):
     import anndata as ad
     import yaml
