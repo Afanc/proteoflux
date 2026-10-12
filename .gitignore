@@ -5,7 +5,9 @@
 *.fasta
 output/
 data/
+config_files/
 __pycache__/
 *.pyc
+.pytest_cache/
 proteoflux/data
 
