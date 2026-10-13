@@ -4,7 +4,7 @@ import pandas as pd
 from numpy.testing import assert_allclose
 from pandas.testing import assert_frame_equal
 
-from tests.scientific_reference import portable, assert_reference, probability_field
+from tests.scientific_reference import portable, assert_reference, probability_field, assert_pelsa_start_indices
 
 
 def compare_full_results(actual, expected, *, rtol=3e-6, atol=2e-6):
@@ -67,6 +67,10 @@ def compare_full_results(actual, expected, *, rtol=3e-6, atol=2e-6):
             if block == "pelsa":
                 keys = ["peptide_id", "sample"] if table == "curve_points" else ["peptide_id"]
                 left, right = [frame.set_index(keys) for frame in (left, right)]
+                if table == "curve_results":
+                    for frame in (left, right):
+                        assert_pelsa_start_indices(frame)
+                    left, right = [frame.drop(columns="optimizer_best_start") for frame in (left, right)]
             assert_frame_equal(left.sort_index().sort_index(axis=1), right.sort_index().sort_index(axis=1),
                                check_dtype=False, check_categorical=False, rtol=rtol, atol=atol)
             for column in right.columns:

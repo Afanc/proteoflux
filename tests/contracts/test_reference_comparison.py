@@ -59,3 +59,58 @@ def test_significance_boundary_is_checked_even_within_float_tolerance(workflow_r
     obj.varm["q_ebayes"][0, 0] = .0500001
     with pytest.raises(AssertionError, match="q_ebayes_below_0.05"):
         assert_reference(scientific_payload(obj), expected)
+
+
+def compare_payloads(actual, expected):
+    assert_reference(scientific_payload(actual), scientific_payload(expected))
+
+
+@pytest.mark.parametrize("compare", [compare_payloads, compare_full_results])
+def test_pelsa_equivalent_fits_can_have_different_start_indices(workflow_results, compare):
+    obj, _ = workflow_results("pelsa")
+    changed = obj.copy()
+    curves = changed.uns["pelsa"]["curve_results"]
+    fitted = curves.fit_success
+    # An ordinal is optimizer provenance, not a scientific quantity. Distinct
+    # starts can converge to the same curve; retain the complete output schema.
+    curves.loc[fitted, "optimizer_best_start"] = (
+        curves.loc[fitted, "optimizer_best_start"] + 1) % curves.loc[fitted, "optimizer_n_starts"]
+    compare(changed, obj)
+
+
+@pytest.mark.parametrize("compare", [compare_payloads, compare_full_results])
+def test_pelsa_start_index_exception_cannot_hide_scientific_drift(workflow_results, compare):
+    obj, _ = workflow_results("pelsa")
+    for field in ("pec50", "slope", "front", "back", "sse_curve", "curve_p_value", "curve_q_value"):
+        changed = obj.copy()
+        curves = changed.uns["pelsa"]["curve_results"]
+        row = curves.index[curves.peptide_id == "ACDEFGHIK"][0]
+        curves.loc[row, "optimizer_best_start"] = 3
+        curves.loc[row, field] *= 2
+        with pytest.raises(AssertionError, match=field):
+            compare(changed, obj)
+    changed = obj.copy()
+    changed.uns["pelsa"]["curve_results"].loc[row, "pec50"] = np.nan
+    with pytest.raises(AssertionError, match="pec50"):
+        compare(changed, obj)
+
+
+@pytest.mark.parametrize("compare", [compare_payloads, compare_full_results])
+def test_pelsa_start_index_schema_and_validity_remain_checked(workflow_results, compare):
+    obj, _ = workflow_results("pelsa")
+    for invalid in (-1, 5, .5, np.nan, True):
+        changed = obj.copy()
+        curves = changed.uns["pelsa"]["curve_results"]
+        # Object dtype permits deliberate invalid values without pandas casting.
+        curves["optimizer_best_start"] = curves.optimizer_best_start.astype(object)
+        curves.loc[curves.fit_success, "optimizer_best_start"] = invalid
+        with pytest.raises(AssertionError, match="optimizer_best_start"):
+            compare(changed, obj)
+    changed = obj.copy()
+    curves = changed.uns["pelsa"]["curve_results"]
+    curves.loc[~curves.fit_success, "optimizer_best_start"] = 1
+    with pytest.raises(AssertionError, match="optimizer_best_start"):
+        compare(changed, obj)
+    changed.uns["pelsa"]["curve_results"] = curves.drop(columns="optimizer_best_start")
+    with pytest.raises(AssertionError, match="optimizer_best_start|columns"):
+        compare(changed, obj)

@@ -7,7 +7,7 @@ name = "proteoflux"
 version = "1.10.4"
 description = "Transparent and reproducible proteomics analysis pipeline"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = {file = "LICENSE"}
 authors = [
   {name = "Biozentrum Proteomics Core Facility", email = "dariush.mollet@unibas.ch"}
@@ -28,7 +28,7 @@ dependencies = [
     "numba==0.61.0",
     "matplotlib",
     "seaborn>=0.12.2,<0.14.0",
-    "phosx>=0.23.1",
+    "phosx==0.23.1",
     "typer[all]",
     "pyyaml",
     "scikit-learn",#">=1.1,<1.6",

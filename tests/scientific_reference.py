@@ -98,6 +98,19 @@ def probability_field(name):
                         ("_p_raw", "_q_raw", "_p_ebayes", "_q_ebayes"))
 
 
+def assert_pelsa_start_indices(frame):
+    """Validate optimizer provenance without freezing the winner of near ties."""
+    field = "optimizer_best_start"
+    assert field in frame, f"PELSA: missing {field}"
+    starts = frame[field]
+    assert all(isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_))
+               for value in starts), f"{field}: expected integer indices"
+    fitted = frame["fit_success"]
+    assert ((starts[fitted] >= 0) & (starts[fitted] < frame.loc[fitted, "optimizer_n_starts"])).all(), (
+        f"{field}: fitted indices must be in [0, optimizer_n_starts)")
+    assert (starts[~fitted] == 0).all(), f"{field}: unfitted rows use the serialized zero sentinel"
+
+
 def assert_reference(actual, expected, path="root", *, rtol=3e-6, atol=2e-6):
     """Named failure paths; exact labels/masks and bounded float differences."""
     if isinstance(expected, dict):
@@ -107,9 +120,18 @@ def assert_reference(actual, expected, path="root", *, rtol=3e-6, atol=2e-6):
             assert actual["index"] == expected["index"], path+": row labels"
             assert actual["columns"] == expected["columns"], path+": columns"
             assert len(actual["values"]) == len(expected["values"]), path+": row count"
+            pelsa_curves = path.endswith(".pelsa.curve_results")
+            if pelsa_curves:
+                for table in (actual, expected):
+                    assert_pelsa_start_indices(pd.DataFrame(table["values"], index=table["index"],
+                                                           columns=table["columns"]))
             for label, left, right in zip(expected["index"], actual["values"], expected["values"]):
                 assert len(left) == len(right) == len(expected["columns"]), path+": table shape"
                 for column, a, e in zip(expected["columns"], left, right):
+                    # CPU rounding can switch near-identical multistart winners.
+                    # Still compare every fitted parameter, error metric and p/q.
+                    if pelsa_curves and column == "optimizer_best_start":
+                        continue
                     assert_reference(a, e, f"{path}.{column}[{label}]", rtol=rtol, atol=atol)
             return
         for key in expected:

@@ -1,6 +1,7 @@
 # ProteoFlux Configuration Reference
 
-This guide describes the public configuration used by ProteoFlux.
+This guide describes the public configuration used by ProteoFlux. 
+
 Top-level blocks are `dataset`, `preprocessing`, `analysis`, optional `ancova`,
 and `exports`. The tables give runtime defaults when a key is omitted unless
 explicitly labelled as template settings. Templates are editable starting points,

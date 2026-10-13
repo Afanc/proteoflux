@@ -8,7 +8,7 @@ from scipy.stats import f as f_distribution
 from proteoflux.analysis.pelsa_pipeline import _build_pelsa_ratio_table, _control_log10_position
 from proteoflux.analysis.pelsa_torch import (
     four_pl_numpy, four_pl_jacobian_numpy, four_pl_torch, add_curve_statistics,
-    build_dense_torch_input, fit_4pl_torch_from_ratio_df,
+    build_dense_torch_input, fit_4pl_torch_from_ratio_df, FourPLTorchModel, evaluate_model,
 )
 
 pytestmark = pytest.mark.unit
@@ -81,6 +81,31 @@ def test_4pl_sign_midpoint_and_jacobian():
     assert_allclose(jac, finite_difference, rtol=2e-7, atol=1e-9)
     import torch
     assert_allclose(four_pl_torch(torch, torch.tensor(x), *[torch.tensor(p) for p in params]), expected, rtol=1e-12)
+
+
+def test_multistart_selection_preserves_best_curve_when_candidates_are_reordered():
+    import torch
+
+    # Three candidate curves: increasing, decreasing and flat. At doses .1, 1,
+    # 10 the first is [2/11, 1, 20/11]; the second is its reflection about 1.
+    candidates = np.tile([[0., 1., 0., 2.], [0., 1., 2., 0.], [0., 1., 1., 1.]], (2, 1, 1))
+    lower = torch.tensor([[-1., .5, -1., -1.]] * 2, dtype=torch.float64)
+    upper = torch.tensor([[1., 2., 3., 3.]] * 2, dtype=torch.float64)
+    x = torch.tensor([[-1., 0., 1., 0.]], dtype=torch.float64)
+    # +/- .1 errors have known SSE .02. The masked point must not select a
+    # different curve or contribute to SSE/RMSE.
+    y = torch.tensor([[2/11+.1, 1-.1, 20/11, 999.],
+                      [20/11-.1, 1+.1, 2/11, 999.]], dtype=torch.float64)
+    mask = torch.tensor([[1., 1., 1., 0.]] * 2, dtype=torch.float64)
+    for order, winners in [([0, 1, 2], [0, 1]), ([2, 0, 1], [1, 2])]:
+        fraction = (candidates[:, order] - lower.numpy()[:, None, :]) / (upper-lower).numpy()[:, None, :]
+        model = FourPLTorchModel(torch, lower, upper, np.log(fraction/(1-fraction)))
+        result = evaluate_model(torch, model, x, y, mask, x_min=-1., x_max=1.)
+        assert result["best_start"].tolist() == winners
+        assert_allclose(result["params"], [[0., 1., 0., 2.], [0., 1., 2., 0.]], atol=1e-12, rtol=0)
+        assert_allclose(result["sse_curve"], [.02, .02], atol=1e-12, rtol=0)
+        assert_allclose(result["rmse"], np.sqrt(.02/3), atol=1e-12, rtol=0)
+        assert_allclose(result["curve_fold_change_log2"], [18/11, -18/11], atol=1e-12, rtol=0)
 
 
 def test_recalibrated_test_and_excluded_zero_sse():
