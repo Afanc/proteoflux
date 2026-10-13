@@ -1,5 +1,10 @@
 # ProteoFlux
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18640999.svg)](https://doi.org/10.5281/zenodo.18640998)
+
+[![PyPI](https://img.shields.io/pypi/v/proteoflux)](https://pypi.org/project/proteoflux/)
+[![Python >=3.10](https://img.shields.io/badge/Python-%3E%3D3.10-blue)](#installation)
+[![Scientific tests](https://github.com/Afanc/proteoflux/actions/workflows/smoke-test.yml/badge.svg)](https://github.com/Afanc/proteoflux/actions/workflows/smoke-test.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue)](https://github.com/Afanc/proteoflux/blob/HEAD/LICENSE)
+[![DOI: 10.5281/zenodo.18640998](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.18640998-blue)](https://doi.org/10.5281/zenodo.18640998)
 
 ProteoFlux is an open-source Python framework for transparent, reproducible downstream analysis of quantitative proteomics data.
 
@@ -37,17 +42,22 @@ ProteoFlux takes a single YAML configuration file and produces:
 
 ## Installation
 
-Python ≥ 3.10 is required by the pinned core dependencies and package metadata.
-The automated test environments use Python 3.11 and 3.13; Python 3.10 is not
-covered by that matrix. Use a dedicated environment, preferably Python 3.11 or
-3.13. The scientific reference environment is listed in `tests/constraints.txt`.
+Python **≥3.10** is required. We recommend **Python 3.13** in a dedicated
+environment; CI tests Python 3.11 and 3.13. The scientific reference environment
+is listed in `tests/constraints.txt`.
 
 PhosX is pinned to 0.23.1 because ProteoFlux uses its version-specific interfaces.
 Keep the dependency versions, configuration, input ordering and random seeds
 when reproducing results; a seed alone does not make results independent of
 input order or dependency changes.
 
-### Install from source (recommended)
+### Install from PyPI (recommended)
+
+```bash
+python -m pip install proteoflux
+```
+
+### Install from source (development)
 
 ```bash
 git clone https://github.com/afanc/proteoflux.git
