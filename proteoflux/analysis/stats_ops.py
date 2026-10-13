@@ -29,9 +29,13 @@ def raw_stats_from_fit(
 
 
 def bh_qvalues(p: np.ndarray) -> np.ndarray:
-    """Benjamini–Hochberg q-values, applied per contrast/column (mechanical extraction)."""
+    """BH over finite, testable p-values in each contrast; undefined cells stay NaN."""
     if p.ndim != 2:
         raise ValueError(f"Expected 2D p-value array (n_features x n_contrasts), got shape {p.shape}")
-    q = np.vstack([multipletests(p[:, j], method="fdr_bh")[1] for j in range(p.shape[1])]).T
+    q = np.full(p.shape, np.nan, dtype=float)
+    for j in range(p.shape[1]):
+        testable = np.isfinite(p[:, j])
+        if testable.any():
+            q[testable, j] = multipletests(p[testable, j], method="fdr_bh")[1]
     return q
 

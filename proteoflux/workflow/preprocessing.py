@@ -4,7 +4,7 @@ This module performs:
 1) Filtering (contaminants, q-value, PEP, min. precursors)
 2) Metadata extraction (protein meta, condition map)
 3) Pivoting to wide matrices (intensity, qvalue, PEP, precursors, etc.)
-4) Normalization (log, median, quantile, regression-based, tag-based)
+4) Log2 transformation and normalization (median, regression-based, tag-based)
 5) Imputation (main and optional covariate block)
 6) Optional phospho localization filtering
 
@@ -15,6 +15,7 @@ assembled into a `PreprocessResults` container consumed by downstream code.
 import time
 import sys
 import re
+import keyword
 from typing import Optional, List, Tuple, Dict
 
 import numpy as np
@@ -22,9 +23,6 @@ import polars as pl
 import pandas as pd
 from enum import Enum
 
-import sklearn.impute
-import sklearn.preprocessing
-import sklearn.ensemble
 from skmisc.loess import loess
 
 from proteoflux.workflow.normalizers.regression_normalization import regression_normalization
@@ -40,6 +38,7 @@ from proteoflux.utils.utils import (
     log_warning,
 )
 from proteoflux.utils.sequence_ops import (
+    strip_mods,
     expr_peptide_index_seq,
     expr_strip_bracket_mods,
     expr_strip_underscores,
@@ -49,6 +48,7 @@ from proteoflux.workflow.peptide_tables import (
     build_proteomics_peptide_wide,
 )
 from proteoflux.utils.analysis_type import normalize_analysis_type
+from proteoflux.utils.semantics import LOG2_NORMALIZATION_METHODS, log2_normalization_methods
 
 from proteoflux.workflow.rollup.robust_regression import pivot_df_robust_regression
 from proteoflux.workflow.rollup.directlfq import estimate_protein_intensities
@@ -73,8 +73,7 @@ def _require_columns(df: pl.DataFrame, required: set[str], *, context: str) -> N
 class Preprocessor:
     """Handles filtering, pivoting, normalization, and imputation for proteomics data."""
 
-    available_normalization = ["zscore", "vst", "linear"]
-    available_imputation = ["mean", "median", "knn", "randomforest"]
+    available_normalization = list(LOG2_NORMALIZATION_METHODS)
 
     def __init__(
         self,
@@ -138,6 +137,8 @@ class Preprocessor:
             "count",
             None
         ]
+        if protein_rollup_method is None:
+            protein_rollup_method = pivot_signal_method
         if protein_rollup_method not in allowed_protein_rollup_methods:
             raise ValueError(
                 "Invalid protein_rollup_method "
@@ -173,9 +174,14 @@ class Preprocessor:
 
         # Normalization
         self.normalization = config.get("normalization") or {}
+        self.normalization_methods = log2_normalization_methods(self.normalization)
+        self.input_is_log2 = "log2" not in self.normalization_methods
+
 
         # Imputation
         self.imputation = config.get("imputation") or {}
+        # Validate the public method/settings before loading or transforming values.
+        get_imputer(**self.imputation)
         if str(self.imputation.get("method", "")).lower() == "lc_conmed":
             in_min_obs = self.imputation.get("lc_conmed_in_min_obs", 1)
             frac_min_obs = self.imputation.get("lc_conmed_frac_min_obs")
@@ -285,8 +291,30 @@ class Preprocessor:
             context="Preprocessing (check dataset.peptide_seq_column and dataset.charge_column)",
         )
 
+        sequences = df["PEPTIDE_LSEQ"].unique().to_list()
+        invalid_sequences = [seq for seq in sequences if not isinstance(seq, str)
+                             or re.fullmatch(r"[A-Z]+", strip_mods(seq) or "") is None]
+        if invalid_sequences:
+            raise ValueError(f"Invalid PEPTIDE_LSEQ values (check peptide_seq_column): {invalid_sequences[:5]!r}")
+        charges = df["CHARGE"].cast(pl.Float64, strict=False)
+        invalid_charge = charges.is_null() | ~charges.is_finite() | (charges <= 0) | (charges != charges.floor())
+        if invalid_charge.any():
+            raise ValueError("Invalid CHARGE: require finite positive integers; check dataset.charge_column.")
+        main_input, _ = self._split_main_covariate_rows(df)
+        expected_samples = main_input["FILENAME"].unique().to_list()
+        if self.input_is_log2 and self.min_linear_intensity is not None:
+            raise ValueError("prelogged input requires min_linear_intensity: null; censor linear inputs before logging.")
+
         # Step 1: Filtering
         self._filter(df)
+        filtered_main, _ = self._split_main_covariate_rows(
+            self.intermediate_results.dfs["filtered_final_censored"])
+        observed_samples = filtered_main.filter(
+            pl.col("SIGNAL").cast(pl.Float64, strict=False).is_finite()
+        )["FILENAME"].unique().to_list()
+        empty_samples = sorted(set(expected_samples) - set(observed_samples))
+        if empty_samples:
+            raise ValueError(f"No observed quantitative values after filtering for sample(s): {empty_samples!r}")
 
         # Step 2: Metadata
         self._get_protein_metadata()
@@ -294,6 +322,12 @@ class Preprocessor:
 
         # Step 3: Pivoting
         self._pivot_data()
+        raw = self.intermediate_results.dfs["raw_df"]
+        missing_samples = sorted(set(expected_samples) - set(raw.columns))
+        if missing_samples:
+            raise ValueError(f"No observed quantitative values after filtering for sample(s): {missing_samples!r}")
+        self._validate_observed_samples(raw.select(self.intermediate_results.columns).to_numpy(),
+                                        self.intermediate_results.columns, "main")
 
         # Step 4: Normalization
         self._normalize()
@@ -992,6 +1026,12 @@ class Preprocessor:
                 ).agg(agg_exprs)
             )
 
+        invalid_conditions = condition_mapping.filter(
+            pl.col("CONDITION").is_null() | (pl.col("CONDITION").cast(pl.Utf8).str.strip_chars() == "")
+        )
+        if invalid_conditions.height:
+            raise ValueError("Condition labels must be nonmissing and nonempty.")
+
         def _sanitize_condition(s: str) -> str:
             s = (s or "").strip()
             s = re.sub(r"[^A-Za-z0-9_]+", "_", s)
@@ -1008,6 +1048,13 @@ class Preprocessor:
             .map_elements(_sanitize_condition, return_dtype=pl.Utf8)
             .alias("CONDITION")
         )
+
+        reserved = {"Q", "I", "Intercept", *base_cols, "Sample"}
+        invalid_labels = [label for label in condition_mapping["CONDITION"].unique().to_list()
+                          if label in reserved or keyword.iskeyword(label)
+                          or "_vs_" in label or "_v_" in label]
+        if invalid_labels:
+            raise ValueError(f"Invalid/reserved condition labels: {invalid_labels!r}")
 
         collisions = (
             condition_mapping.group_by("CONDITION")
@@ -1659,6 +1706,28 @@ class Preprocessor:
                     f"Built covariate pivot block - broadcast on {key_col}; shape matches main."
                 )
 
+    def _linear_evidence_frame(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Raw evidence/ratios use linear units, including declared prelogged input."""
+        if self.input_is_log2:
+            return df.with_columns(pl.lit(2.0).pow(pl.col("SIGNAL")).alias("SIGNAL"))
+        return df
+
+    def _validate_rollup_scale(self, df: pl.DataFrame, feature_col: str, method: str) -> None:
+        """Already-log2 input may pass through, but must not enter a linear rollup."""
+        if not self.input_is_log2:
+            return
+        repeated = df.group_by([feature_col, "FILENAME"]).len().filter(pl.col("len") > 1)
+        if method in {"directlfq", "robust_regression", "count"} or repeated.height:
+            raise ValueError(f"{method} rollup requires linear intensity input with normalization starting "
+                             "with log2; prelogged input must have one row per feature/sample.")
+
+    @staticmethod
+    def _validate_observed_samples(matrix: np.ndarray, samples: list[str], block: str) -> None:
+        missing = [sample for sample, observed in zip(samples, np.isfinite(matrix).any(axis=0)) if not observed]
+        if missing:
+            raise ValueError(f"No observed quantitative values in {block} sample(s): {missing!r}; "
+                             "imputation cannot establish experimental evidence.")
+
     def _pivot_main_block(self, df: pl.DataFrame) -> Dict[str, Optional[pl.DataFrame]]:
         """Mechanical extraction of the original per-block pivot logic."""
         if self.analysis_type in {"peptidomics", "pelsa", "phospho"}:
@@ -1670,6 +1739,7 @@ class Preprocessor:
             method = (self.protein_rollup_method or "sum").lower()
             log_info(f"Protein quantification using {method}")
 
+        self._validate_rollup_scale(df, "INDEX", method)
         if method == "directlfq":
             intensity = self._pivot_df_LFQ(
                 df=df,
@@ -1733,7 +1803,7 @@ class Preprocessor:
         if "PEP" in df.columns:
             pp = self._pivot_df(df, "FILENAME", "INDEX", "PEP", "mean")
 
-        sc = self._pivot_native_spectral_counts(df)
+        sc = self._pivot_native_spectral_counts(self._linear_evidence_frame(df))
 
         if "PRECURSORS_EXP" in df.columns:
             if self.analysis_type == "phospho":
@@ -1877,6 +1947,8 @@ class Preprocessor:
                 .alias("IBAQ")
             )
 
+        if value_col == "SIGNAL":
+            self._validate_rollup_scale(long_with_key, key_col, self.covariate_protein_rollup_method)
         if value_col == "SIGNAL" and self.covariate_protein_rollup_method == "directlfq":
             if "PEPTIDE_LSEQ" not in long_with_key.columns:
                 raise ValueError(
@@ -1917,7 +1989,7 @@ class Preprocessor:
     def _normalize_matrix(self, block: Block) -> None:
         """Normalize a matrix (main or covariate block)."""
 
-        normalization_method = self.normalization.get("method")
+        normalization_method = self.normalization_methods
 
         if block is Block.COV:
             df = self.intermediate_results.dfs.get("raw_df_covariate")
@@ -1946,11 +2018,7 @@ class Preprocessor:
 
         for method in normalization_method:
             m = (method or "").lower()
-            if m == "log10":
-                mat = np.clip(mat, 1e-10, None)
-                mat = np.log10(mat)
-                postlog_mat = mat.copy()
-            elif m == "log2":
+            if m == "log2":
                 mat = np.clip(mat, 1e-10, None)
                 mat = np.log2(mat)
                 postlog_mat = mat.copy()
@@ -1991,9 +2059,6 @@ class Preprocessor:
                         f"used={intersection_features}/{total_features} "
                         f"features present in all {mat.shape[1]} samples."
                     )
-            elif m == "quantile":
-                qt = sklearn.preprocessing.QuantileTransformer(random_state=42)
-                mat = qt.fit_transform(mat)
             elif m in {
                 "global_linear",
                 "global_loess",
@@ -2125,7 +2190,7 @@ class Preprocessor:
         )
 
         has_log_step = any(
-            (mth or "").lower() in {"log2", "log10", "log", "ln"}
+            (mth or "").lower() == "log2"
             for mth in normalization_method
         )
 
@@ -2180,6 +2245,7 @@ class Preprocessor:
             df_norm: pl.DataFrame, sample_cols: List[str], suffix: str
         ):
             not_imp = df_norm.select(sample_cols).to_numpy().copy()
+            self._validate_observed_samples(not_imp, sample_cols, suffix or "main")
             cond_map = self.intermediate_results.dfs[
                 "condition_pivot"
             ].to_pandas()
@@ -2192,6 +2258,8 @@ class Preprocessor:
             imp_mat = not_imp if imputer is None else imputer.fit_transform(
                 not_imp
             )
+            if imp_mat.shape != not_imp.shape:
+                raise ValueError(f"Imputation changed matrix shape {not_imp.shape} to {imp_mat.shape}.")
             out_df = df_norm.with_columns(
                 pl.DataFrame(imp_mat, schema=sample_cols, orient="row")
             )
@@ -2244,6 +2312,7 @@ class Preprocessor:
             ).agg(agg_exprs)
 
             not_imp = cov_norm_by_key.select(sample_cols).to_numpy().copy()
+            self._validate_observed_samples(not_imp, sample_cols, "covariate")
             cond_map = self.intermediate_results.dfs[
                 "condition_pivot"
             ].to_pandas()
@@ -2255,6 +2324,8 @@ class Preprocessor:
             imp_key = not_imp if imputer is None else imputer.fit_transform(
                 not_imp
             )
+            if imp_key.shape != not_imp.shape:
+                raise ValueError(f"Covariate imputation changed matrix shape {not_imp.shape} to {imp_key.shape}.")
             cov_imp_by_key = cov_norm_by_key.with_columns(
                 pl.DataFrame(imp_key, schema=sample_cols, orient="row")
             )

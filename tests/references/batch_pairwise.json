@@ -298,7 +298,8 @@
           "design_formula": "0 + B + A + Q('REPLICATE__2') + Q('REPLICATE__3')",
           "design_rank": 4,
           "n_samples": 6,
-          "residual_df": 2
+          "residual_df": 2,
+          "pilot": false
         },
         "C_vs_A": {
           "batch_effect_columns": ["REPLICATE"],
@@ -307,13 +308,15 @@
           "design_formula": "0 + C + A + Q('REPLICATE__2') + Q('REPLICATE__3')",
           "design_rank": 4,
           "n_samples": 6,
-          "residual_df": 2
+          "residual_df": 2,
+          "pilot": false
         }
       },
       "de_method": "limma_ebayes",
       "design_columns": [],
       "design_formula": "per-contrast",
-      "separate_contrasts": true
+      "separate_contrasts": true,
+      "pilot_contrasts": []
     },
     "analysis_type": "proteomics",
     "pilot_study_mode": false,
@@ -502,5 +505,6 @@
       [false, false],
       [false, false]
     ]
-  }
+  },
+  "policy_amendment": "1.10.4: explicit fit-scoped pilot metadata; phospho coherent fallback/final-family BH, missing unestimable slope diagnostics and covariate_adjusted provenance. Unrelated numerical references retained."
 }

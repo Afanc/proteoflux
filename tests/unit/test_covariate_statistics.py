@@ -75,16 +75,16 @@ def test_slope_diagnostic_uses_all_samples_regardless_of_contrast_scope(covariat
 
 
 @pytest.mark.parametrize("fully_imputed", [False, True])
-def test_flat_covariate_diagnostic_is_neutral_including_imputed_background(covariate_experiment, fully_imputed):
+def test_flat_covariate_diagnostic_is_missing_including_imputed_background(covariate_experiment, fully_imputed):
     obj, config = covariate_experiment
     obj.layers["centered_covariate"][:, 0] *= .001
     obj.layers["raw_covariate"][:, 0] = (
         np.nan if fully_imputed else np.exp2(obj.layers["centered_covariate"][:, 0]))
     out = run_limma_pipeline(obj, config)
-    assert out.varm["covariate_t"][0, 0] == 0
+    assert np.isnan(out.varm["covariate_t"][0, 0])
     assert out.varm["covariate_p"].shape == (obj.n_vars, 1)
-    assert out.varm["covariate_p"][0, 0] == 1
-    assert out.varm["covariate_q"][0, 0] == 1
+    assert np.isnan(out.varm["covariate_p"][0, 0])
+    assert np.isnan(out.varm["covariate_q"][0, 0])
     if fully_imputed:
         assert_array_equal(out.varm["ft_p_ebayes"][0], [1., 1.])
 
@@ -119,21 +119,20 @@ def test_covariate_p_has_one_diagnostic_per_feature(tmp_path):
 
 
 @pytest.mark.contract
-@pytest.mark.parametrize("mode", ["free", "nonneg"])
-def test_fully_imputed_background_diagnostics_apply_bh_after_neutralization(covariate_experiment, tmp_path, mode):
+def test_unestimable_background_diagnostics_apply_bh_to_testable_sites(covariate_experiment, tmp_path):
     obj, config = covariate_experiment
-    config["ancova"] = {"beta_mode": mode}
     baseline = run_limma_pipeline(obj, config)
     feature = np.argmin(baseline.varm["covariate_p"][:, 0])
     # A non-flat imputed analysis vector is not evidence of observed background.
     obj.layers["raw_covariate"][:, feature] = np.nan
     result = run_limma_pipeline(obj, config)
     p = result.varm["covariate_p"][:, 0]
-    assert p[feature] == 1
+    assert np.isnan(p[feature])
     expected_p = baseline.varm["covariate_p"][:, 0].copy()
-    expected_p[feature] = 1
+    expected_p[feature] = np.nan
     assert_array_equal(p, expected_p)
-    expected_q = false_discovery_control(p)
+    expected_q = np.full_like(p, np.nan)
+    expected_q[np.isfinite(p)] = false_discovery_control(p[np.isfinite(p)])
     assert_allclose(result.varm["covariate_q"][:, 0], expected_q, rtol=1e-12, atol=1e-14)
     # Correct diagnostics must survive the actual H5AD exporter with their labels.
     path = tmp_path/"slope-diagnostics.h5ad"
@@ -145,11 +144,10 @@ def test_fully_imputed_background_diagnostics_apply_bh_after_neutralization(cova
     assert_allclose(restored.varm["covariate_q"][:, 0], expected_q, rtol=1e-12, atol=1e-14)
 
 
-@pytest.mark.parametrize("mode", ["fixed1", "free", "nonneg"])
 @pytest.mark.parametrize("missing", ["partial", "multiple", "all"])
-def test_slope_diagnostic_bh_retains_full_feature_universe(covariate_experiment, mode, missing):
+def test_slope_diagnostic_bh_excludes_unestimable_sites(covariate_experiment, missing):
     obj, config = covariate_experiment
-    config["ancova"] = {"beta_mode": mode, "ridge_lambda": 0}
+    config["ancova"] = {"ridge_lambda": 0}
     expected_p = np.array([linregress(obj.layers["centered_covariate"][:, g], obj.X[:, g]).pvalue
                            for g in range(obj.n_vars)])
     if missing == "partial":
@@ -158,12 +156,14 @@ def test_slope_diagnostic_bh_retains_full_feature_universe(covariate_experiment,
         obj.layers["raw_covariate"][:, [0, -1]] = np.nan
     else:
         obj.layers["raw_covariate"][:] = np.nan
-    if mode != "fixed1":
-        expected_p[np.isnan(obj.layers["raw_covariate"]).all(axis=0)] = 1
-    # BH includes neutralized sites; it must not silently shrink the test family.
+    expected_p[np.isnan(obj.layers["raw_covariate"]).all(axis=0)] = np.nan
+    expected_q = np.full_like(expected_p, np.nan)
+    finite = np.isfinite(expected_p)
+    if finite.any():
+        expected_q[finite] = false_discovery_control(expected_p[finite])
     result = run_limma_pipeline(obj, config)
     assert_allclose(result.varm["covariate_p"][:, 0], expected_p, rtol=1e-10, atol=1e-14)
-    assert_allclose(result.varm["covariate_q"][:, 0], false_discovery_control(expected_p), rtol=1e-10, atol=1e-14)
+    assert_allclose(result.varm["covariate_q"][:, 0], expected_q, rtol=1e-10, atol=1e-14)
 
 
 def test_missing_spectral_counts_do_not_change_covariate_results(covariate_experiment):
@@ -179,23 +179,21 @@ def test_missing_spectral_counts_do_not_change_covariate_results(covariate_exper
     assert_array_equal(result.layers["residuals_covariate"], baseline.layers["residuals_covariate"])
 
 
-@pytest.mark.parametrize("mode", ["free", "nonneg"])
 @pytest.mark.parametrize("separate", [False, True])
-def test_fitted_modes_match_independent_two_stage_regression(covariate_experiment, mode, separate):
+def test_fixed1_matches_independent_residual_regression(covariate_experiment, separate):
     obj, config = covariate_experiment
-    config["ancova"] = {"beta_mode": mode, "ridge_lambda": 0}
+    config["ancova"] = {"ridge_lambda": 0}
     config["analysis"]["separate_contrasts"] = separate
     cov = obj.layers["centered_covariate"]
     fits = [linregress(cov[:, g], obj.X[:, g]) for g in range(obj.n_vars)]
     slopes = np.array([fit.slope for fit in fits])
     assert (slopes < 0).any() and (slopes > 0).any()
-    applied = np.maximum(slopes, 0) if mode == "nonneg" else slopes
+    applied = np.ones_like(slopes)
     residuals = obj.X - np.array([fit.intercept for fit in fits]) - cov*applied
     out = run_limma_pipeline(obj, config)
     assert_allclose(out.varm["covariate_beta"][:, 0], applied, rtol=1e-10, atol=1e-12)
     assert_allclose(out.layers["residuals_covariate"], residuals, rtol=1e-10, atol=1e-12)
-    # Diagnostics describe the unconstrained slope, including negative slopes
-    # clipped for residualization in nonneg mode.
+    # Diagnostics describe the unconstrained slope, not the applied unit slope.
     assert_allclose(out.varm["covariate_p"][:, 0], [fit.pvalue for fit in fits], rtol=1e-10, atol=1e-14)
     for j, contrast in enumerate(out.uns["contrast_names"]):
         a, b = contrast.split("_vs_")
@@ -217,40 +215,43 @@ def test_fitted_modes_match_independent_two_stage_regression(covariate_experimen
         assert_allclose(out.varm["q_raw"][:, j], false_discovery_control(p), rtol=1e-10, atol=1e-14)
 
 
-@pytest.mark.parametrize("mode,separate", [
-    ("free", False), ("nonneg", False), ("free", True),
-    pytest.param("nonneg", True, marks=[pytest.mark.known_bug,
-        pytest.mark.xfail(raises=KeyError, reason="Deferred Inmoose infinite-prior-df KeyError -2 in pairwise nonneg fit")]),
-])
-def test_fitted_modes_keep_global_slopes_and_contrast_local_background_support(covariate_experiment, mode, separate):
+def test_selective_fallback_uses_coherent_model_and_one_final_bh_family(covariate_experiment):
     obj, config = covariate_experiment
-    config["ancova"] = {"beta_mode": mode}
-    config["analysis"] = {"only_contrasts": ["B_vs_A", "C_vs_B"], "separate_contrasts": separate}
-    baseline = run_limma_pipeline(obj, config)
-    # Last four features have positive slopes, including under nonneg.
-    assert (baseline.varm["covariate_beta"][-4:, 0] > 0).all()
-    obj.layers["raw_covariate"][:3, -1] = np.nan  # A absent; B/C still supported
-    obj.layers["raw_covariate"][:, -2] = np.nan   # no observed FT in the experiment
-    obj.layers["raw_covariate"][0, -3] = np.nan   # partial A; both contrasts supported
-    obj.layers["raw_covariate"][:6, -4] = np.nan  # only C observed
-    before_raw = obj.layers["raw_covariate"].copy()
-    out = run_limma_pipeline(obj, config)
-    raw = run_limma_pipeline(obj, {"analysis": config["analysis"]})
-    # Only an entirely imputed background suppresses the global slope.
-    keep = np.arange(obj.n_vars) != obj.n_vars-2
-    assert_array_equal(out.varm["covariate_beta"][keep], baseline.varm["covariate_beta"][keep])
-    assert out.varm["covariate_beta"][-2, 0] == 0
-    assert out.varm["covariate_t"][-2, 0] == 0
-    assert out.varm["covariate_p"][-2, 0] == 1
-    assert out.varm["covariate_q"][-2, 0] == 1
-    assert_allclose(out.layers["residuals_covariate"][:, -2], obj.X[:, -2]-obj.X[:, -2].mean(), atol=1e-12)
-    unsupported = np.zeros((obj.n_vars, 2), dtype=bool)
-    unsupported[-1, 0] = True
-    unsupported[[-2, -4], :] = True
-    for key in ("log2fc", "p_ebayes", "q_ebayes"):
-        assert_array_equal(out.varm[key][unsupported], raw.varm[key][unsupported])
-    assert_array_equal(out.varm["cov_part"][unsupported], 0)
-    assert_allclose(out.varm["log2fc"][~unsupported], baseline.varm["log2fc"][~unsupported], rtol=1e-10, atol=1e-12)
-    assert_allclose(out.varm["raw_log2fc"], out.varm["log2fc"]+out.varm["cov_part"], rtol=1e-10, atol=1e-12)
-    assert_array_equal(out.layers["raw_covariate"], before_raw)
-    assert_array_equal(obj.layers["raw_covariate"], before_raw)
+    obj.layers['raw_covariate'][3:6, [0, 5, 11]] = np.nan
+    result = run_limma_pipeline(obj, config)
+    raw = run_limma_pipeline(obj, {'analysis': config['analysis']})
+    adjusted_obj = obj.copy()
+    cov = obj.layers['centered_covariate']
+    adjusted_obj.X = obj.X - obj.X.mean(0) - (cov-cov.mean(0))
+    adjusted = run_limma_pipeline(adjusted_obj, {'analysis': config['analysis']})
+    fallback = np.zeros((obj.n_vars, 2), dtype=bool)
+    fallback[[0, 5, 11], 0] = True
+    for key in ('log2fc', 'se_raw', 't_raw', 'p_raw', 'se_ebayes', 't_ebayes', 'p_ebayes'):
+        expected = np.where(fallback, raw.varm[key], adjusted.varm[key])
+        assert_allclose(result.varm[key], expected, rtol=1e-10, atol=1e-14)
+    for family in ('raw', 'ebayes'):
+        for j in range(2):
+            assert_allclose(result.varm['q_'+family][:, j],
+                            false_discovery_control(result.varm['p_'+family][:, j]), rtol=1e-12)
+    assert_array_equal(result.varm['covariate_adjusted'], ~fallback)
+
+
+@pytest.mark.parametrize('mode', ['free', 'nonneg', 'nonnegative'])
+def test_unsupported_slopes_rejected_even_without_covariate(mode):
+    with pytest.raises(ValueError, match='fixed1'):
+        run_limma_pipeline(expression(), {'ancova': {'beta_mode': mode}})
+
+
+def test_cov_part_remains_a_mean_difference_not_a_batch_decomposition(covariate_experiment):
+    obj, config = covariate_experiment
+    obj.obs['batch'] = ['x', 'x', 'y', 'x', 'y', 'y', 'x', 'y', 'x']
+    config['analysis']['batch_effect_columns'] = ['batch']
+    obj.layers['centered_covariate'] += 3 * (obj.obs.batch == 'y').to_numpy()[:, None]
+    result = run_limma_pipeline(obj, config)
+    cov = obj.layers['centered_covariate']
+    assert_allclose(result.varm['cov_part'][:, 0], cov[3:6].mean(0)-cov[:3].mean(0), atol=1e-12)
+    # Linearity of least squares with one common design gives the actual
+    # batch-adjusted difference. cov_part intentionally reports another quantity.
+    assert_allclose(result.varm['raw_log2fc']-result.varm['log2fc'], result.varm['ft_log2fc'], atol=1e-12)
+    assert not np.allclose(result.varm['cov_part'], result.varm['ft_log2fc'])
+    assert 'not a batch-adjusted decomposition' in result.uns['decomposition_rule']

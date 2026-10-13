@@ -39,7 +39,7 @@ def raw_experiment(tmp_path):
     return config, expected
 
 
-@pytest.mark.parametrize("method", ["log2", "LoG2", "log10", "LOG10"])
+@pytest.mark.parametrize("method", ["log2", "LoG2"])
 def test_yaml_scalar_and_list_logs_preserve_raw_evidence(raw_experiment, method):
     config, expected = raw_experiment
     datasets = []
@@ -52,8 +52,7 @@ def test_yaml_scalar_and_list_logs_preserve_raw_evidence(raw_experiment, method)
         obj = dataset.get_anndata()
         raw = expected.loc[obj.obs_names, obj.var_names].to_numpy()
         assert_array_equal(obj.layers["raw"], raw)
-        log = np.log2 if method.lower() == "log2" else np.log10
-        assert_allclose(obj.X, log(raw), rtol=3e-7, equal_nan=True)
+        assert_allclose(obj.X, np.log2(raw), rtol=3e-7, equal_nan=True)
         ir = dataset.preprocessor.intermediate_results
         assert_array_equal(ir.matrices["raw_mat"], raw.T)
         assert_polars_equal(dataset.preprocessed_data.filtered, ir.dfs["raw_df"])
@@ -152,6 +151,7 @@ def test_scalar_and_list_log2_preserve_same_raw_scale(protein_config):
 def test_prelogged_background_cannot_overwrite_main_raw_or_exports(tmp_path, method):
     config = phospho_workflow(tmp_path, kinase=False)
     config["preprocessing"]["normalization"]["method"] = method
+    config["preprocessing"]["filtering"]["min_linear_intensity"] = None
     config["preprocessing"]["imputation"]["method"] = "mean"
     originals = {}
     for name, path in [("main", config["dataset"]["input_file"]),

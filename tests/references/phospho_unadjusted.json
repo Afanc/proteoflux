@@ -306,7 +306,8 @@
       "design_formula": "0 + A + B + C",
       "design_rank": 3,
       "residual_df": 6,
-      "separate_contrasts": false
+      "separate_contrasts": false,
+      "pilot_contrasts": []
     },
     "analysis_type": "phospho",
     "pilot_study_mode": false,
@@ -491,5 +492,6 @@
       [true, true],
       [true, true]
     ]
-  }
+  },
+  "policy_amendment": "1.10.4: explicit fit-scoped pilot metadata; phospho coherent fallback/final-family BH, missing unestimable slope diagnostics and covariate_adjusted provenance. Unrelated numerical references retained."
 }

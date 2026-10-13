@@ -76,6 +76,7 @@ proteoflux init spectronaut-proteomics --path config.yaml
 Edit paths, column mappings and analysis settings before running. Relative paths
 resolve from your current working directory, not from the YAML file’s directory.
 Template choices can differ from runtime defaults; see the configuration guide.
+PELSA is available as `proteoflux init spectronaut-pelsa --path config.yaml`.
 
 Run the pipeline:
 
@@ -140,6 +141,10 @@ proteoflux init TEMPLATE_NAME
 Full parameter reference:
 
 See the configuration guide [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+Quantitative inference uses log2 values: start normalization with `log2` for
+linear inputs. Phospho background adjustment uses a fixed unit slope. If any
+condition in the selected contrasts has one sample, the whole analysis is pilot.
+See [1.10.4 behavior changes](docs/RELEASE_NOTES_1.10.4.md) before reusing older configs.
 
 ---
 

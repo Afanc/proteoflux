@@ -132,7 +132,7 @@ def test_shared_observed_reference_controls_normalization(tmp_path, method):
                                   ("R", [8., 32., 128.], "REF"),
                                   ("sparse", [1024., None, 1024.], "REF")]:
         for r, value in enumerate(values):
-            rows.append({"protein": protein, "accession": protein, "sequence": protein+"K",
+            rows.append({"protein": protein, "accession": protein, "sequence": protein.upper()+"K",
                          "intensity": value, "run": f"A_{r+1}", "condition": "A", "replicate": r+1,
                          "fasta": tag, "gene": protein, "charge": 2, "qvalue": .001,
                          "pep": .001, "n_precursors": 1})

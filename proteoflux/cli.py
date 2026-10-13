@@ -7,6 +7,7 @@ app = typer.Typer(help="ProteoFlux: Reproducible proteomics workflows")
 
 # Template registry: CLI name -> packaged YAML filename
 _TEMPLATES: Dict[str, str] = {
+    "spectronaut-pelsa": "spectronaut-pelsa.yaml",
     "spectronaut-proteomics": "spectronaut-proteomics.yaml",
     "spectronaut-peptidomics": "spectronaut-peptidomics.yaml",
     "spectronaut-phosphoproteomics": "spectronaut-phosphoproteomics.yaml",

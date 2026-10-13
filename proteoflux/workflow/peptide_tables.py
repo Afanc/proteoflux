@@ -226,7 +226,7 @@ def build_peptide_tables(
     same IntermediateResults keys.
     """
 
-    df = self.intermediate_results.dfs["filtered_final_censored"]
+    df = self._linear_evidence_frame(self.intermediate_results.dfs["filtered_final_censored"])
 
     # Compute missed cleavages once, on the post-filter peptide universe.
     df_mc = df

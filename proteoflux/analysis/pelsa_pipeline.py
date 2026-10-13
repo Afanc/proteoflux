@@ -318,6 +318,8 @@ def _build_pelsa_localization_metadata(adata: ad.AnnData) -> dict:
 
 @log_time("PELSA pipeline")
 def run_pelsa_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
+    from proteoflux.analysis.validation import validate_log2_input
+    validate_log2_input(adata, config)
     adata = adata.copy()
 
     analysis_cfg = (config or {}).get("analysis", {}) or {}

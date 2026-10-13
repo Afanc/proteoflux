@@ -205,7 +205,7 @@ sum/directLFQ rollup or the phospho background's separate rollup method.
 
 | Key | Description |
 |------|------------|
-| `normalization.method` | Ordered list or single string: `log2`, `log10`, `median_equalization`, `median_equalization_by_tag`, `median_equalization_intersection`, `quantile`, `global_linear`, `global_loess`, `local_linear`, `local_loess`, `none`. Specify explicitly. For linear inputs to differential/PELSA analysis, begin with `log2`. |
+| `normalization.method` | Ordered list or single string: `log2`, `median_equalization`, `median_equalization_by_tag`, `median_equalization_intersection`, `global_linear`, `global_loess`, `local_linear`, `local_loess`, `none`. Specify explicitly. For linear inputs to differential/PELSA analysis, begin with `log2`. |
 | `normalization.reference_tag` | String or list of tags for `median_equalization_by_tag` (case-insensitive matching). Looks for matches in the fasta_column, fails if column not defined. Default: null. |
 | `normalization.loess_span` | LOESS smoothing span for loess normalizations. Default: 0.9. |
 
@@ -219,22 +219,32 @@ all samples. Regression methods use a per-feature mean across samples as the
 global reference or, for local methods, the first sample within each condition; local results therefore depend
 on the choice/order of reference sample. `loess_span` controls smoothing.
 
-`quantile` uses sklearn's per-sample transformation to a uniform distribution,
-not classical normalization to a shared intensity distribution. It does not
-preserve log2 units. Although `log10` is accepted, downstream fields called
-`log2fc` and PELSA expect log2 units; these alternatives need a deliberate scale
-interpretation, not the usual log2FC interpretation.
+All quantitative inference uses **log2 units**: differential `log2fc` is a
+log2 fold change, and PELSA reconstructs linear ratios with base 2. For linear
+input, put `log2` first and use it exactly once. `log10` and `quantile` are rejected;
+they do not preserve this scale contract. A base-10 concentration axis in PELSA
+is separate from the base-2 intensity scale.
 
-For already-log2 input, `none` or an empty method list leaves analysis values on
-that scale and reconstructs raw layers with `2**value`. Rollup happens before
-normalization: supply appropriately aggregated values, since summing logged
-precursors is not equivalent to summing linear intensities and then logging.
+Protein sum/mean/median/min/max, Top3 and precursor-to-peptide aggregation operate
+on **linear intensities before logging**. DirectLFQ and robust regression also
+require linear inputs; they fit internally in log2 space and return linear
+quantities before the configured log2 step. A count rollup produces counts,
+whose log2 differences describe count ratios rather than abundance ratios.
+
+For already-log2 input, omit the log step (`none`, an empty list or omitted
+normalization). Each feature/sample must have one input row after identity
+construction; combining prelogged rows is rejected. DirectLFQ, robust regression
+and count rollup require linear input. Set `filtering.min_linear_intensity: null`
+and censor linear values before supplying prelogged input. Raw layers and evidence
+are reconstructed in linear units with `2**value`, without modifying source data.
+Direct AnnData callers must supply log2 quantitative matrices; ProteoFlux checks
+declared scale metadata/configuration and does not infer units from magnitudes.
 
 ## Imputation
 
 | Key | Description |
 |------|------------|
-| `imputation.method` | `lc_conmed`, `mean`, `median`, `knn`, `nsknn`, `tnknn`, `mindet`, `minprob`, `randomforest`, or `null` (no imputation; also the omission default). The string `"none"` is invalid. |
+| `imputation.method` | `lc_conmed`, `mean`, `median`, `knn`, `nsknn`, `tnknn`, `mindet`, `minprob`, `iterative_hgb`, or `null` (no imputation; also the omission default). The string `"none"` is invalid. |
 | `imputation.lc_conmed_lod_k` | Number of lowest global datapoints to estimate LOD. Default: 10. |
 | `imputation.lc_conmed_in_min_obs` | Minimum observed values per feature/condition to use conditional-median (MAR) imputation; fewer observations use left-censoring (MNAR). Default : 1. |
 | `imputation.lc_conmed_frac_min_obs` | Minimum observed fraction for conditional-median imputation, rounded up as `ceil(fraction * condition_size)`. Set `lc_conmed_in_min_obs: null`; otherwise the integer threshold takes precedence. Must be in `(0, 1]`. Default : null. |
@@ -250,12 +260,12 @@ precursors is not equivalent to summing linear intensities and then logging.
 | `imputation.lc_mu_shift` | Mean shift for minprob. Default: 1.8. |
 | `imputation.lc_sd_width` | SD width for minprob. Default: 0.3. |
 | `imputation.lc_clip` | Boolean. Clip to quantile in minprob. Default: true. |
-| `imputation.rf_max_depth` | Maximum depth of the boosting trees. Default: 6. |
-| `imputation.rf_max_iter` | Maximum imputation iterations. Default: 20. |
-| `imputation.rf_learning_rate` | Boosting learning rate. Default: 0.1. |
-| `imputation.rf_n_estimators` | Maximum boosting iterations per regressor. Default: 100. |
-| `imputation.rf_tol` | Imputation convergence tolerance. Default: 5e-2. |
-| `imputation.rf_nearest_features` | Maximum neighboring predictors used by the iterative imputer. Default: 50. |
+| `imputation.hgb_max_depth` | Maximum depth of the boosting trees. Default: 6. |
+| `imputation.hgb_max_iter` | Maximum imputation iterations. Default: 20. |
+| `imputation.hgb_learning_rate` | Boosting learning rate. Default: 0.1. |
+| `imputation.hgb_estimator_max_iter` | Maximum boosting iterations per regressor. Default: 100. |
+| `imputation.hgb_tol` | Imputation convergence tolerance. Default: 5e-2. |
+| `imputation.hgb_nearest_features` | Maximum neighboring predictors used by the iterative imputer. Default: 50. |
 | `imputation.random_state` | Random seed for reproducibility. Default: 42. |
 
 ---
@@ -264,8 +274,9 @@ LC-ConMed preserves observed values and classifies support from the original
 missingness mask. With sufficient support it uses the condition median plus
 pooled within-condition jitter, clipped to that condition's observed interquartile
 range. Otherwise it draws below the median of the lowest `lod_k` observed values
-in the block. A wholly missing block uses a zero log-scale detection limit;
-these fills are not evidence. Main and protein-background blocks are processed
+in the block. Every quantitative sample must retain at least one finite observed
+value after filtering; entirely empty main or aligned background samples are rejected
+before imputation. No method may drop a sample or manufacture its evidence. Main and protein-background blocks are processed
 separately; background is imputed once per parent protein before broadcast.
 
 The same seed reproduces the same ordered input, but reordering features or
@@ -273,13 +284,14 @@ samples can change which stochastic draws are assigned to missing cells.
 `separate_contrasts` does not isolate normalization or imputation from other
 conditions. QC embeddings use their own missing-value treatment.
 
-The method selected by `randomforest` is iterative imputation with a histogram
-gradient-boosting regressor. Interpret its `rf_*` settings as parameters of that
-estimator.
-`knn` and `randomforest` currently cannot preserve an entirely empty sample column;
-check input completeness before selecting them. No-imputation mode is useful for
-PELSA (which normally fits observed normalized values); downstream methods differ
-in their ability to handle missing values.
+`iterative_hgb` uses sklearn's iterative imputer with a histogram gradient-boosting
+regressor. `hgb_max_iter` limits imputation cycles; `hgb_estimator_max_iter` limits
+boosting iterations within each regression. Other estimator/default settings are
+listed above. Observed values remain unchanged.
+
+No-imputation mode is useful for PELSA, which normally fits observed normalized
+values. Limma requires an estimable design for each feature; missing inputs may
+expose limitations in the installed InMoose version.
 
 # 3. Analysis
 
@@ -333,48 +345,74 @@ Duplicate kinase–substrate-site relationships within or across databases contr
 `A_vs_B` means A minus B on the analysis scale; `A_v_B` is accepted and stored
 as `A_vs_B`. `only_contrasts` takes precedence over `only_against`. By default,
 selecting contrasts does not remove other conditions from variance estimation.
-BH correction is per contrast across retained features. If both contrast sides
+BH correction is per contrast over finite, testable p-values. An undefined raw
+p-value and its q-value remain missing; they do not invalidate finite tests or
+affect the separate moderated family. If both contrast sides
 are entirely missing in raw intensity, that feature/contrast is neutralized
 before BH (logFC/t = 0, p/q = 1); imputed values do not count as observations.
 
-A single condition, or any singleton condition anywhere in the experiment,
-activates pilot mode for differential analysis, even if the singleton is not in
-the requested contrast. Fold changes remain available when a contrast exists;
-limma p/q values and phospho covariate adjustment are not produced. Optional kinase
-analysis can still run on available fold changes; its probabilities are a
-separate procedure, not restored limma significance.
+Pilot status is uniform across the entire selected analysis. If any condition
+participating in the selected contrasts has one sample, **all selected contrasts
+are pilot**, regardless of `separate_contrasts`. With A=3, B=3, C=1 replicates:
+
+- Selecting only `A_vs_B` permits inference; C does not determine pilot status.
+- Selecting all contrasts, or both `A_vs_B` and `A_vs_C`, makes all of them pilot.
+- `only_against: A` includes B_vs_A and C_vs_A, so the analysis remains pilot.
+- A single condition has no differential contrasts.
+
+This decision is separate from variance estimation: shared fitting still includes
+all experiment conditions, while separate fitting uses each selected pair.
+Preprocessing still uses the full dataset. Contrast selection does not remove
+samples or evidence from the output.
+
+Pilot analyses report unadjusted condition-mean log2 differences, without batch
+or protein-background adjustment or limma significance. Inferential p/q/t/SE
+arrays are omitted for the whole analysis; pilot and non-pilot contrasts are never
+mixed in one result. Kinase tests on available fold changes are separate procedures
+and do not restore limma significance.
+
+Batch factors are categorical, including numeric-looking labels. Missing/blank
+factor values are rejected with sample names; rank-deficient or saturated designs
+also fail. Condition names must remain distinct after sanitization and may not
+contain `_vs_`/`_v_`, Python keywords or reserved model/annotation column names.
 
 ## Phospho background adjustment
 
-The default two-stage procedure subtracts a matched, centered protein-background
-signal with slope one, then fits differential models to the residuals. It is not
-generally equivalent to fitting a joint condition-plus-covariate ANCOVA model.
-The optional **top-level** `ancova` block supports `beta_mode: fixed1` (default),
-`free` or `nonneg`, and `ridge_lambda: 1e-6`.
-Fitted slopes use all samples even with `separate_contrasts: true`.
+ProteoFlux subtracts matched, centered log2 protein abundance with **fixed slope
+one**, then fits differential models to the residuals. This is a proportional
+background adjustment, not a joint condition-plus-background ANCOVA fit. The
+optional top-level `ancova` block accepts only `beta_mode: fixed1`. Its
+`ridge_lambda` (default `1e-6`) applies to the separate association diagnostic;
+it does not change the applied slope.
 
-For a site/contrast without observed background in either compared condition,
-adjustment is suppressed: `log2fc`, `p_ebayes` and `q_ebayes` fall back to unadjusted
-phospho results, `cov_part` is zero and FT support fields identify the lack of
-support. Do not label every value in `log2fc` as background-adjusted merely because
-a background was supplied. Fitted slope modes suppress globally flat backgrounds;
-`fixed1` continues to apply slope one. The near-flat diagnostic threshold includes a
-fixed SD floor of 0.1 log2 units and is not a configuration option.
+If either side of a site/contrast has no observed background, all of its standard
+inferential quantities use the unadjusted phospho model: FC, SE, t and p. After
+selecting the final p-values, BH is applied once per contrast, separately for
+unmoderated and moderated tests. Independently adjusted q-values are never
+spliced. `varm['covariate_adjusted']` identifies supported adjusted cells; it is
+false for fallback cells. `cov_part` is zero for those cells. Pilot analyses bypass
+background adjustment and omit these model fields.
 
-The no-background fallback does not replace residual-model standard errors,
-t-statistics or unmoderated p/q arrays. Those fields must not be interpreted as
-statistics for the fallback fold change. Likewise the final mixed `q_ebayes`
-array contains q-values from the respective model families, not a new BH pass
-over the mixed p-vector.
+`cov_part` is a descriptive condition-level quantity: the difference in mean
+log2 background/protein abundance between A and B. It uses the processed background
+values, including configured imputation. It is not a fitted batch-adjusted
+condition coefficient, and exact decomposition of a batch-adjusted phosphosite
+logFC is not part of its definition. This is intentional design. Without batch
+factors it also decomposes the raw and adjusted fold changes. The residual layer
+and `residual_variance` describe the residual model even where final inference
+uses fallback.
 
-`covariate_p` tests a stage-1 **phosphosite–background association slope of zero**,
-not differential protein abundance and not a slope of one. `covariate_q` applies
-BH over sites. Both contain one diagnostic per phosphosite, independent of
-contrast count, and are model-based diagnostics that may include imputed values.
-`fixed1` still computes this separate fitted-slope diagnostic while applying slope
-one. `free`/`nonneg` neutralize wholly unobserved background diagnostics before BH;
-flat diagnostics are neutral. FT differential p/q values are separate,
-contrast-specific fields. See [RESULTS.md](RESULTS.md).
+`covariate_p` tests a global **phosphosite–background association slope of zero**,
+not differential background abundance and not a slope of one. `covariate_q`
+applies BH across testable sites. These arrays have one value per site, independent
+of contrast count. They use processed values across all samples, potentially
+including imputation; they are diagnostics, not evidence of reliable adjustment.
+Diagnostics are missing for fewer than three finite observed background values,
+no observed background variation, or a near-flat processed background (including
+the existing SD floor of 0.1 log2 units). These sites are excluded from diagnostic
+BH. Missingness on one contrast does not erase an otherwise estimable global
+diagnostic. FT differential p/q remain distinct contrast-specific fields.
+See [RESULTS.md](RESULTS.md).
 
 ## Kinase activity
 

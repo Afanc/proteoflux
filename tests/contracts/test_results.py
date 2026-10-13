@@ -59,6 +59,7 @@ def test_serialized_viewer_contract(name, workflow_results):
     assert set(evidence["cols"]) == set(obj.obs_names)
     assert np.asarray(evidence["raw"]).shape == (len(evidence["rows"]), obj.n_obs)
     assert len(evidence["protein_index"]) == len(evidence["rows"])
+    assert obj.uns["preprocessing"]["quantitative_scale"] == "log2"
     assert_array_equal(np.isnan(evidence["raw"]), np.isnan(evidence["centered"]))
     if obj.uns["preprocessing"]["analysis_type"] == "phospho":
         assert set(evidence["protein_index"]) <= set(obj.var_names)
@@ -137,7 +138,11 @@ def test_serialized_slope_diagnostics_are_distinct_from_ft_contrasts(name, workf
         assert obj.varm[key].shape == (obj.n_vars, 1)
     p = 2 * student_t.sf(abs(obj.varm["covariate_t"][:, 0]), obj.n_obs-2)
     assert_allclose(obj.varm["covariate_p"][:, 0], p, rtol=1e-12, atol=1e-14)
-    assert_allclose(obj.varm["covariate_q"][:, 0], false_discovery_control(p), rtol=1e-12, atol=1e-14)
+    finite = np.isfinite(p)
+    expected_q = np.full_like(p, np.nan)
+    expected_q[finite] = false_discovery_control(p[finite])
+    assert_array_equal(np.isnan(obj.varm["covariate_q"][:, 0]), ~finite)
+    assert_allclose(obj.varm["covariate_q"][:, 0], expected_q, rtol=1e-12, atol=1e-14)
     summary = pd.read_excel(config["exports"]["path_table"], sheet_name="Summary", index_col=0)
     for key, prefix in (("ft_p_ebayes", "FT_PVALUE_"), ("ft_q_ebayes", "FT_QVALUE_")):
         assert obj.varm[key].shape == (obj.n_vars, len(obj.uns["contrast_names"]))

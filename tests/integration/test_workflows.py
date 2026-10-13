@@ -75,41 +75,6 @@ def test_robust_rollup_workflow_preserves_connected_quantities_and_component_rat
     assert_allclose(exported, raw, rtol=3e-6, equal_nan=True)
 
 
-@pytest.mark.parametrize("mode", ["free", "nonneg"])
-def test_optional_covariate_slope_modes_can_run(tmp_path, mode):
-    import anndata as ad
-    from scipy.optimize import lsq_linear
-    from proteoflux.main import run_pipeline
-    from tests.fixtures.workflows import phospho_workflow
-
-    config = phospho_workflow(tmp_path, kinase=False)
-    config["ancova"] = {"beta_mode": mode}
-    run_pipeline(config)
-    result = ad.read_h5ad(config["exports"]["path_h5ad"])
-    assert result.varm["log2fc"].shape[1] == 2  # original xfail assertion
-    assert result.varm["covariate_beta"].shape == (result.n_vars, 1)
-    assert result.varm["covariate_p"].shape == (result.n_vars, 1)
-    cov = result.layers["centered_covariate"].astype(float)
-    cov -= cov.mean(axis=0)
-    feature = np.argmax(cov.std(axis=0))  # independently check a non-flat site
-    assert cov[:, feature].std(ddof=1) > .1
-    energy = (cov**2).sum(axis=0)
-    ridge = 1e-6 * np.median(energy[energy > 0])
-    # Ridge is an extra least-squares observation penalizing only the slope.
-    design = np.vstack([np.column_stack([np.ones(result.n_obs), cov[:, feature]]), [0., np.sqrt(ridge)]])
-    y = result.X[:, feature].astype(float)
-    bounds = ([-np.inf, 0. if mode == "nonneg" else -np.inf], [np.inf, np.inf])
-    fit = lsq_linear(design, np.r_[y, 0.], bounds=bounds)
-    assert fit.success
-    assert_allclose(result.varm["covariate_beta"][feature, 0], fit.x[1], rtol=3e-6, atol=2e-6)
-    assert_allclose(result.layers["residuals_covariate"][:, feature], y-fit.x[0]-fit.x[1]*cov[:, feature], rtol=3e-6, atol=2e-6)
-    if mode == "nonneg":
-        assert (result.varm["covariate_beta"] >= 0).all()
-    assert_allclose(result.varm["raw_log2fc"], result.varm["log2fc"]+result.varm["cov_part"], rtol=3e-6, atol=2e-6)
-    summary = pd.read_excel(config["exports"]["path_table"], sheet_name="Summary", index_col=0)
-    assert set(summary.index.astype(str)) == set(result.var_names)
-
-
 def test_separate_and_reused_background_align_same_observed_values(workflow_results):
     separate, _ = workflow_results("phospho")
     reused, _ = workflow_results("phospho_reuse")
@@ -135,7 +100,9 @@ def test_fixed_one_background_adjustment_and_missing_background_fallback(workflo
         ft_fc = obj.layers["processed_covariate"][ma].mean(0)-obj.layers["processed_covariate"][mb].mean(0)
         assert_allclose(obj.varm["log2fc"][supported, j], (raw_fc-ft_fc)[supported], atol=3e-6)
         assert_allclose(obj.varm["log2fc"][~supported, j], raw_fc[~supported], atol=3e-6)
-        assert_array_equal(obj.varm["q_ebayes"][~supported, j], obj.varm["raw_q_ebayes"][~supported, j])
+        from scipy.stats import false_discovery_control
+        assert_array_equal(obj.varm["p_ebayes"][~supported, j], obj.varm["raw_p_ebayes"][~supported, j])
+        assert_allclose(obj.varm["q_ebayes"][:, j], false_discovery_control(obj.varm["p_ebayes"][:, j]), rtol=1e-12)
         assert_allclose(obj.varm["cov_part"][~supported, j], 0)
 
 
@@ -229,3 +196,45 @@ def test_real_cli_uses_cwd_paths_and_legacy_export_block(tmp_path, monkeypatch):
     assert run.exit_code == 0, run.output + str(run.exception)
     actual = ad.read_h5ad(config["analysis"]["exports"]["path_h5ad"])
     assert_reference(scientific_payload(actual), load_reference("proteomics")["result"])
+
+
+@pytest.mark.parametrize('phospho', [False, True])
+@pytest.mark.parametrize('include_singleton', [False, True])
+def test_uniform_pilot_selection_survives_pipeline_and_workbook(tmp_path, phospho, include_singleton):
+    import anndata as ad
+    from proteoflux.main import run_pipeline
+    from tests.fixtures.workflows import protein_workflow, phospho_workflow
+    config = phospho_workflow(tmp_path, kinase=False) if phospho else protein_workflow(tmp_path)
+    paths = [config['dataset']['input_file']]
+    if phospho:
+        paths.append(config['dataset']['inject_runs']['flowthrough']['input_file'])
+    for path in paths:
+        rows = pd.read_csv(path, sep='\t')
+        rows = rows[~((rows.condition == 'C') & (rows.replicate > 1))]
+        rows.to_csv(path, sep='\t', index=False)
+    contrasts = ['A_vs_B', 'A_vs_C'] if include_singleton else ['A_vs_B']
+    config['analysis'].update(separate_contrasts=True, only_contrasts=contrasts)
+    run_pipeline(config)
+    result = ad.read_h5ad(config['exports']['path_h5ad'])
+    assert result.uns['pilot_study_mode'] == include_singleton
+    assert list(result.uns['contrast_names']) == contrasts
+    assert list(result.uns['analysis']['pilot_contrasts']) == (contrasts if include_singleton else [])
+    assert result.n_obs == 7  # Selection does not discard raw/processed samples.
+    summary = pd.read_excel(config['exports']['path_table'], sheet_name='Summary', index_col=0)
+    if include_singleton:
+        assert not result.uns['has_covariate']
+        assert not any(key in result.varm for key in ('p_raw', 'q_raw', 'p_ebayes', 'q_ebayes',
+                                                     'se_raw', 't_raw', 'se_ebayes', 't_ebayes',
+                                                     'covariate_adjusted', 'covariate_p', 'ft_p_ebayes'))
+        assert not any('PVALUE_' in column or 'QVALUE_' in column for column in summary.columns)
+        for j, contrast in enumerate(contrasts):
+            a, b = contrast.split('_vs_')
+            expected = result.X[result.obs.CONDITION == a].mean(0)-result.X[result.obs.CONDITION == b].mean(0)
+            assert_allclose(result.varm['log2fc'][:, j], expected, atol=3e-6)
+            prefix = 'RAW_log2FC_' if phospho else 'log2FC_'
+            assert_allclose(summary.loc[result.var_names, prefix+contrast], expected, atol=3e-6)
+    else:
+        assert np.isfinite(result.varm['p_ebayes']).all()
+        assert result.uns['has_covariate'] == phospho
+        prefix = 'ADJUSTED_PVALUE_' if phospho else 'PVALUE_'
+        assert_allclose(summary.loc[result.var_names, prefix+'A_vs_B'], result.varm['p_ebayes'][:, 0])

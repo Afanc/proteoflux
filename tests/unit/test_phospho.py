@@ -60,16 +60,29 @@ def test_background_alignment_and_parent_shared_imputation(tmp_path):
     assert not any("background" in name for name in data.obs_names)
 
 
-def test_localization_drops_features_and_orphan_precursors(tmp_path):
+@pytest.mark.parametrize("empty_sample", [False, True])
+def test_localization_drops_features_and_orphan_precursors(tmp_path, empty_sample):
     config = phospho_workflow(tmp_path, kinase=False)
+    # This test isolates localization. Retaining only P000 would also leave an
+    # empty aligned background sample; that independent policy is tested below.
+    config["dataset"].pop("inject_runs")
     config["preprocessing"]["phospho"].update(localization_filter_mode="strict", localization_filter_threshold=.95)
     frame = pd.read_csv(config["dataset"]["input_file"], sep="\t")
     # Strict ignores absent runs; equality passes. Retain only P000 with all
     # finite probabilities >= threshold, while other sites contain .8.
     frame.loc[frame.accession == "P000", "probabilities"] = .95
-    frame = frame[~((frame.accession == "P000") & (frame.run == "A_1.raw"))]
+    missing = (frame.accession == "P000") & (frame.run == "A_1.raw")
+    if not empty_sample:
+        # Keep T6 observed: a missing S6 is allowed, an empty sample is not.
+        missing &= frame.locations == "S6"
+    frame = frame[~missing]
     frame.to_csv(config["dataset"]["input_file"], sep="\t", index=False)
+    if empty_sample:
+        with pytest.raises(ValueError, match="No observed quantitative values.*A_1"):
+            Dataset(**config)
+        return
     data = Dataset(**config).get_anndata()
+    assert np.isfinite(data.layers["raw"][data.obs_names.get_loc("A_1")]).any()
     assert set(data.var_names) == {"P000|S6", "P000|T6"}
     assert set(data.uns["precursors"]["protein_index"]) == set(data.var_names)
 
@@ -107,3 +120,13 @@ def test_auxiliary_sites_and_fasta_extension_preserve_focal_site(tmp_path):
     enriched = prepare_kinase_sequences(obj.copy(), {"analysis": {"kinase_activity": {"fasta": str(fasta)}}})
     assert enriched.var.loc["P|S3", "SITE_15MER"] == "_____AASAtAYKLM"
     assert enriched.var.loc["P|S3", "KINASE_10MER"] == prepared.var.loc["P|S3", "KINASE_10MER"]
+
+
+def test_entirely_missing_background_sample_is_not_imputed(tmp_path):
+    config = phospho_workflow(tmp_path, kinase=False)
+    path = config["dataset"]["inject_runs"]["flowthrough"]["input_file"]
+    frame = pd.read_csv(path, sep="\t")
+    frame.loc[frame.run == "background_B_2.raw", "intensity"] = np.nan
+    frame.to_csv(path, sep="\t", index=False)
+    with pytest.raises(ValueError, match="No observed quantitative values.*covariate.*B_2"):
+        Dataset(**config)

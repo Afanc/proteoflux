@@ -60,7 +60,7 @@ jobs:
           python -m pip check
 
       - name: Fast algorithms and configuration contracts
-        run: python -m pytest tests/unit tests/contracts/test_inputs_and_config.py --durations=15 --junitxml=core-results.xml
+        run: python -m pytest tests/unit tests/contracts/test_inputs_and_config.py tests/contracts/test_scientific_policy.py tests/contracts/test_limma_reference.py --durations=15 --junitxml=core-results.xml
 
       - name: Scientific workflows and serialization contracts
         run: python -m pytest tests/integration tests/contracts/test_results.py tests/contracts/test_reference_comparison.py --durations=15 --junitxml=workflow-results.xml

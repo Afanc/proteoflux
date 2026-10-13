@@ -197,7 +197,7 @@ def test_cli_templates_copy_packaged_config_verbatim(tmp_path):
     listing = runner.invoke(app, ["templates"])
     assert listing.exit_code == 0
     names = listing.stdout.splitlines()
-    assert set(names) == {"spectronaut-proteomics", "spectronaut-peptidomics", "spectronaut-phosphoproteomics",
+    assert set(names) == {"spectronaut-pelsa", "spectronaut-proteomics", "spectronaut-peptidomics", "spectronaut-phosphoproteomics",
                           "diann-proteomics", "diann-peptidomics", "fragpipe-proteomics", "fragpipe-peptidomics"}
     for name in names:
         path = tmp_path/(name+".yaml")

@@ -1019,6 +1019,7 @@ class Dataset:
             },
             "quantification": self.preprocessed_data.meta_quant,
             "normalization": self.preprocessor.normalization,
+            "quantitative_scale": "log2",
             "imputation": self.preprocessor.imputation,
         }
 

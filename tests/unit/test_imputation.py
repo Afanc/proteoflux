@@ -83,7 +83,7 @@ def test_rowwise_simple_imputation_including_empty_row(method, expected):
     assert_allclose(result[1], 0)
 
 
-def test_randomforest_factory_works_in_a_fresh_process_and_preserves_observations():
+def test_iterative_hgb_factory_works_in_a_fresh_process_and_preserves_observations():
     import subprocess
     import sys
     # Other imports can enable sklearn's experimental class and hide this defect.
@@ -92,7 +92,7 @@ import numpy as np
 from numpy.testing import assert_array_equal
 from proteoflux.workflow.imputer_factory import get_imputer
 x = np.array([[1., 2., 3.], [2., np.nan, 4.], [4., 5., 7.], [6., 8., 9.]])
-result = get_imputer(method="randomforest", rf_max_iter=2, rf_n_estimators=2).fit_transform(x)
+result = get_imputer(method="iterative_hgb", hgb_max_iter=2, hgb_estimator_max_iter=2).fit_transform(x)
 assert result.shape == x.shape and np.isfinite(result).all()
 assert_array_equal(result[~np.isnan(x)], x[~np.isnan(x)])
 '''

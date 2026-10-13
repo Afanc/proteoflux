@@ -10,6 +10,7 @@ import anndata as ad
 import pandas as pd
 import numpy as np
 import patsy
+import keyword
 from typing import Tuple, Optional
 import inmoose.limma as imo
 from itertools import combinations
@@ -22,6 +23,7 @@ from proteoflux.analysis.clustering import (
 )
 from proteoflux.analysis.stats_ops import raw_stats_from_fit, bh_qvalues, two_sided_t_pvalue
 from proteoflux.analysis.missingness import compute_missingness
+from proteoflux.analysis.validation import validate_log2_input
 from proteoflux.analysis.nrsc import compute_nrsc, compute_nrsc_misalignment
 from proteoflux.analysis.adata_schema import (
     # .uns
@@ -63,6 +65,28 @@ def _genes_by_samples_df(X_like: np.ndarray, obs_names, var_names) -> pd.DataFra
     return pd.DataFrame(X_like, index=obs_names, columns=var_names).T
 
 
+def _validate_condition_labels(obs: pd.DataFrame) -> None:
+    labels = obs["CONDITION"]
+    reserved = {"Q", "I", "Intercept"} | {str(c) for c in obs.columns}
+    bad = [label for label in labels.unique() if not isinstance(label, str)
+           or not label.isidentifier() or keyword.iskeyword(label)
+           or label in reserved or "_vs_" in label or "_v_" in label]
+    if bad:
+        raise ValueError(f"Invalid/reserved condition labels: {bad!r}; use distinct condition names "
+                         "without _vs_/_v_ or model/annotation column names.")
+
+
+def _validate_slope_mode(config: dict) -> None:
+    mode = ((config or {}).get("ancova") or {}).get("beta_mode", "fixed1")
+    if mode != "fixed1":
+        raise ValueError(f"ancova.beta_mode={mode!r} is unsupported; only 'fixed1' is supported.")
+
+
+def _scope_is_pilot(obs: pd.DataFrame) -> bool:
+    counts = obs["CONDITION"].astype(str).value_counts()
+    return len(counts) < 2 or bool((counts <= 1).any())
+
+
 def _design_with_optional_covariates(
     obs: pd.DataFrame,
     levels: list[str],
@@ -85,6 +109,7 @@ def _design_with_optional_covariates(
     if len(levels) < 2:
         raise ValueError(f"Need ≥2 conditions for design; found {levels}")
 
+    _validate_condition_labels(obs)
     tmp = obs.copy()
     tmp["CONDITION"] = tmp["CONDITION"].astype(str)
 
@@ -117,6 +142,10 @@ def _design_with_optional_covariates(
             )
 
         s = tmp[actual]
+        missing = s.isna() | s.astype(str).str.strip().eq("")
+        if missing.any():
+            raise ValueError(f"analysis.batch_effect_columns: column {actual!r} has missing/null "
+                             f"values for samples {obs.index[missing].tolist()!r}.")
         nonnull = s.dropna()
         if nonnull.empty:
             raise ValueError(
@@ -151,6 +180,8 @@ def _design_with_optional_covariates(
             )
 
         for dummy_col in dummies.columns:
+            if dummy_col in levels:
+                raise ValueError(f"Condition label {dummy_col!r} collides with a batch design term.")
             tmp[dummy_col] = dummies[dummy_col].astype(float)
             design_terms.append(f"Q('{dummy_col}')")
 
@@ -285,6 +316,10 @@ def _contrast_defs_from_cfg(levels: list[str], cfg: dict) -> list[str]:
             A, B = A.strip(), B.strip()
             if A not in valid_levels or B not in valid_levels:
                 raise ValueError(f"only_contrasts '{s}': conditions must be in {valid_levels}")
+            if A == B:
+                raise ValueError(f"only_contrasts {s!r}: choose two different conditions")
+            if f"{A} - {B}" in out:
+                raise ValueError(f"Duplicate contrast {s!r}")
             out.append(f"{A} - {B}")
         return out
 
@@ -322,7 +357,7 @@ def _build_limma_fit_plan(
     levels: list[str],
     cfg: dict,
 ) -> dict:
-    """Build one experiment-wide fit or one independent fit per contrast."""
+    """Build fitting scopes with one pilot status for all selected contrasts."""
     contrast_defs = _contrast_defs_from_cfg(levels, cfg)
     contrast_names = [
         definition.replace(" - ", "_vs_")
@@ -332,20 +367,31 @@ def _build_limma_fit_plan(
     if not contrast_defs:
         raise ValueError("No contrasts were selected for analysis.")
 
+    # Pilot is a property of the whole selected analysis, not individual fits.
+    # Contrast selection does not otherwise change shared variance estimation.
+    condition_values = obs["CONDITION"].astype(str)
+    tested_conditions = {condition for definition in contrast_defs
+                         for condition in definition.split(" - ")}
+    pilot = _scope_is_pilot(obs.loc[condition_values.isin(tested_conditions)])
+
     if not _separate_contrasts_enabled(cfg):
-        design_dm = _design_with_optional_covariates(obs, levels, cfg)
-        contrasts_df = imo.makeContrasts(contrast_defs, levels=design_dm)
-        contrasts_df.columns = contrast_names
+        design_dm = None if pilot else _design_with_optional_covariates(obs, levels, cfg)
+        contrasts_df = None if pilot else imo.makeContrasts(contrast_defs, levels=design_dm)
+        if contrasts_df is not None:
+            contrasts_df.columns = contrast_names
 
         return {
             "separate": False,
+            "pilot": pilot,
             "contrast_names": contrast_names,
             "entries": [
                 {
+                    "pilot": pilot,
                     "contrast_indices": list(range(len(contrast_names))),
                     "contrast_names": contrast_names,
                     "conditions": list(levels),
                     "sample_names": obs.index.to_list(),
+                    "sample_conditions": obs["CONDITION"].astype(str).to_numpy(),
                     "design": design_dm,
                     "contrasts": contrasts_df,
                 }
@@ -357,7 +403,6 @@ def _build_limma_fit_plan(
         f"{len(contrast_defs)} contrast(s) independently."
     )
 
-    condition_values = obs["CONDITION"].astype(str)
     entries = []
 
     for index, (definition, name) in enumerate(
@@ -386,21 +431,24 @@ def _build_limma_fit_plan(
                 f"{missing!r}."
             )
 
-        design_dm = _design_with_optional_covariates(
+        design_dm = None if pilot else _design_with_optional_covariates(
             pair_obs,
             [condition_a, condition_b],
             cfg,
             drop_constant_batch_columns=True,
         )
-        contrasts_df = imo.makeContrasts([definition], levels=design_dm)
-        contrasts_df.columns = [name]
+        contrasts_df = None if pilot else imo.makeContrasts([definition], levels=design_dm)
+        if contrasts_df is not None:
+            contrasts_df.columns = [name]
 
         entries.append(
             {
+                "pilot": pilot,
                 "contrast_indices": [index],
                 "contrast_names": [name],
                 "conditions": [condition_a, condition_b],
                 "sample_names": pair_obs.index.to_list(),
+                "sample_conditions": pair_obs["CONDITION"].astype(str).to_numpy(),
                 "design": design_dm,
                 "contrasts": contrasts_df,
             }
@@ -408,6 +456,7 @@ def _build_limma_fit_plan(
 
     return {
         "separate": True,
+        "pilot": pilot,
         "contrast_names": contrast_names,
         "entries": entries,
     }
@@ -417,21 +466,30 @@ def _fit_limma_from_plan(
     *,
     df_GxN: pd.DataFrame,
     fit_plan: dict,
-    pilot_mode: bool,
     fully_mask: Optional[np.ndarray] = None,
 ) -> dict:
     """Execute a fit plan and return feature-by-contrast result matrices."""
     entries = fit_plan["entries"]
 
+    def fit_entry(entry, mask):
+        frame = df_GxN.loc[:, entry["sample_names"]]
+        if fit_plan["pilot"]:
+            coefs = []
+            for name in entry["contrast_names"]:
+                a, b = name.split("_vs_")
+                conditions = entry["sample_conditions"]
+                coefs.append(frame.loc[:, conditions == a].mean(axis=1).to_numpy()
+                             - frame.loc[:, conditions == b].mean(axis=1).to_numpy())
+            return {"coefs": np.column_stack(coefs), "sigma": np.full(frame.shape[0], np.nan),
+                    "df_res": np.full(frame.shape[0], np.nan),
+                    **{key: None for key in ("se_raw", "t_raw", "p_raw", "q_raw",
+                                             "se_ebayes", "t_ebayes", "p_ebayes", "q_ebayes")}}
+        return _fit_limma_with_contrasts(df_GxN=frame, design_dm=entry["design"],
+                                         contrasts_df=entry["contrasts"], pilot_mode=False, fully_mask=mask)
+
     if not fit_plan["separate"]:
         entry = entries[0]
-        return _fit_limma_with_contrasts(
-            df_GxN=df_GxN.loc[:, entry["sample_names"]],
-            design_dm=entry["design"],
-            contrasts_df=entry["contrasts"],
-            pilot_mode=pilot_mode,
-            fully_mask=fully_mask,
-        )
+        return fit_entry(entry, fully_mask)
 
     n_features = df_GxN.shape[0]
 
@@ -469,15 +527,7 @@ def _fit_limma_from_plan(
             else fully_mask[:, indices]
         )
 
-        results.append(
-            _fit_limma_with_contrasts(
-                df_GxN=df_GxN.loc[:, entry["sample_names"]],
-                design_dm=entry["design"],
-                contrasts_df=entry["contrasts"],
-                pilot_mode=pilot_mode,
-                fully_mask=entry_mask,
-            )
-        )
+        results.append(fit_entry(entry, entry_mask))
 
     combined = {}
 
@@ -503,9 +553,15 @@ def _store_fit_plan_metadata(
     """Record whether the model was experiment-wide or contrast-specific."""
     analysis_meta = out.uns["analysis"]
     analysis_meta["separate_contrasts"] = bool(fit_plan["separate"])
+    analysis_meta["pilot_contrasts"] = [name for entry in fit_plan["entries"]
+                                        if entry["pilot"] for name in entry["contrast_names"]]
 
     if not fit_plan["separate"]:
         design_dm = fit_plan["entries"][0]["design"]
+        if design_dm is None:
+            analysis_meta.update(design_formula=None, batch_effect_columns=[], design_columns=[])
+            analysis_meta.pop("contrast_models", None)
+            return
         analysis_meta["design_formula"] = design_dm.attrs.get(
             "proteoflux_formula"
         )
@@ -531,7 +587,14 @@ def _store_fit_plan_metadata(
         design_dm = entry["design"]
         name = entry["contrast_names"][0]
 
+        if entry["pilot"]:
+            contrast_models[name] = {"conditions": list(entry["conditions"]),
+                                     "n_samples": len(entry["sample_names"]), "pilot": True,
+                                     "batch_effect_columns": [], "design_columns": [],
+                                     "design_formula": None, "design_rank": None, "residual_df": None}
+            continue
         contrast_models[name] = {
+            "pilot": False,
             "conditions": list(entry["conditions"]),
             "n_samples": int(len(entry["sample_names"])),
             "design_formula": design_dm.attrs.get("proteoflux_formula"),
@@ -554,7 +617,7 @@ def _store_fit_plan_metadata(
     analysis_meta["design_formula"] = "per-contrast"
     analysis_meta["batch_effect_columns"] = list(dict.fromkeys(
         column
-        for entry in fit_plan["entries"]
+        for entry in fit_plan["entries"] if entry["design"] is not None
         for column in entry["design"].attrs.get(
             "proteoflux_batch_effect_columns",
             [],
@@ -620,6 +683,11 @@ def _neutralize_fully_imputed_contrasts(out: ad.AnnData, fully: np.ndarray) -> N
     if not np.any(fully):
         return
 
+    pilot_names = set(out.uns.get("analysis", {}).get("pilot_contrasts", []))
+    fully = fully.copy()
+    for j, name in enumerate(out.uns[UNS_CONTRAST_NAMES]):
+        if name in pilot_names:
+            fully[:, j] = False
     out.varm[VARM_LOG2FC][fully] = 0.0
     for key in (VARM_P_RAW, VARM_Q_RAW, VARM_P_EBAYES, VARM_Q_EBAYES):
         if key in out.varm:
@@ -633,7 +701,7 @@ def _neutralize_fully_imputed_contrasts(out: ad.AnnData, fully: np.ndarray) -> N
 
 @log_time("Analysis pipeline")
 def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
-    """Standard limma workflow on `adata.X` with optional eBayes.
+    """Standard limma workflow on log2 `adata.X` with optional eBayes.
 
     If dataset config contains injected covariate runs, the covariate branch is used.
     """
@@ -649,12 +717,13 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         for run in injected_runs.values()
     )
 
-    # Read design & detect pilot mode (≤1 replicate for a condition)
+    validate_log2_input(adata, config)
+    _validate_slope_mode(config)
+    _validate_condition_labels(adata.obs)
+    # The fit plan resolves contrast selection before deciding one pilot status.
     obs = adata.obs.copy()
 
-    repl_counts = obs["CONDITION"].value_counts()
     levels = sorted(obs["CONDITION"].unique())
-    pilot_mode   = (repl_counts.min() <= 1) or (len(levels) < 2)
 
     # Early-out when there is only one condition: mark pilot mode and skip stats cleanly
     if len(levels) < 2:
@@ -674,14 +743,14 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
         )
         return out
 
-    # Pilot mode due to singleton replicates (keep existing behavior/logging)
-    if repl_counts.min() <= 1:
+    fit_plan = _build_limma_fit_plan(obs, levels, config)
+    pilot_mode = fit_plan["pilot"]
+    if pilot_mode:
         log_warning(
-            "Pilot study mode: at least one condition has only 1 replicate, no statistical analysis done. "
+            "Pilot study mode: a selected condition has one sample; reporting mean differences for all selected contrasts."
         )
 
-        contrast_defs = _contrast_defs_from_cfg(levels, config)
-        contrast_names = [c.replace(" - ", "_vs_") for c in contrast_defs]
+        contrast_names = fit_plan["contrast_names"]
 
         out = adata.copy()
         out.varm[VARM_LOG2FC] = _pilot_log2fc_matrix(out, contrast_names)
@@ -702,6 +771,7 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
             _separate_contrasts_enabled(config)
         )
 
+        _store_fit_plan_metadata(out, fit_plan)
         nrsc = compute_nrsc(out, contrast_names)
         if nrsc is not None:
             out.varm["nrsc"] = nrsc
@@ -710,7 +780,7 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
 
         return out
     if has_covariate_cfg:
-        return run_limma_pipeline_covariate(adata, config, pilot_mode)
+        return run_limma_pipeline_covariate(adata, config, fit_plan)
 
     if len(levels) < 2:
         raise ValueError(f"Need ≥2 conditions for contrasts; found {levels}")
@@ -718,17 +788,18 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     # Expression: genes × samples
     df_X = _genes_by_samples_df(adata.X, adata.obs_names, adata.var_names)
 
-    fit_plan = _build_limma_fit_plan(obs, levels, config)
     contrast_names = fit_plan["contrast_names"]
 
     # Fully-imputed detection (contrast-local) — used for pre-BH masking in shared fit helper.
     cond_arr = adata.obs["CONDITION"].astype(str).to_numpy()
     fully = _fully_imputed_mask_from_layer(adata=adata, layer_name="raw", conditions=cond_arr, contrast_names=contrast_names)
+    for entry in fit_plan["entries"]:
+        if entry["pilot"]:
+            fully[:, entry["contrast_indices"]] = False
 
     limma_res = _fit_limma_from_plan(
         df_GxN=df_X,
         fit_plan=fit_plan,
-        pilot_mode=pilot_mode,
         fully_mask=fully,
     )
 
@@ -757,6 +828,7 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
 
     out.uns[UNS_CONTRAST_NAMES] = contrast_names
     out.uns[UNS_PILOT_MODE] = bool(pilot_mode)
+    _store_fit_plan_metadata(out, fit_plan)
 
     if not pilot_mode:
         _neutralize_fully_imputed_contrasts(out=out, fully=fully)
@@ -770,8 +842,6 @@ def run_limma_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     out.uns[UNS_MISSINGNESS_SOURCE] = miss_source
     out.uns[UNS_MISSINGNESS_RULE] = "nan-is-missing"
     out.uns[UNS_HAS_COVARIATE] = False
-
-    _store_fit_plan_metadata(out, fit_plan)
 
     nrsc = compute_nrsc(out, contrast_names)
     if nrsc is not None:
@@ -841,17 +911,12 @@ def clustering_pipeline(adata: ad.AnnData, config: dict) -> ad.AnnData:
     return adata
 
 @log_time("Running Covariate branch")
-def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bool) -> ad.AnnData:
+def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, fit_plan: dict) -> ad.AnnData:
     """Two-stage residualization (no interaction).
 
-    Stage 1:  Y ~ 1 + C         (per-feature OLS with global row-centering of C)
-    Stage 2:  R ~ 0 + Group     (limma on residuals; same contrasts as raw)
-
-    Outputs/keys match the existing implementation; the decomposition
-    rule 'raw ≈ adjusted + covariate_part' is preserved.
-
-
-    All outputs/keys match the current implementation.
+    Apply a fixed unit background slope; fit residuals with the same scope as raw.
+    Separate global association diagnostics fit Y ~ 1 + C. The simple cov_part
+    condition-mean decomposition applies only without batch covariates.
     """
 
     def _get_levels_and_base(obs: pd.DataFrame, cfg: dict) -> Tuple[list, str]:
@@ -919,9 +984,8 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         t1 = np.where(se1 > 0, beta1 / se1, 0.0)
         p1 = two_sided_t_pvalue(t1, df=df1)
         if np.any(flat):
-            # for “flat” rows, explicitly null the test: t=0, p=1 (avoids huge betas)
-            t1[flat] = 0.0
-            p1[flat] = 1.0
+            # A flat background does not estimate an association slope.
+            se1[flat] = t1[flat] = p1[flat] = np.nan
         q1 = bh_qvalues(p1[:, None])[:, 0]
 
         return beta1, beta0, R, se1, t1, p1, q1
@@ -952,9 +1016,9 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         return cov_part
 
     # === ANCOVA options ===
-    ancova_cfg        = (config or {}).get("ancova", {})
-    # Slope constraints apply after global stage-1 estimation.
-    beta_mode         = ancova_cfg.get("beta_mode", "fixed1")      # "free" | "nonneg" | "fixed1"
+    _validate_slope_mode(config)
+    pilot_mode = fit_plan["pilot"]
+    ancova_cfg        = (config or {}).get("ancova") or {}
     ridge_lambda_cfg  = float(ancova_cfg.get("ridge_lambda", 1e-6))  # forwarded into Stage-1 OLS
 
     # Inputs & preparation
@@ -981,7 +1045,6 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     # check imputation at covariate level
     raw_cov = adata.layers["raw_covariate"]
     raw_cov_arr = np.asarray(raw_cov)  # shape: (n_obs, n_vars)
-    imputed_all_cov = np.all(np.isnan(raw_cov_arr), axis=0)  # (n_vars,)
 
     # Stage 1: OLS y ~ 1 + c
     beta1, beta0, R, cov_se, cov_t, cov_p, cov_q = _stage1_ols_y_on_1_plus_c(
@@ -990,24 +1053,15 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         ridge_lambda=ridge_lambda_cfg,
     )
 
-    # Apply the requested beta_mode
-    if beta_mode == "fixed1":
-        beta1[:] = 1.0
-    elif beta_mode == "nonneg":
-        beta1 = np.maximum(beta1, 0.0)
-    elif beta_mode != "free":
-        raise ValueError(f"Unknown ancova.beta_mode={beta_mode!r}")
-
-    # Slopes are per feature. Contrast-local FT support is handled after fitting.
-    if beta_mode != "fixed1":
-        no_adjust = imputed_all_cov
-        if np.any(no_adjust):
-            beta1[no_adjust] = 0.0
-            cov_t[no_adjust] = 0.0
-            cov_p[no_adjust] = 1.0
-            # Neutralized p-values also change BH ranks for other features.
-            cov_q = bh_qvalues(cov_p[:, None])[:, 0]
-
+    # The applied slope is a scientific policy, independent of the diagnostic fit.
+    beta1[:] = 1.0
+    observed_cov = np.where(np.isfinite(raw_cov_arr), C_centered_df.to_numpy().T, np.nan)
+    diagnostic_missing = (np.isfinite(observed_cov).sum(axis=0) < 3)
+    # Avoid all-NaN reductions; missing rows are already identified above.
+    for g in np.flatnonzero(~diagnostic_missing):
+        diagnostic_missing[g] = np.ptp(observed_cov[np.isfinite(observed_cov[:, g]), g]) == 0
+    cov_se[diagnostic_missing] = cov_t[diagnostic_missing] = cov_p[diagnostic_missing] = np.nan
+    cov_q = bh_qvalues(cov_p[:, None])[:, 0]
 
     # Recompute residuals with possibly modified betas
     Y_np  = Y_df.to_numpy(dtype=float)
@@ -1017,7 +1071,6 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     R_df = pd.DataFrame(R, index=Y_df.index, columns=Y_df.columns)  # (G×N)
 
     # Use the same sample subsets/designs for adjusted, raw, and FT fits.
-    fit_plan = _build_limma_fit_plan(obs, levels, config)
     contrast_names = fit_plan["contrast_names"]
 
     cond_arr = obs["CONDITION"].astype(str).to_numpy()
@@ -1028,10 +1081,13 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         contrast_names=contrast_names,
     )
 
+    for entry in fit_plan["entries"]:
+        if entry["pilot"]:
+            fully[:, entry["contrast_indices"]] = False
+
     limma_resid = _fit_limma_from_plan(
         df_GxN=R_df,
         fit_plan=fit_plan,
-        pilot_mode=pilot_mode,
         fully_mask=fully,
     )
 
@@ -1055,21 +1111,22 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     limma_raw = _fit_limma_from_plan(
         df_GxN=Y_df,
         fit_plan=fit_plan,
-        pilot_mode=pilot_mode,
         fully_mask=fully,
     )
     raw_coefs = limma_raw["coefs"]
     raw_p = limma_raw["p_ebayes"] if not pilot_mode else None
     raw_q = limma_raw["q_ebayes"] if not pilot_mode else None
 
-    # For "no-FT" contrasts, fall back to RAW phospho (coef + p/q) in the adjusted outputs
-    if not pilot_mode:
-        limma_resid["coefs"][contrast_noft]    = raw_coefs[contrast_noft]
-        limma_resid["p_ebayes"][contrast_noft] = raw_p[contrast_noft]
-        limma_resid["q_ebayes"][contrast_noft] = raw_q[contrast_noft]
-    else:
-        limma_resid["p_ebayes"] = limma_resid["q_ebayes"] = None
-        limma_resid["coefs"][contrast_noft] = raw_coefs[contrast_noft]
+    # Pilot contrasts have descriptive raw means only, with no covariate adjustment.
+    for entry in fit_plan["entries"]:
+        if entry["pilot"]:
+            contrast_noft[:, entry["contrast_indices"]] = True
+    for key in ("coefs", "se_raw", "t_raw", "p_raw", "se_ebayes", "t_ebayes", "p_ebayes"):
+        if limma_resid[key] is not None:
+            limma_resid[key][contrast_noft] = limma_raw[key][contrast_noft]
+    for family in ("raw", "ebayes"):
+        if limma_resid["p_" + family] is not None:
+            limma_resid["q_" + family] = bh_qvalues(limma_resid["p_" + family])
 
     # limma on the covariate (FT) matrix itself (same design/contrasts)
     fully_ft = None
@@ -1083,7 +1140,6 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
     limma_cov = _fit_limma_from_plan(
         df_GxN=C_df,
         fit_plan=fit_plan,
-        pilot_mode=pilot_mode,
         fully_mask=fully_ft,
     )
     cov_coefs = limma_cov["coefs"]
@@ -1134,10 +1190,11 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
 
     # Covariate decomposition piece
     out.varm[VARM_COV_PART] = cov_part
+    out.varm["covariate_adjusted"] = ~contrast_noft
 
     # Stage-1 covariate stats (per feature)
     # beta is the applied slope; diagnostics retain the stage-1 estimate,
-    # with the fully-imputed-background neutralization above for fitted modes.
+    # with unestimable diagnostics left missing.
     if not pilot_mode:
         out.varm[VARM_COVARIATE_BETA] = beta1[:, None]
         out.varm[VARM_COVARIATE_SE] = cov_se[:, None]
@@ -1173,7 +1230,10 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, pilot_mode: bo
         out.varm[VARM_FT_P_EBAYES] = ft_p
 
     # Describe decomposition rule once for the viewer
-    out.uns["decomposition_rule"] = "raw_log2fc ≈ log2fc (adjusted) + cov_part"
+    if out.uns["analysis"].get("batch_effect_columns"):
+        out.uns["decomposition_rule"] = "cov_part is an unadjusted condition-mean background difference; not a batch-adjusted decomposition"
+    else:
+        out.uns["decomposition_rule"] = "raw_log2fc ≈ log2fc (adjusted) + cov_part"
 
     nrsc = compute_nrsc(out, contrast_names)
     if nrsc is not None:

@@ -205,7 +205,8 @@ def make_workflow(name, directory):
         frame = pd.read_csv(path, sep="\t")
         frame = frame[~((frame.condition == "C") & (frame.replicate > 1))]
         frame.to_csv(path, sep="\t", index=False)
-        config["analysis"]["only_contrasts"] = ["A_vs_B"]
+        # Include singleton C in the selected analysis: every contrast is pilot.
+        config["analysis"]["only_contrasts"] = ["A_vs_B", "A_vs_C"]
         return config
     if name == "batch_pairwise":
         config = protein_workflow(directory)

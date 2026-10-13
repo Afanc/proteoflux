@@ -558,9 +558,8 @@ class ReportPlotter:
             if extras:
                 imp_method += " (" + ", ".join(extras) + ")"
 
-        if "rf" in imp_method:
-            rf_max_iter = preproc.get("imputation").get("rf_max_iter")
-            imp_method += f", rf_max_iter={rf_max_iter}"
+        if imp_method == "iterative_hgb":
+            imp_method += f", hgb_max_iter={imp.get('hgb_max_iter', 20)}"
 
         if "lc_conmed" in imp_method:
             lc_conmed_lod_k = imp.get("lc_conmed_lod_k", "NA")

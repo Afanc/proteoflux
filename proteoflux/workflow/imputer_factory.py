@@ -1,7 +1,6 @@
 from typing import Any
 import sklearn.impute
 import sklearn.ensemble
-#from sklearn.experimental import enable_iterative_imputer  # noqa ? don't remember what I meant but check
 
 def get_imputer(**kwargs) -> Any:
     """
@@ -13,11 +12,17 @@ def get_imputer(**kwargs) -> Any:
         - "knn": KNNImputer from scikit-learn.
         - "nsknn": NSkNNImputer.
         - "tnknn": KNNTNImputer.
-        - "randomforest": IterativeImputer using a HistGradientBoostingRegressor.
+        - "iterative_hgb": IterativeImputer using a HistGradientBoostingRegressor.
 
     kwargs are passed to the imputer constructors.
     """
     method = kwargs.pop("method", None)
+
+    if method == "randomforest":
+        raise ValueError("Imputation method 'randomforest' was removed; use 'iterative_hgb' "
+                         "(IterativeImputer with HistGradientBoostingRegressor).")
+    if any(key.startswith("rf_") for key in kwargs):
+        raise ValueError("Imputation rf_* settings were removed; use the documented hgb_* settings.")
 
     if method is None:
         return None
@@ -55,18 +60,18 @@ def get_imputer(**kwargs) -> Any:
             n_neighbors=kwargs.get("knn_k", 10),
             perc=kwargs.get("knn_tn_perc", 0.75)
         )
-    elif method == "randomforest":
+    elif method == "iterative_hgb":
         from sklearn.experimental import enable_iterative_imputer  # noqa: F401
         return sklearn.impute.IterativeImputer(
             estimator=sklearn.ensemble.HistGradientBoostingRegressor(
-                max_depth=kwargs.get("rf_max_depth", 6),
-                learning_rate=kwargs.get("rf_learning_rate", 0.1),
-                max_iter=kwargs.get("rf_n_estimators", 100)
+                max_depth=kwargs.get("hgb_max_depth", 6),
+                learning_rate=kwargs.get("hgb_learning_rate", 0.1),
+                max_iter=kwargs.get("hgb_estimator_max_iter", 100)
             ),
             random_state=kwargs.get("random_state", 42),
-            max_iter=kwargs.get("rf_max_iter", 20),
-            tol=kwargs.get("rf_tol", 5e-2),
-            n_nearest_features=kwargs.get("rf_nearest_features", 50),
+            max_iter=kwargs.get("hgb_max_iter", 20),
+            tol=kwargs.get("hgb_tol", 5e-2),
+            n_nearest_features=kwargs.get("hgb_nearest_features", 50),
         )
     elif method == "mindet":
         from proteoflux.workflow.imputers.min_imputers import MinDetImputer
@@ -85,5 +90,5 @@ def get_imputer(**kwargs) -> Any:
         )
     else:
         raise ValueError(f"Invalid imputation method: {method}. "
-                           "Options: lc_conmed, mean, median, knn, tnknn, mindet, minprob, randomforest")
+                           "Options: lc_conmed, mean, median, knn, nsknn, tnknn, mindet, minprob, iterative_hgb")
 
