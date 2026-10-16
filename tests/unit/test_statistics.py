@@ -6,6 +6,7 @@ import pytest
 from numpy.testing import assert_allclose, assert_array_equal
 from scipy.stats import t as student_t
 
+from proteoflux.analysis import limma_pipeline
 from proteoflux.analysis.limma_pipeline import run_limma_pipeline
 from proteoflux.analysis.missingness import compute_missingness
 from proteoflux.analysis.nrsc import compute_nrsc, compute_nrsc_misalignment
@@ -49,6 +50,24 @@ def test_raw_limma_agrees_with_independent_least_squares():
     assert_allclose(result.varm["se_raw"][:, 0], expected_se, rtol=1e-10)
     assert_allclose(result.varm["p_raw"][:, 0], 2*student_t.sf(abs(expected_fc/expected_se), df), rtol=1e-10)
     assert_allclose(result.uns["residual_variance"], variance, rtol=3e-7)
+
+
+@pytest.mark.parametrize("sigma_type", [pd.Series, np.asarray], ids=["pandas", "ndarray"])
+def test_limma_accepts_sigma_representations(monkeypatch, sigma_type):
+    obj = expression()
+    expected = run_limma_pipeline(obj, {})
+    contrasts_fit = limma_pipeline.imo.contrasts_fit
+
+    def fit_with_sigma(*args, **kwargs):
+        fit = contrasts_fit(*args, **kwargs)
+        fit.sigma = sigma_type(fit.sigma)
+        return fit
+
+    monkeypatch.setattr(limma_pipeline.imo, "contrasts_fit", fit_with_sigma)
+    result = run_limma_pipeline(obj, {})
+    for key in expected.varm:
+        assert_array_equal(result.varm[key], expected.varm[key])
+    assert_array_equal(result.uns["residual_variance"], expected.uns["residual_variance"])
 
 
 def test_bh_is_per_contrast_with_known_ranks():

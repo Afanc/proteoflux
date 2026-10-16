@@ -257,7 +257,7 @@ def _fit_limma_with_contrasts(
 
     coefs  = fit.coefficients.values
     stdu   = fit.stdev_unscaled.values
-    sigma  = fit.sigma.to_numpy()
+    sigma  = np.asarray(fit.sigma)
     df_res = fit.df_residual
 
     se_raw, t_raw, p_raw = raw_stats_from_fit(coefs=coefs, stdu=stdu, sigma=sigma, df_res=df_res)
