@@ -42,8 +42,8 @@ dependencies = [
     "openpyxl",
     "xlsxwriter",
     "InquirerPy",
-    #"inmoose==0.7.8",
-    "inmoose",
+    #"inmoose",
+    "inmoose @ git+https://github.com/Afanc/inmoose.git@462389d",
     "directlfq[dask]",
     "tqdm",
 ]

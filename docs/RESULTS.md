@@ -40,6 +40,8 @@ without necessarily removing identification evidence. There is no exported
 universal imputation-mask layer; compare `normalized` with `X` on their labelled
 axes for the analysis fills. `uns['missingness']` normally uses identification
 q-values when available and therefore need not match raw-intensity missingness.
+With LC-ConMed `mnar_only`, `X` retains partial and fully missing feature values;
+actual fills satisfy `isnan(normalized) & isfinite(X)`.
 
 Spectral-count evidence is optional for analysis: absent layers omit nrSC outputs.
 An existing all-zero count pair instead gives an undefined nrSC ratio, not an

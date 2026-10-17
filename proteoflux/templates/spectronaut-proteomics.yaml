@@ -40,6 +40,7 @@ preprocessing:
     reference_tag:
   imputation:
     method: "lc_conmed"
+    lc_conmed_mode: "standard"  # standard | mnar_only
     lc_conmed_lod_k: 10
     lc_conmed_in_min_obs: 1
     lc_conmed_frac_min_obs: null 

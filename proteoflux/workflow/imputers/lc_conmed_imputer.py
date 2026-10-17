@@ -44,15 +44,19 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
     Hybrid condition-aware imputer for log-scale proteomics data.
     Optimized version with per-row/per-condition caching.
 
-    Missing value rule for cell X[i, j]:
+    Standard-mode missing value rule for cell X[i, j]:
       • If the same condition reaches its minimum observed-value threshold:
             center = median of that condition
             sd_pool = pooled SD across all conditions with data
             draw ~ Normal(center, jitter_frac * sd_pool)
             clipped to [Q_lower, Q_upper] of that condition
-      • Else (no data in this condition):
+      • Else (insufficient data in this condition):
             LoD fallback = (global LoD - lod_shift) + Normal(0, lod_sd_width)
             clipped to <= global LoD
+
+    In mnar_only mode, only entirely missing feature/condition blocks with
+    observations in another condition use the LoD fallback. Partial missingness
+    and entirely missing features remain NaN.
     """
 
     def __init__(
@@ -69,6 +73,7 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
         in_min_obs=1,
         frac_min_obs=None,
         random_state=42,
+        mode="standard",
     ):
         self.condition_map = condition_map
         self.sample_index = sample_index
@@ -83,10 +88,13 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
         self.lod_shift = float(lod_shift)
         self.lod_sd_width = float(lod_sd_width)
         self.random_state = random_state
+        self.mode = mode
 
     def fit(self, X, y=None):
         """Precompute condition indices and global LoD threshold."""
         X = np.asarray(X, dtype=np.float64)
+        if self.mode not in ("standard", "mnar_only"):
+            raise ValueError("lc_conmed_mode must be 'standard' or 'mnar_only'.")
 
         # sample -> condition in column order
         cmap = self.condition_map.set_index("Sample")[self.group_column]
@@ -146,8 +154,16 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
         # Hoist NaN mask once for the whole matrix
         nan_mask = np.isnan(X_imp)
 
-        # Use the precomputed order from the global mask (row-major)
-        rows, cols = np.where(nan_mask)
+        fill_mask = nan_mask
+        if self.mode == "mnar_only":
+            fill_mask = np.zeros_like(nan_mask)
+            observed_elsewhere = (~nan_mask).any(axis=1)
+            for idx_c in self._cond_idx.values():
+                missing_condition = nan_mask[:, idx_c].all(axis=1) & observed_elsewhere
+                fill_mask[:, idx_c] = missing_condition[:, None]
+
+        # Preserve row-major draw order and the original observation mask.
+        rows, cols = np.where(fill_mask)
         if rows.size == 0:
             return X_imp
 

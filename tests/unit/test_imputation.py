@@ -61,6 +61,93 @@ def test_all_missing_lod_and_pooled_sample_variance():
     assert _pooled_sd([np.array([1., 5.]), np.array([2., 8.])]) == pytest.approx(np.sqrt(13))
 
 
+@pytest.fixture
+def three_replicate_conditions():
+    samples = ["a1", "a2", "a3", "b1", "b2", "b3"]
+    return {"sample_index": samples,
+            "condition_map": pd.DataFrame({"Sample": samples,
+                                            "CONDITION": ["A"]*3 + ["B"]*3}).iloc[::-1]}
+
+
+@pytest.mark.parametrize("threshold", [{}, {"in_min_obs": 3},
+                                        {"in_min_obs": None, "frac_min_obs": 1.}])
+def test_mnar_only_preserves_partial_and_fully_missing_features(three_replicate_conditions, threshold):
+    x = np.array([[np.nan, np.nan, 2.5, 3., 3., 3.],
+                  [np.nan, np.nan, np.nan, 3., 3., 3.],
+                  [np.nan]*6])
+    before = x.copy()
+    model = LC_ConMedImputer(**three_replicate_conditions, mode="mnar_only", lod_k=2, **threshold)
+    actual = model.fit_transform(x)
+    assert_array_equal(actual[0], x[0])
+    assert_array_equal(actual[2], x[2])
+    assert_array_equal(actual[~np.isnan(x)], x[~np.isnan(x)])
+    # LoD = median(2.5, 3); only the absent condition consumes seeded draws.
+    expected_lod = np.minimum(2.75 - .2 + np.random.default_rng(42).normal(0, .05, 3), 2.75)
+    assert_array_equal(actual[1, :3], expected_lod)
+    assert_array_equal(model.fit_transform(x), actual)
+    assert_array_equal(x, before)
+
+
+def test_mnar_only_leaves_an_entirely_missing_matrix_unchanged():
+    x = np.full((2, 4), np.nan)
+    assert_array_equal(imputer(mode="mnar_only").fit_transform(x), x)
+
+
+def test_standard_mode_preserves_original_seeded_values(three_replicate_conditions):
+    x = np.array([[2., np.nan, 6., 8., np.nan, 14.],
+                  [np.nan]*3 + [3., 4., 5.], [np.nan]*6])
+    # Recorded before adding mode: MAR, absent-condition LoD, all-missing LoD.
+    expected = np.array([
+        [2., 4.219734611112851, 6., 8., 10.25005679585646, 14.],
+        [2.337522559790323, 2.3470282358195607, 2.202448240567308, 3., 4., 5.],
+        [2.234891024656884, 2.306392020158364, 2.2841878703828207,
+         2.2991599421247852, 2.257347803621321, 2.343969898743141],
+    ])
+    default = LC_ConMedImputer(**three_replicate_conditions, lod_k=2).fit_transform(x)
+    explicit = get_imputer(method="lc_conmed", lc_conmed_mode="standard",
+                           lc_conmed_lod_k=2, **three_replicate_conditions).fit_transform(x)
+    assert_allclose(default, expected, rtol=0, atol=1e-14)
+    assert_array_equal(explicit, default)
+
+
+@pytest.mark.parametrize("mode", [None, "mnar", "STANDARD", True])
+def test_invalid_lc_conmed_modes_fail(mode):
+    with pytest.raises(ValueError, match="lc_conmed_mode"):
+        imputer(mode=mode).fit(np.ones((2, 4)))
+
+
+def test_mnar_only_provenance_survives_preprocessing_and_h5ad(protein_config, tmp_path):
+    import anndata as ad
+    from proteoflux.workflow.dataset import Dataset
+
+    rows = pd.read_csv(protein_config["dataset"]["input_file"], sep="\t")
+    rows.loc[rows.protein == "P011", "intensity"] = np.nan
+    rows.to_csv(protein_config["dataset"]["input_file"], sep="\t", index=False)
+    options = protein_config["preprocessing"]["imputation"]
+    options["method"] = None
+    before = Dataset(**protein_config).get_anndata()
+    options.update(method="lc_conmed", lc_conmed_mode="mnar_only")
+    dataset = Dataset(**protein_config)
+    out = dataset.get_anndata()
+    expected_fill = np.zeros(out.shape, dtype=bool)
+    for feature, conditions in [("P001", ["A"]), ("P002", ["A", "B"])]:
+        expected_fill[out.obs.CONDITION.isin(conditions), out.var_names.get_loc(feature)] = True
+    assert_array_equal(np.isnan(before.X) & np.isfinite(out.X), expected_fill)
+    assert_array_equal(out.X[~expected_fill], before.X[~expected_fill])
+    imputed_only = dataset.preprocessor.intermediate_results.matrices["imputed_only"].T
+    assert_array_equal(np.isfinite(imputed_only), expected_fill)
+    assert_allclose(imputed_only[expected_fill], out.X[expected_fill], rtol=1e-7)
+    path = tmp_path / "mnar_only.h5ad"
+    out.write_h5ad(path)
+    restored = ad.read_h5ad(path)
+    assert_array_equal(restored.X, out.X)
+    assert_array_equal(restored.obs_names, before.obs_names)
+    assert_array_equal(restored.var_names, before.var_names)
+    for layer in ("raw", "normalized", "qvalue"):
+        assert_array_equal(restored.layers[layer], before.layers[layer])
+    assert restored.uns["preprocessing"]["imputation"]["lc_conmed_mode"] == "mnar_only"
+
+
 @pytest.mark.parametrize("options", [{"in_min_obs": 0}, {"in_min_obs": True},
                                       {"in_min_obs": None, "frac_min_obs": 0},
                                       {"in_min_obs": None, "frac_min_obs": 1.1}])

@@ -70,6 +70,39 @@ def test_limma_accepts_sigma_representations(monkeypatch, sigma_type):
     assert_array_equal(result.uns["residual_variance"], expected.uns["residual_variance"])
 
 
+def test_mnar_only_limma_fits_remaining_observations():
+    from proteoflux.workflow.imputer_factory import get_imputer
+
+    obj = expression(("A",)*3 + ("B",)*3)
+    obj.X[:2, 0] = np.nan
+    obj.X[:3, 1] = np.nan
+    obj.layers["raw"] = np.exp2(obj.X)
+    obj.layers["normalized"] = obj.X.copy()
+    model = get_imputer(method="lc_conmed", lc_conmed_mode="mnar_only",
+                        condition_map=obj.obs.rename_axis("Sample").reset_index(),
+                        sample_index=obj.obs_names)
+    obj.X = model.fit_transform(obj.X.T).T
+    result = run_limma_pipeline(obj, {"analysis": {"only_contrasts": ["B_vs_A"]}})
+    assert_array_equal(result.X, obj.X)
+    assert np.isnan(result.X[:2, 0]).all()
+    assert np.isfinite(result.X[:, 1]).all()
+    # Each feature's OLS uses its own remaining observations and residual df.
+    design = np.column_stack([obj.obs.CONDITION == c for c in "AB"]).astype(float)
+    contrast = np.array([-1., 1.])
+    for g in (0, 1):
+        observed = np.isfinite(obj.X[:, g])
+        d, y = design[observed], obj.X[observed, g]
+        beta = np.linalg.lstsq(d, y, rcond=None)[0]
+        df = len(y) - np.linalg.matrix_rank(d)
+        variance = np.sum((y - d @ beta)**2) / df
+        se = np.sqrt(variance * (contrast @ np.linalg.inv(d.T @ d) @ contrast))
+        assert_allclose(result.varm["log2fc"][g, 0], contrast @ beta, atol=1e-12)
+        assert_allclose(result.varm["se_raw"][g, 0], se, rtol=1e-10)
+        assert_allclose(result.varm["p_raw"][g, 0],
+                        2*student_t.sf(abs(contrast @ beta / se), df), rtol=1e-10)
+    assert np.isfinite(result.varm["p_ebayes"][:2]).all()
+
+
 def test_bh_is_per_contrast_with_known_ranks():
     p = np.array([[.01, .5], [.04, .5], [.03, .5], [.2, .5]])
     assert_allclose(bh_qvalues(p), [[.04, .5], [4*.04/3, .5], [4*.04/3, .5], [.2, .5]])
