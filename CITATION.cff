@@ -1,7 +1,9 @@
 cff-version: 1.2.0
 title: ProteoFlux
-version: 1.8.5
-doi: 10.5281/zenodo.18640999
+type: software
+message: "If you use ProteoFlux, please cite this software and specify the version used in your Methods section."
+doi: 10.5281/zenodo.18640998
+url: https://github.com/Afanc/proteoflux
 authors:
   - family-names: Mollet
     given-names: Dariush
@@ -10,3 +12,4 @@ authors:
     given-names: Alexander
     orcid: https://orcid.org/0000-0002-3149-2381
 license: MIT
+
