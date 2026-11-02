@@ -79,6 +79,7 @@ Use the sanitized names in contrasts; original labels remain in `CONDITION_ORIG`
 | `pep_column` | PEP column, for filtering. Optional. |
 | `precursors_exp_column` | Number of precursors (experiment-wide)/Run Evidence count, for filtering. Optional. |
 | `uniprot_column` | UniProt accession. Optional (if proteomics). Used to derive parent protein in phospho with flowthrough adjustment. |
+| `other_proteins_column` | Optional vendor list of all protein accessions matching a peptide; default `null`. Spectronaut: `PEP.AllOccurringProteinAccessions`, mapped to `OTHER_PROTEINS`. Informational only; never used for indexing, grouping, rollup or statistics. Exported in H5AD `var` and Summary for peptidomics, PELSA and phospho; for proteomics only in the Peptides (raw) worksheet and row-aligned `uns['peptides']['other_proteins']`. Contributing lists are combined into unique semicolon-separated accessions in first-seen input order, preserving isoform suffixes. |
 | `condition_column` | Biological condition. Optional (if annotation provided). |
 | `replicate_column` | Replicate number. Optional (if annotation provided). |
 | `filename_column` | Run identifier. Optional (if wide). |
