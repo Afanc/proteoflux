@@ -40,7 +40,7 @@ without necessarily removing identification evidence. There is no exported
 universal imputation-mask layer; compare `normalized` with `X` on their labelled
 axes for the analysis fills. `uns['missingness']` normally uses identification
 q-values when available and therefore need not match raw-intensity missingness.
-With LC-ConMed `mnar_only`, `X` retains partial and fully missing feature values;
+With LC-ConMed's default `mnar_only` mode, `X` retains partial and fully missing feature values;
 actual fills satisfy `isnan(normalized) & isfinite(X)`.
 
 Spectral-count evidence is optional for analysis: absent layers omit nrSC outputs.
@@ -94,6 +94,32 @@ arrays. Their `rows`, `cols` and associated identity fields must be used explici
 AnnData slicing does not automatically subset these payloads. Evidence raw values
 are captured before analysis normalization. Their `centered` values are linear
 ratios to row means, unlike the subtractive centering used in QC layers.
+
+For proteomics, `analysis.protein_coverage.fasta` adds six parallel fields to
+`uns['peptides']`, all aligned to `rows`. Existing `protein_index`, `peptide_seq`,
+`cols`, `raw` and `centered` are unchanged; no additional evidence table is made.
+
+| Field | Meaning |
+| --- | --- |
+| `reference_accession` | Exact resolved FASTA accession; empty string if no unique reference is established. |
+| `protein_length_aa` | Reference sequence length; float64 with NaN for an unresolved reference. |
+| `peptide_start`, `peptide_end` | 1-based inclusive residue coordinates; float64 with NaN unless uniquely positioned. |
+| `peptide_mapping_status` | `mapped`, `unmapped_reference`, `ambiguous_protein_group`, `unmapped_peptide`, or `ambiguous_peptide`. |
+| `tryptic_missed_cleavages` | int64 count of internal K/R residues not followed by P, using the existing tryptic rule. Independent of mapping success. |
+
+Mapping uses exact `protein_index` accession matches to local FASTA records
+(plain identifiers or UniProt `sp|accession|...`/`tr|accession|...` headers).
+Explicit isoforms require their own FASTA entry; canonical fallback is forbidden.
+Semicolon-separated groups remain ambiguous even if only one member is in the
+FASTA or members share a sequence. Custom feature labels that are not FASTA
+identifiers remain unmapped. PTM annotations are stripped only for sequence
+matching/counting; stored peptide identities are preserved. Multiple occurrences,
+including overlaps, yield `ambiguous_peptide` and missing coordinates. A resolved
+reference's accession and length remain available when the peptide is absent or
+repeated. The FASTA setting accepts a single path or a nonempty list of paths.
+Identical accession/sequence duplicates are accepted across files; conflicting
+sequences under one FASTA identifier fail validation regardless of file order.
+These six fields are absent when coverage FASTA is not configured.
 
 `uns['kinase_activity']` contains method metadata, results, substrate assignments
 and condition summaries. Read `method`, `tested`, `reason`, `pvalue` and `qvalue`;

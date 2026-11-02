@@ -246,7 +246,7 @@ declared scale metadata/configuration and does not infer units from magnitudes.
 | Key | Description |
 |------|------------|
 | `imputation.method` | `lc_conmed`, `mean`, `median`, `knn`, `nsknn`, `tnknn`, `mindet`, `minprob`, `iterative_hgb`, or `null` (no imputation; also the omission default). The string `"none"` is invalid. |
-| `imputation.lc_conmed_mode` | `standard` (default) or `mnar_only`. The latter fills only entirely missing conditions for features observed in another condition; partial missingness and entirely missing features remain NaN. |
+| `imputation.lc_conmed_mode` | `mnar_only` (default) or `standard`. The default fills only entirely missing conditions for features observed in another condition; partial missingness and entirely missing features remain NaN. |
 | `imputation.lc_conmed_lod_k` | Number of lowest global datapoints to estimate LOD. Default: 10. |
 | `imputation.lc_conmed_in_min_obs` | Minimum observed values per feature/condition to use conditional-median (MAR) imputation; fewer observations use left-censoring (MNAR). Default : 1. |
 | `imputation.lc_conmed_frac_min_obs` | Minimum observed fraction for conditional-median imputation, rounded up as `ceil(fraction * condition_size)`. Set `lc_conmed_in_min_obs: null`; otherwise the integer threshold takes precedence. Must be in `(0, 1]`. Default : null. |
@@ -280,19 +280,25 @@ in the block. Every quantitative sample must retain at least one finite observed
 value after filtering; entirely empty main or aligned background samples are rejected
 before imputation. No method may drop a sample or manufacture its evidence. Main and protein-background blocks are processed
 separately; background is imputed once per parent protein before broadcast.
+The same `preprocessing.imputation` settings, including `lc_conmed_mode`, apply
+to both the main input and injected phospho flow-through; there is no separate
+covariate missingness policy. Invalid LC-ConMed modes fail before input-file I/O.
 
-Set `preprocessing.imputation.lc_conmed_mode: mnar_only` to leave partial
+The default `preprocessing.imputation.lc_conmed_mode: mnar_only` leaves partial
 feature/condition missingness for limma/InMoose. Only conditions with zero
 observations are filled, and only if that feature is observed in another
 condition. The support thresholds do not change this eligibility rule. The
 existing LoD calculation, shift, jitter and seed are retained; only eligible
 cells consume random draws. Raw and normalized layers retain their original
 missingness; actual fills are `isnan(normalized) & isfinite(X)`.
+Set `lc_conmed_mode: standard` explicitly to retain the previous imputation policy.
 
 Incomplete analysis matrices require an InMoose version that supports the
-resulting missing-data designs. Phospho background adjustment still assumes
-complete rows in its residualization/diagnostics and condition-mean decomposition;
-retained NaNs can propagate there. Default QC separately fills a scratch copy of
+resulting missing-data designs. Phospho stage-1 diagnostics use finite paired
+phospho/background values, paired centering and per-feature residual degrees of
+freedom. Missing pairs remain NaN in residuals; `cov_part` uses available values
+in each condition. Complete-data calculations retain their existing behavior.
+Default QC separately fills a scratch copy of
 the normalized layer; direct `run_clustering(layer=None)` assumes complete `X`.
 
 The same seed reproduces the same ordered input, but reordering features or
@@ -318,6 +324,7 @@ expose limitations in the installed InMoose version.
 | `separate_contrasts` | Boolean, default `false`. `true` restricts the differential fit and variance estimation to each contrast’s two conditions. Global preprocessing and stage-1 phospho slope estimation remain global. |
 | `batch_effect_columns` | Optional categorical factors, e.g. `["batch", "sex"]`; even numeric entries are treated as categories, not continuous regressors. Supply complete sample annotations. Confounded/rank-deficient designs and insufficient residual degrees of freedom are rejected. |
 | `clustering_max` | Max number features for clustering. Default: 8000. |
+| `protein_coverage.fasta` | Optional local protein FASTA path or nonempty list of paths (e.g. `["human.fasta", "mouse.fasta"]`) for standard proteomics peptide drill-down. Omit/null to disable. Identical accession/sequence duplicates are accepted; conflicting sequences fail validation. Independent of `kinase_activity.fasta`; no network lookup. |
 | `pelsa.concentration_column` | Concentration column in the annotation file. Required for Pelsa |
 | `pelsa.control_concentration` | Control concentration, default `0.0`. At least one matching sample is required. |
 | `pelsa.min_control_points` | Minimum observed controls per peptide, runtime `1`, PELSA template `2`. |
