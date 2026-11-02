@@ -1,6 +1,10 @@
 # Reading ProteoFlux results
 
 The required H5AD output contains an AnnData object. XLSX and PDF are optional.
+
+Open the `.h5ad` file in [ProteoViewer](https://github.com/Afanc/proteoviewer)
+to explore the results interactively, or load it in Python as shown below.
+
 Keep the input files, YAML and dependency environment separately: the H5AD
 metadata are useful provenance but are not a complete input/configuration archive.
 
