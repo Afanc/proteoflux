@@ -18,6 +18,26 @@ from tests.fixtures.workflows import base_config, protein_rows
 pytestmark = pytest.mark.contract
 
 
+def test_packaged_lc_conmed_templates_expose_the_mode():
+    for path in resources.files("proteoflux.templates").iterdir():
+        if path.name.endswith(".yaml"):
+            config = yaml.safe_load(path.read_text())
+            imputation = config["preprocessing"]["imputation"]
+            if imputation.get("method") == "lc_conmed":
+                assert imputation["lc_conmed_mode"] == "mnar_only", path.name
+                assert Preprocessor(config["preprocessing"]).imputation["lc_conmed_mode"] == "mnar_only"
+                imputation["lc_conmed_mode"] = "standard"
+                assert Preprocessor(config["preprocessing"]).imputation["lc_conmed_mode"] == "standard"
+
+
+@pytest.mark.parametrize("mode", [None, "mnar", "STANDARD", True])
+def test_invalid_lc_conmed_mode_fails_before_input_io(tmp_path, mode):
+    config = base_config(tmp_path)
+    config["preprocessing"]["imputation"]["lc_conmed_mode"] = mode
+    with pytest.raises(ValueError, match="lc_conmed_mode"):
+        Dataset(**config)
+
+
 @pytest.mark.parametrize("suffix", [".csv", ".tsv", ".parquet", ".pq"])
 @pytest.mark.parametrize("explicit_polars", [False, True], ids=["default", "explicit-polars"])
 def test_supported_file_containers_preserve_labels_values_and_missingness(tmp_path, suffix, explicit_polars):

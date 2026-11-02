@@ -54,7 +54,7 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
             LoD fallback = (global LoD - lod_shift) + Normal(0, lod_sd_width)
             clipped to <= global LoD
 
-    In mnar_only mode, only entirely missing feature/condition blocks with
+    In the default mnar_only mode, only entirely missing feature/condition blocks with
     observations in another condition use the LoD fallback. Partial missingness
     and entirely missing features remain NaN.
     """
@@ -73,7 +73,7 @@ class LC_ConMedImputer(BaseEstimator, TransformerMixin):
         in_min_obs=1,
         frac_min_obs=None,
         random_state=42,
-        mode="standard",
+        mode="mnar_only",
     ):
         self.condition_map = condition_map
         self.sample_index = sample_index

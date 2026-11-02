@@ -59,6 +59,29 @@ def test_slope_probabilities_agree_with_independent_linear_regression(covariate_
     assert not np.allclose(out.varm["covariate_p"][:, 0], out.varm["ft_p_ebayes"][:, 0])
 
 
+def test_partial_nans_preserve_paired_residuals_and_slope_diagnostics(covariate_experiment):
+    obj, config = covariate_experiment
+    config["ancova"] = {"ridge_lambda": 0}
+    obj.X[0, 0] = np.nan
+    obj.layers["centered_covariate"][1, 0] = np.nan
+    obj.layers["raw_covariate"][1, 0] = np.nan
+    cov = obj.layers["centered_covariate"]
+    centered = cov - np.nanmean(cov, axis=0)
+    paired = np.isfinite(obj.X[:, 0]) & np.isfinite(centered[:, 0])
+    fit = linregress(centered[paired, 0], obj.X[paired, 0])
+    out = run_limma_pipeline(obj, config)
+    expected = obj.X[:, 0] - fit.intercept - centered[:, 0]
+    assert_allclose(out.layers["residuals_covariate"][:, 0], expected, atol=1e-12)
+    assert_allclose(out.varm["covariate_se"][0, 0], fit.stderr, rtol=1e-10)
+    assert_allclose(out.varm["covariate_p"][0, 0], fit.pvalue, rtol=1e-10)
+    for j, contrast in enumerate(out.uns["contrast_names"]):
+        a, b = contrast.split("_vs_")
+        expected_part = (np.nanmean(centered[obj.obs.CONDITION == a, 0])
+                         - np.nanmean(centered[obj.obs.CONDITION == b, 0]))
+        assert_allclose(out.varm["cov_part"][0, j], expected_part, atol=1e-12)
+    assert np.isfinite(out.varm["log2fc"][0]).all()
+
+
 @pytest.mark.parametrize("separate", [False, True])
 def test_slope_diagnostic_uses_all_samples_regardless_of_contrast_scope(covariate_experiment, separate):
     obj, config = covariate_experiment

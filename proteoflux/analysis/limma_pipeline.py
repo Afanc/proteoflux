@@ -943,11 +943,21 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, fit_plan: dict
           beta1 (G,), beta0 (G,), residuals R (G×N), se_beta1 (G,), t_beta1 (G,), p_beta1 (G,), q_beta1 (G,)
         """
         G, N = Y.shape
-        df1 = max(N - 2, 1)
+        paired = np.isfinite(Y) & np.isfinite(C)
+        n = paired.sum(axis=1)
+        Y = np.where(paired, Y, np.nan)
+        C = np.where(paired, C, np.nan)
+        # Missing pairs can break the global centering of C. Recenter only
+        # incomplete rows; preserve the complete-data calculation exactly.
+        c_offset = np.zeros(G)
+        incomplete = (n > 0) & (n < N)
+        c_offset[incomplete] = np.nansum(C[incomplete], axis=1) / n[incomplete]
+        C = C - c_offset[:, None]
+        df1 = np.maximum(n - 2, 1)
 
-        sY  = Y.sum(axis=1)        # (G,)
-        sYC = (Y * C).sum(axis=1)  # (G,)
-        sCC = (C * C).sum(axis=1)  # (G,)
+        sY  = np.nansum(Y, axis=1)        # (G,)
+        sYC = np.nansum(Y * C, axis=1)    # (G,)
+        sCC = np.nansum(C * C, axis=1)    # (G,)
 
         # tiny ridge based on global scale of sCC to avoid exploding slopes when C is ~flat
         # baseline = median(sCC[sCC>0]) (fallback 1.0)
@@ -959,14 +969,14 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, fit_plan: dict
 
         with np.errstate(divide="ignore", invalid="ignore"):
             beta1 = np.where(sCC_tilde > 0, sYC / sCC_tilde, 1.0)  # slope wrt covariate
-        beta0 = sY / N                                  # intercept
+        beta0 = np.divide(sY, n, out=np.full(G, np.nan), where=n > 0)
 
         # Smart floor for near-flat covariates (treat as no covariate effect)
         # threshold scales with typical covariate energy, but never below 1e-3
         tau = max(1e-2, ridge_baseline * 1e-6)
         # also require a minimum per-row SD to consider the covariate "non-flat"
         # (handles fully-imputed jitter where sCC is small but not tiny)
-        sdC = np.sqrt(sCC / max(N - 1, 1))
+        sdC = np.sqrt(sCC / np.maximum(n - 1, 1))
         eps_sd = 0.10  # log2 scale; ~2x jitter (0.05)
         flat = (sCC < tau) | (sdC < eps_sd)
         if np.any(flat):
@@ -975,7 +985,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, fit_plan: dict
         Yhat = beta0[:, None] + beta1[:, None] * C
         R    = Y - Yhat
 
-        rss = np.sum(R * R, axis=1)
+        rss = np.nansum(R * R, axis=1)
         s2  = rss / df1
         with np.errstate(divide="ignore", invalid="ignore"):
             se1 = np.sqrt(s2 / np.maximum(sCC_tilde, 1e-15))
@@ -983,11 +993,12 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, fit_plan: dict
         # t-statistics and FDR for covariate slope
         t1 = np.where(se1 > 0, beta1 / se1, 0.0)
         p1 = two_sided_t_pvalue(t1, df=df1)
-        if np.any(flat):
-            # A flat background does not estimate an association slope.
-            se1[flat] = t1[flat] = p1[flat] = np.nan
+        unestimable = flat | (n < 3)
+        # A flat background or fewer than three pairs cannot estimate a diagnostic.
+        se1[unestimable] = t1[unestimable] = p1[unestimable] = np.nan
         q1 = bh_qvalues(p1[:, None])[:, 0]
 
+        beta0 = beta0 - beta1 * c_offset
         return beta1, beta0, R, se1, t1, p1, q1
 
     def _covariate_part_per_contrast(beta1: np.ndarray, C_centered_df: pd.DataFrame,
@@ -998,7 +1009,7 @@ def run_limma_pipeline_covariate(adata: ad.AnnData, config: dict, fit_plan: dict
         """
         cond = obs["CONDITION"].astype(str).values
         grp_masks = {g: (cond == g) for g in levels}
-        C_means = np.stack([C_centered_df.to_numpy(dtype=float)[:, grp_masks[g]].mean(axis=1) for g in levels], axis=1)
+        C_means = np.stack([np.nanmean(C_centered_df.to_numpy(dtype=float)[:, grp_masks[g]], axis=1) for g in levels], axis=1)
         level_to_idx = {g: i for i, g in enumerate(levels)}
 
         cov_part = np.zeros((beta1.shape[0], len(contrast_names)), dtype=float)

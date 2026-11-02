@@ -31,7 +31,8 @@ def base_config(directory, analysis_type="proteomics"):
                           "directlfq_cores": 1, "robust_regression_cores": 1,
                           "filtering": {"qvalue": .01, "pep": .05, "min_linear_intensity": 2},
                           "normalization": {"method": ["log2", "median_equalization"]},
-                          "imputation": {"method": "lc_conmed", "random_state": 42}},
+                          # Preserve the policy used by the numerical references.
+                          "imputation": {"method": "lc_conmed", "lc_conmed_mode": "standard", "random_state": 42}},
         "analysis": {"sign_threshold": .05, "clustering_max": 12},
         "exports": {"path_h5ad": str(directory / "result.h5ad"),
                     "path_table": str(directory / "result.xlsx"), "path_pdf_report": None},
@@ -187,6 +188,7 @@ def searle_workflow(directory):
     config["dataset"]["annotation_file"] = str(root/"annotation_searle.tsv")
     config["preprocessing"]["directlfq_cores"] = 1
     config["preprocessing"]["imputation"]["random_state"] = 42
+    config["preprocessing"]["imputation"]["lc_conmed_mode"] = "standard"
     config["analysis"]["clustering_max"] = 18
     config["exports"] = base_config(directory)["exports"]
     return config

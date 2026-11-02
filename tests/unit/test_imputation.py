@@ -19,7 +19,7 @@ def imputer(**options):
 def test_condition_labels_and_observed_mask_survive_imputation():
     x = np.array([[4., 10., np.nan, np.nan], [2., np.nan, 6., np.nan]])
     original = x.copy()
-    actual = imputer(lod_k=2, lod_sd_width=0).fit_transform(x)
+    actual = imputer(mode="standard", lod_k=2, lod_sd_width=0).fit_transform(x)
     assert_array_equal(x, original)
     assert_array_equal(actual[~np.isnan(x)], x[~np.isnan(x)])
     assert_allclose(actual[0], [4, 10, 4, 10])
@@ -30,16 +30,16 @@ def test_condition_labels_and_observed_mask_survive_imputation():
 
 def test_integer_threshold_precedes_fraction_and_fraction_uses_ceiling():
     x = np.array([[10., 3., np.nan, 4.], [1., 2., 3., 4.]])
-    integer = imputer(in_min_obs=1, frac_min_obs=1., lod_k=2).fit_transform(x)
-    fraction = imputer(in_min_obs=None, frac_min_obs=.75, lod_k=2).fit_transform(x)
+    integer = imputer(mode="standard", in_min_obs=1, frac_min_obs=1., lod_k=2).fit_transform(x)
+    fraction = imputer(mode="standard", in_min_obs=None, frac_min_obs=.75, lod_k=2).fit_transform(x)
     assert integer[0, 2] == 10
     assert fraction[0, 2] <= 1.5
 
 
 def test_seeded_draws_repeat_without_modifying_observed_values():
     x = np.array([[2., np.nan, 5., np.nan], [np.nan, 6., 7., 8.]])
-    a = imputer().fit_transform(x)
-    b = imputer().fit_transform(x)
+    a = imputer(mode="standard").fit_transform(x)
+    b = imputer(mode="standard").fit_transform(x)
     assert_array_equal(a, b)
     assert_allclose(a[~np.isnan(x)], x[~np.isnan(x)])
     assert a[1, 0] == 7  # The only observed A value clamps the draw to itself.
@@ -48,14 +48,14 @@ def test_seeded_draws_repeat_without_modifying_observed_values():
 def test_lc_conmed_log_offset_equivariance_with_mar_and_mnar_draws():
     x = np.array([[2., np.nan, 5., np.nan], [np.nan, 6., 7., 8.],
                   [np.nan, 4., np.nan, 6.]])
-    baseline = imputer().fit_transform(x)
-    shifted = imputer().fit_transform(x + 3.)
+    baseline = imputer(mode="standard").fit_transform(x)
+    shifted = imputer(mode="standard").fit_transform(x + 3.)
     assert_allclose(shifted, baseline + 3., rtol=0, atol=1e-12)
     assert_array_equal(baseline[np.isfinite(x)], x[np.isfinite(x)])
 
 
 def test_all_missing_lod_and_pooled_sample_variance():
-    out = imputer(lod_sd_width=0).fit_transform(np.full((2, 4), np.nan))
+    out = imputer(mode="standard", lod_sd_width=0).fit_transform(np.full((2, 4), np.nan))
     assert_allclose(out, -.2, atol=1e-7)
     # Within-group sums of squares: 8 and 18, total df=2.
     assert _pooled_sd([np.array([1., 5.]), np.array([2., 8.])]) == pytest.approx(np.sqrt(13))
@@ -93,6 +93,17 @@ def test_mnar_only_leaves_an_entirely_missing_matrix_unchanged():
     assert_array_equal(imputer(mode="mnar_only").fit_transform(x), x)
 
 
+def test_constructor_and_factory_default_to_mnar_only(three_replicate_conditions):
+    x = np.array([[2., np.nan, 6., 8., np.nan, 14.],
+                  [np.nan]*3 + [3., 4., 5.], [np.nan]*6])
+    expected = LC_ConMedImputer(**three_replicate_conditions, mode="mnar_only", lod_k=2).fit_transform(x)
+    constructor = LC_ConMedImputer(**three_replicate_conditions, lod_k=2).fit_transform(x)
+    factory = get_imputer(method="lc_conmed", lc_conmed_lod_k=2,
+                          **three_replicate_conditions).fit_transform(x)
+    assert_array_equal(constructor, expected)
+    assert_array_equal(factory, expected)
+
+
 def test_standard_mode_preserves_original_seeded_values(three_replicate_conditions):
     x = np.array([[2., np.nan, 6., 8., np.nan, 14.],
                   [np.nan]*3 + [3., 4., 5.], [np.nan]*6])
@@ -103,11 +114,11 @@ def test_standard_mode_preserves_original_seeded_values(three_replicate_conditio
         [2.234891024656884, 2.306392020158364, 2.2841878703828207,
          2.2991599421247852, 2.257347803621321, 2.343969898743141],
     ])
-    default = LC_ConMedImputer(**three_replicate_conditions, lod_k=2).fit_transform(x)
+    standard = LC_ConMedImputer(**three_replicate_conditions, mode="standard", lod_k=2).fit_transform(x)
     explicit = get_imputer(method="lc_conmed", lc_conmed_mode="standard",
                            lc_conmed_lod_k=2, **three_replicate_conditions).fit_transform(x)
-    assert_allclose(default, expected, rtol=0, atol=1e-14)
-    assert_array_equal(explicit, default)
+    assert_allclose(standard, expected, rtol=0, atol=1e-14)
+    assert_array_equal(explicit, standard)
 
 
 @pytest.mark.parametrize("mode", [None, "mnar", "STANDARD", True])
@@ -116,7 +127,8 @@ def test_invalid_lc_conmed_modes_fail(mode):
         imputer(mode=mode).fit(np.ones((2, 4)))
 
 
-def test_mnar_only_provenance_survives_preprocessing_and_h5ad(protein_config, tmp_path):
+@pytest.mark.parametrize("explicit_mode", [False, True])
+def test_mnar_only_provenance_survives_preprocessing_and_h5ad(protein_config, tmp_path, explicit_mode):
     import anndata as ad
     from proteoflux.workflow.dataset import Dataset
 
@@ -127,6 +139,8 @@ def test_mnar_only_provenance_survives_preprocessing_and_h5ad(protein_config, tm
     options["method"] = None
     before = Dataset(**protein_config).get_anndata()
     options.update(method="lc_conmed", lc_conmed_mode="mnar_only")
+    if not explicit_mode:
+        options.pop("lc_conmed_mode")
     dataset = Dataset(**protein_config)
     out = dataset.get_anndata()
     expected_fill = np.zeros(out.shape, dtype=bool)
@@ -146,6 +160,44 @@ def test_mnar_only_provenance_survives_preprocessing_and_h5ad(protein_config, tm
     for layer in ("raw", "normalized", "qvalue"):
         assert_array_equal(restored.layers[layer], before.layers[layer])
     assert restored.uns["preprocessing"]["imputation"]["lc_conmed_mode"] == "mnar_only"
+
+
+@pytest.mark.parametrize("reuse", [False, True])
+@pytest.mark.parametrize("explicit_mode", [False, True])
+def test_mnar_only_reaches_injected_phospho_background_and_adjustment(tmp_path, reuse, explicit_mode):
+    from proteoflux.analysis.limma_pipeline import run_limma_pipeline
+    from proteoflux.workflow.dataset import Dataset
+    from tests.fixtures.workflows import phospho_workflow
+
+    config = phospho_workflow(tmp_path, reuse=reuse, kinase=False)
+    path = config["dataset"]["input_file"]
+    rows = pd.read_csv(path, sep="\t", dtype={"sites": str, "positions": str, "probabilities": str})
+    rows.loc[(rows.protein == "P000") & (rows.condition == "A")
+             & (rows.replicate == 3) & rows.sites.notna(), "intensity"] = np.nan
+    rows.to_csv(path, sep="\t", index=False)
+    config["preprocessing"]["imputation"]["lc_conmed_mode"] = "mnar_only"
+    if not explicit_mode:
+        config["preprocessing"]["imputation"].pop("lc_conmed_mode")
+    obj = Dataset(**config).get_anndata()
+    for before, after in [(obj.layers["normalized"], obj.X),
+                          (obj.layers["normalized_covariate"], obj.layers["processed_covariate"])]:
+        expected_fill = np.zeros(obj.shape, dtype=bool)
+        for condition in obj.obs.CONDITION.unique():
+            selected = (obj.obs.CONDITION == condition).to_numpy()
+            absent = np.isnan(before[selected]).all(axis=0) & np.isfinite(before).any(axis=0)
+            expected_fill[selected] = absent
+        assert expected_fill.any()
+        assert_array_equal(np.isnan(before) & np.isfinite(after), expected_fill)
+        assert_array_equal(after[~expected_fill], before[~expected_fill])
+    s, t = [obj.var_names.get_loc(name) for name in ("P000|S6", "P000|T6")]
+    assert_array_equal(obj.layers["processed_covariate"][:, s], obj.layers["processed_covariate"][:, t])
+    assert np.isnan(obj.layers["processed_covariate"][obj.obs_names.get_loc("A_2"), s])
+    assert np.isnan(obj.X[obj.obs_names.get_loc("A_3"), s])
+    result = run_limma_pipeline(obj, config)
+    paired = np.isfinite(obj.X) & np.isfinite(obj.layers["processed_covariate"])
+    assert_array_equal(np.isfinite(result.layers["residuals_covariate"]), paired)
+    assert np.isfinite(result.varm["log2fc"][[s, t]]).all()
+    assert np.isfinite(result.varm["cov_part"][[s, t]]).all()
 
 
 @pytest.mark.parametrize("options", [{"in_min_obs": 0}, {"in_min_obs": True},

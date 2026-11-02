@@ -40,7 +40,7 @@ def get_imputer(**kwargs) -> Any:
         return LC_ConMedImputer(
             condition_map=kwargs.get("condition_map"),
             sample_index=kwargs.get("sample_index"),
-            mode=kwargs.get("lc_conmed_mode", "standard"),
+            mode=kwargs.get("lc_conmed_mode", "mnar_only"),
             group_column=kwargs.get("group_column", "CONDITION"),
             lod_k=kwargs.get("lc_conmed_lod_k", 10),
             jitter_frac=kwargs.get("lc_conmed_jitter_frac", 0.20),

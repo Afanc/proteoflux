@@ -20,6 +20,7 @@ import pyarrow.parquet as pv_parquet
 import csv
 
 from proteoflux.workflow.preprocessing import Preprocessor
+from proteoflux.workflow.protein_coverage import load_protein_coverage_fasta, protein_coverage_metadata
 from proteoflux.utils.harmonizer import DataHarmonizer
 from proteoflux.utils.utils import polars_matrix_to_numpy, log_time, logger, log_info
 from proteoflux.utils.analysis_type import normalize_analysis_type
@@ -102,6 +103,7 @@ class Dataset:
         preprocessing_cfg["covariates"] = cov_block
 
         analysis_cfg = deepcopy(kwargs.get("analysis", {}) or {})
+        self._protein_coverage_fasta = load_protein_coverage_fasta(analysis_cfg, self.analysis_type)
         batch_effect_columns = analysis_cfg.get("batch_effect_columns") or []
 
         self.preprocessor = Preprocessor(
@@ -1076,6 +1078,10 @@ class Dataset:
                 "raw": np.asarray(pep_raw, dtype=np.float32),
                 "centered": np.asarray(pep_cent, dtype=np.float32),
             }
+            if self._protein_coverage_fasta is not None:
+                self.adata.uns["peptides"].update(protein_coverage_metadata(
+                    pep_protein_index, peptide_seq, self._protein_coverage_fasta,
+                ))
             return
 
         if self.is_peptidomics or self.is_phospho:

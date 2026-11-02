@@ -42,6 +42,7 @@ from proteoflux.utils.sequence_ops import (
     expr_peptide_index_seq,
     expr_strip_bracket_mods,
     expr_strip_underscores,
+    is_tryptic_cleavage,
 )
 from proteoflux.workflow.peptide_tables import (
     build_peptide_tables,
@@ -183,6 +184,9 @@ class Preprocessor:
         # Validate the public method/settings before loading or transforming values.
         get_imputer(**self.imputation)
         if str(self.imputation.get("method", "")).lower() == "lc_conmed":
+            self.imputation = {"lc_conmed_mode": "mnar_only", **self.imputation}
+            if self.imputation["lc_conmed_mode"] not in ("standard", "mnar_only"):
+                raise ValueError("lc_conmed_mode must be 'standard' or 'mnar_only'.")
             in_min_obs = self.imputation.get("lc_conmed_in_min_obs", 1)
             frac_min_obs = self.imputation.get("lc_conmed_frac_min_obs")
             if in_min_obs is not None and frac_min_obs is not None:
@@ -471,7 +475,7 @@ class Preprocessor:
                 pl.struct(["_cur", "_nxt"])
                 .map_elements(
                     lambda s: any(
-                        (c in ("K", "R")) and (n != "P")
+                        is_tryptic_cleavage(c, n)
                         for c, n in zip(s["_cur"], s["_nxt"])
                     ),
                     return_dtype=pl.Boolean,

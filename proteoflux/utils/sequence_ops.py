@@ -13,6 +13,10 @@ _RE_NTERM_TAG  = r"^n\[[^\]]*\](?=[A-Z])"
 _RE_CTERM_TAG  = r"c\[[^\]]*\]$"
 _RE_BRACKETS   = r"\[[^\]]+\]"
 
+def is_tryptic_cleavage(residue: str, following: str) -> bool:
+    """Existing missed-cleavage rule for an internal adjacent residue pair."""
+    return residue in ("K", "R") and following != "P"
+
 def strip_mods(s: str | None) -> str | None:
     """
     Exact copy of DataHarmonizer._strip_mods logic.

@@ -40,6 +40,7 @@ preprocessing:
       - "HUMAN"
   imputation:
     method: "lc_conmed"
+    lc_conmed_mode: "mnar_only"  # mnar_only | standard
     lc_conmed_lod_k: 10
     random_state: 42
 
