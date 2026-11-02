@@ -42,7 +42,7 @@ source commit was not available from the installed limma DESCRIPTION.
 
 Python comparisons use float64 `rtol=1e-7`, `atol=1e-12`, allowing independent
 LAPACK/special-function rounding, with exact NaN positions and labelled axes.
-Balanced, shared and batch cases pass with InMoose 0.9.0. Two strict expected
-failures remain: infinite-prior-df `KeyError(-2)` and a feature-specific singular
-fit (`LinAlgError`) where canonical R provides partially estimable results.
-Do not alter R expectations or add a ProteoFlux workaround to resolve these.
+All five cases pass with the InMoose fork pinned in `pyproject.toml`. Its fixes
+resolve the upstream 0.9.0 infinite-prior-df `KeyError(-2)` and feature-specific
+singular fit (`LinAlgError`), so these are ordinary regression tests. The R
+expectations and tolerances are unchanged; no ProteoFlux workaround is used.

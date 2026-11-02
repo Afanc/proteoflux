@@ -41,6 +41,7 @@ class DataHarmonizer:
         "fasta_column": "FASTA_HEADERS",
         "protein_weight_column": "PROTEIN_WEIGHT",
         "protein_descriptions_column": "PROTEIN_DESCRIPTIONS",
+        "other_proteins_column": "OTHER_PROTEINS",
         "gene_names_column": "GENE_NAMES",
         "precursors_exp_column": "PRECURSORS_EXP",
         "ibaq_column": "IBAQ",

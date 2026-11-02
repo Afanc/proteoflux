@@ -30,6 +30,7 @@ dataset:
   protein_weight_column: null
   fasta_column: "PG.FastaHeaders"
   protein_descriptions_column: "PG.ProteinDescriptions"
+  other_proteins_column: "PEP.AllOccurringProteinAccessions"
   gene_names_column: "PG.Genes"
   uniprot_column: "PG.ProteinGroups"
 

@@ -42,8 +42,8 @@ dependencies = [
     "openpyxl",
     "xlsxwriter",
     "InquirerPy",
-    #"inmoose",
-    "inmoose @ git+https://github.com/Afanc/inmoose.git@462389d",
+    # Temporary fork until these limma fixes are available in an upstream release.
+    "inmoose @ git+https://github.com/Afanc/inmoose.git@462389d827d0bd478eba0ec61170ba478628822e",
     "directlfq[dask]",
     "tqdm",
 ]

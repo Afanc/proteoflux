@@ -7,7 +7,7 @@ polars==1.36.1
 anndata==0.11.4
 scanpy==1.11.0
 numba==0.61.0
-inmoose==0.9.0
+# InMoose's required fork/commit is declared in pyproject.toml.
 directlfq==0.3.3
 torch==2.9.1
 scikit-learn==1.5.2

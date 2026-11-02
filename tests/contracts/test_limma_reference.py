@@ -13,11 +13,7 @@ ROOT = Path(__file__).parents[1] / 'reference' / 'limma'
 
 
 @pytest.mark.parametrize('case', [
-    'balanced', 'shared', 'batch',
-    pytest.param('equal_variance', marks=[pytest.mark.known_bug, pytest.mark.xfail(
-        raises=KeyError, reason='InMoose 0.9.0 infinite-prior-df KeyError -2; R limma 3.65.1 yields finite moderated statistics')]),
-    pytest.param('missing', marks=[pytest.mark.known_bug, pytest.mark.xfail(
-        raises=np.linalg.LinAlgError, reason='InMoose lmFit singular feature-specific design; R limma retains estimable contrasts with NA for the unsupported contrast')]),
+    'balanced', 'shared', 'batch', 'equal_variance', 'missing',
 ])
 def test_limma_adapter_against_canonical_r(case):
     folder = ROOT / case

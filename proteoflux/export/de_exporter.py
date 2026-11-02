@@ -82,6 +82,9 @@ class DEExporter:
                 copy=False,
             )
 
+        if "other_proteins" in pep:
+            meta["OTHER_PROTEINS"] = pd.Series(pep["other_proteins"], index=pep["rows"])
+
         raw_df = pd.DataFrame(pep["raw"], index=pep["rows"], columns=pep["cols"])
         centered_df = pd.DataFrame(pep["centered"], index=pep["rows"], columns=pep["cols"])
 
@@ -330,6 +333,7 @@ class DEExporter:
                 "GENE_NAMES",
                 "FASTA_HEADERS",
                 "PROTEIN_DESCRIPTIONS",
+                "OTHER_PROTEINS",
                 "PRECURSORS_EXP",
                 "PARENT_PROTEIN",
                 "PROTEIN_WEIGHT",
@@ -340,7 +344,7 @@ class DEExporter:
                 "MODIFIED_SEQ",
                 SITE_15MER_COLUMN,
             ]
-            if c in ad.var.columns
+            if c in ad.var.columns and (c != "OTHER_PROTEINS" or analysis_type != "proteomics")
         ]
 
         meta_df = ad.var[meta_cols].copy() if meta_cols else pd.DataFrame(index=ad.var.index)
@@ -640,6 +644,7 @@ class DEExporter:
                     "GENE_NAMES",
                     "FASTA_HEADERS",
                     "PROTEIN_DESCRIPTIONS",
+                    "OTHER_PROTEINS",
                 ]
                 if c in summary_df.columns
             ]

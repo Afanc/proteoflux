@@ -18,6 +18,7 @@ dataset:
   fasta_column: "PG.FastaHeaders"
   protein_weight_column: "PG.MolecularWeight"
   protein_descriptions_column: "PG.ProteinDescriptions"
+  other_proteins_column: "PEP.AllOccurringProteinAccessions"
   gene_names_column: "PG.Genes"
 
 preprocessing:

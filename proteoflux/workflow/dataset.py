@@ -24,6 +24,7 @@ from proteoflux.workflow.protein_coverage import load_protein_coverage_fasta, pr
 from proteoflux.utils.harmonizer import DataHarmonizer
 from proteoflux.utils.utils import polars_matrix_to_numpy, log_time, logger, log_info
 from proteoflux.utils.analysis_type import normalize_analysis_type
+from proteoflux.utils.sequence_ops import expr_peptide_index_seq
 
 pl.Config.set_tbl_rows(100)
 
@@ -279,6 +280,7 @@ class Dataset:
                 "ibaq_column",
                 "fasta_column",
                 "protein_descriptions_column",
+                "other_proteins_column",
                 "gene_names_column",
                 "protein_weight_column",
                 "peptide_seq_column",
@@ -546,6 +548,7 @@ class Dataset:
         # semicolon-delimited values, e.g. "227;232" for peptide positions.
         # Only use columns explicitly configured by the user; do not guess aliases.
         semicolon_safe_keys = {
+            "other_proteins_column",
             "ibaq_column",
             "peptide_start_column",
             "protein_weight_column",
@@ -841,6 +844,7 @@ class Dataset:
         # Drill-down trend tables
         sample_names = [c for c in processed_mat.columns if c != "INDEX"]
         self._attach_uns_drilldown_peptides(sample_names, pep_wide_mat, pep_cent_mat)
+        self._attach_other_proteins()
 
         # --- Precursor trend tables (for peptidomics; optional) ---
         prec_wide_mat = dfs_ir.get("precursors_wide")
@@ -1042,6 +1046,40 @@ class Dataset:
                 "assay": reused_assays[0],
                 "source": "main_input_nonphosphorylated",
             }
+
+    def _attach_other_proteins(self) -> None:
+        """Attach vendor peptide matches without changing quantitative identities."""
+        source = self.preprocessor.intermediate_results.dfs["filtered_final_censored"]
+        if "OTHER_PROTEINS" not in source.columns:
+            return
+        if "IS_COVARIATE" in source.columns:
+            source = source.filter(~pl.col("IS_COVARIATE").fill_null(False))
+        keys = ["INDEX"]
+        if self.is_proteomics:
+            source = source.with_columns(expr_peptide_index_seq(
+                "PEPTIDE_LSEQ",
+                collapse_met_oxidation=self.preprocessor.collapse_met_oxidation,
+                collapse_all_ptms=self.preprocessor.collapse_all_ptms,
+            ).alias("PEPTIDE_SEQ"))
+            keys.append("PEPTIDE_SEQ")
+        accessions = (
+            pl.col("OTHER_PROTEINS").cast(pl.Utf8).drop_nulls()
+            .str.split(";").flatten().str.strip_chars()
+        )
+        matches = (
+            source.group_by(keys, maintain_order=True)
+            .agg(accessions.filter(accessions != "").unique(maintain_order=True)
+                 .str.join(";").alias("OTHER_PROTEINS"))
+            .to_pandas().set_index(keys)["OTHER_PROTEINS"]
+        )
+        if self.is_proteomics:
+            peptides = self.adata.uns["peptides"]
+            index = pd.MultiIndex.from_arrays([peptides["protein_index"], peptides["peptide_seq"]])
+            peptides["other_proteins"] = matches.reindex(index).fillna("").tolist()
+        else:
+            columns = self.adata.var.columns.tolist()
+            position = columns.index("PROTEIN_DESCRIPTIONS") + 1 if "PROTEIN_DESCRIPTIONS" in columns else len(columns)
+            self.adata.var.insert(position, "OTHER_PROTEINS", matches.reindex(self.adata.var_names).fillna(""))
 
     def _attach_uns_drilldown_peptides(
         self,
