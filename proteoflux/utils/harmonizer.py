@@ -279,6 +279,10 @@ class DataHarmonizer:
                 raise ValueError("Cannot map precursor_pep_column: 'PRECURSOR_PEP' already exists in the dataset.")
             else:
                 precursor_pep = df[self.precursor_pep_column].alias("PRECURSOR_PEP")
+                # Release the source name unless another mapping still uses it
+                # (e.g. DIA-NN PEP must not block PG.PEP -> PEP).
+                if self.precursor_pep_column not in self.column_map:
+                    df = df.drop(self.precursor_pep_column)
 
         for original, target in self.column_map.items():
             if original in df.columns:

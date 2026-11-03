@@ -17,15 +17,27 @@ from proteoflux.workflow.dataset import Dataset
 pytestmark = pytest.mark.contract
 
 
-@pytest.mark.parametrize("filter_column", ["PG.PEP", "EG.PEP"])
-def test_precursor_pep_mapping_preserves_separate_and_shared_filter_sources(filter_column):
-    source = pl.DataFrame({"EG.PEP": [.1, None, .9], "PG.PEP": [.001, .002, .003]})
-    harmonizer = DataHarmonizer({"pep_column": filter_column, "precursor_pep_column": "EG.PEP"})
+@pytest.mark.parametrize("precursor_column, filter_column", [
+    ("EG.PEP", "PG.PEP"), ("EG.PEP", "EG.PEP"),
+    ("PEP", "PG.PEP"), ("PEP", "PEP"), ("PEP", None),
+])
+def test_precursor_pep_mapping_preserves_separate_and_shared_filter_sources(precursor_column, filter_column):
+    source = pl.DataFrame({precursor_column: [.1, None, .9], "PG.PEP": [.001, .002, .003]})
+    harmonizer = DataHarmonizer({"pep_column": filter_column, "precursor_pep_column": precursor_column})
     result = harmonizer._rename_columns_safely(source)
-    assert result["PRECURSOR_PEP"].to_list() == source["EG.PEP"].to_list()
-    assert result["PEP"].to_list() == source[filter_column].to_list()
+    assert result["PRECURSOR_PEP"].to_list() == source[precursor_column].to_list()
+    if filter_column:
+        assert result["PEP"].to_list() == source[filter_column].to_list()
+    else:
+        assert "PEP" not in result
     with pytest.raises(ValueError, match="PRECURSOR_PEP.*already exists"):
         harmonizer._rename_columns_safely(source.with_columns(pl.lit(.5).alias("PRECURSOR_PEP")))
+
+
+def test_unmapped_pep_collision_still_raises():
+    source = pl.DataFrame({"PG.PEP": [.002], "PEP": [.8]})
+    with pytest.raises(ValueError, match="Cannot rename 'PG.PEP'.*'PEP'.*already exists"):
+        DataHarmonizer({"pep_column": "PG.PEP"})._rename_columns_safely(source)
 
 
 def test_templates_map_vendor_precursor_metadata():

@@ -174,6 +174,8 @@ def searle_workflow(directory):
     """Reduce in temporary storage, using only data already distributed in examples."""
     root = ROOT / "examples/searle_small"
     config = yaml.safe_load((root/"config.yaml").read_text())
+    # Keep the existing scientific reference's metadata settings fixed.
+    config["dataset"]["precursor_pep_column"] = None
     columns = list(dict.fromkeys(v for k,v in config["dataset"].items()
                                 if k.endswith("_column") and isinstance(v, str)))
     frame = pd.read_csv(root/"searle_test.tsv", sep="\t", usecols=columns)
