@@ -20,6 +20,7 @@ dataset:
   signal_column: "FG.MS2RawQuantity"
   qvalue_column: "FG.Qvalue"
   pep_column: "EG.PEP"
+  precursor_pep_column: "EG.PEP"
 
   filename_column: "R.FileName"
   condition_column: "R.Condition"

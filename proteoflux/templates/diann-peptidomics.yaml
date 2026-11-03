@@ -16,12 +16,14 @@ dataset:
   qvalue_column: "PG.Q.Value"
   charge_column: "Precursor.Charge"
 
-  pep_column: "PEP"
+  pep_column: "PG.PEP"
+  precursor_pep_column: "PEP"
   precursors_exp_column: null
   ibaq_column: null
   fasta_column: "Protein.Names"
   protein_weight_column: null
   protein_descriptions_column: null
+  other_proteins_column: "Protein.Ids"
   gene_names_column: "Genes"
   peptide_seq_column: "Modified.Sequence"
 

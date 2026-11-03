@@ -30,6 +30,17 @@ def test_packaged_lc_conmed_templates_expose_the_mode():
                 assert Preprocessor(config["preprocessing"]).imputation["lc_conmed_mode"] == "standard"
 
 
+@pytest.mark.parametrize("name", ["searle_small/config.yaml", "phospho_small/config_phospho.yaml", "pelsa_small/config_pelsa.yaml"])
+def test_example_precursor_metadata_mappings_match_bundled_headers(name):
+    path = Path(__file__).resolve().parents[2] / "examples" / name
+    dataset = yaml.safe_load(path.read_text())["dataset"]
+    columns = pd.read_csv(path.parent / dataset["input_file"], sep="\t", nrows=0).columns
+    assert dataset["precursor_pep_column"] == ("EG.PEP" if "EG.PEP" in columns else None)
+    assert dataset["other_proteins_column"] == (
+        "PEP.AllOccurringProteinAccessions" if "PEP.AllOccurringProteinAccessions" in columns else None
+    )
+
+
 @pytest.mark.parametrize("mode", [None, "mnar", "STANDARD", True])
 def test_invalid_lc_conmed_mode_fails_before_input_io(tmp_path, mode):
     config = base_config(tmp_path)

@@ -8,6 +8,7 @@ dataset:
   signal_column: "FG.MS2RawQuantity"
   qvalue_column: "PG.Qvalue"
   pep_column: "PG.PEP"
+  precursor_pep_column: "EG.PEP"
   charge_column: "FG.Charge"
   condition_column: "R.Condition"
   replicate_column: "R.Replicate"
@@ -18,6 +19,7 @@ dataset:
   fasta_column: "PG.FastaHeaders"
   protein_weight_column: "PG.MolecularWeight"
   protein_descriptions_column: "PG.ProteinDescriptions"
+  other_proteins_column: null  # Not present in the bundled input.
   gene_names_column: "PG.Genes"
   peptide_seq_column: "FG.LabeledSequence"
   peptide_start_column: "PEP.PeptidePosition"

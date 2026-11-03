@@ -68,6 +68,7 @@ class DataHarmonizer:
 
         self.signal_key = column_config.get("signal_column")
         self.spectral_counts_key = column_config.get("spectral_counts_column")
+        self.precursor_pep_column = column_config.get("precursor_pep_column")
 
         self.convert_numeric_ptms = bool(column_config.get("convert_numeric_ptms", True))
         self.collapse_met_oxidation = bool(column_config.get("collapse_met_oxidation", True))
@@ -265,6 +266,19 @@ class DataHarmonizer:
         a different existing column (e.g., FILENAME after melt).
         """
         rename_map: Dict[str, str] = {}
+        precursor_pep = None
+
+        # Copy metadata before renaming: the same source may also supply PEP
+        # for the existing, independently configured identification filter.
+        if self.precursor_pep_column:
+            if self.precursor_pep_column not in df.columns:
+                log_warning(
+                    f"Column '{self.precursor_pep_column}' not found in input data, skipping harmonization for it."
+                )
+            elif "PRECURSOR_PEP" in df.columns and self.precursor_pep_column != "PRECURSOR_PEP":
+                raise ValueError("Cannot map precursor_pep_column: 'PRECURSOR_PEP' already exists in the dataset.")
+            else:
+                precursor_pep = df[self.precursor_pep_column].alias("PRECURSOR_PEP")
 
         for original, target in self.column_map.items():
             if original in df.columns:
@@ -295,7 +309,8 @@ class DataHarmonizer:
                     f"Column '{original}' not found in input data, skipping harmonization for it."
                 )
 
-        return df.rename(rename_map) if rename_map else df
+        df = df.rename(rename_map) if rename_map else df
+        return df.with_columns(precursor_pep) if precursor_pep is not None else df
 
     def _should_suppress_missing_warning_ptms(self, original_col: str) -> bool:
         if not self.is_covariate_run:

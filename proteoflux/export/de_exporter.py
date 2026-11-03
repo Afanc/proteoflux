@@ -84,6 +84,8 @@ class DEExporter:
 
         if "other_proteins" in pep:
             meta["OTHER_PROTEINS"] = pd.Series(pep["other_proteins"], index=pep["rows"])
+        if "best_precursor_pep" in pep:
+            meta["BEST_PRECURSOR_PEP"] = pd.Series(pep["best_precursor_pep"], index=pep["rows"])
 
         raw_df = pd.DataFrame(pep["raw"], index=pep["rows"], columns=pep["cols"])
         centered_df = pd.DataFrame(pep["centered"], index=pep["rows"], columns=pep["cols"])
@@ -286,6 +288,10 @@ class DEExporter:
                 ws = writer.book.add_worksheet(name)
 
                 if name == "Peptides (raw)":
+                    if "OTHER_PROTEINS" in df and "BEST_PRECURSOR_PEP" in df:
+                        df = df.copy()
+                        other_proteins = df.pop("OTHER_PROTEINS")
+                        df.insert(df.columns.get_loc("BEST_PRECURSOR_PEP") + 1, "OTHER_PROTEINS", other_proteins)
                     columns = list(df.columns)
                     ws.write_row(0, 0, columns, header_fmt)
 

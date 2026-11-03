@@ -20,7 +20,9 @@ import pyarrow.parquet as pv_parquet
 import csv
 
 from proteoflux.workflow.preprocessing import Preprocessor
-from proteoflux.workflow.protein_coverage import load_protein_coverage_fasta, protein_coverage_metadata
+from proteoflux.workflow.protein_coverage import (
+    load_protein_coverage_fasta, protein_coverage_metadata, protein_coverage_payload,
+)
 from proteoflux.utils.harmonizer import DataHarmonizer
 from proteoflux.utils.utils import polars_matrix_to_numpy, log_time, logger, log_info
 from proteoflux.utils.analysis_type import normalize_analysis_type
@@ -275,6 +277,7 @@ class Dataset:
                 "signal_column",
                 "qvalue_column",
                 "pep_column",
+                "precursor_pep_column",
                 "precursors_exp_column",
                 "spectral_counts_column",
                 "ibaq_column",
@@ -1116,10 +1119,33 @@ class Dataset:
                 "raw": np.asarray(pep_raw, dtype=np.float32),
                 "centered": np.asarray(pep_cent, dtype=np.float32),
             }
+            source = self.preprocessor.intermediate_results.dfs["filtered_final_censored"]
+            if "PRECURSOR_PEP" in source.columns:
+                if "IS_COVARIATE" in source.columns:
+                    source = source.filter(~pl.col("IS_COVARIATE").fill_null(False))
+                # Match the existing peptide identity, without involving PEP in
+                # quantitative rollup. Retain the strongest finite precursor PEP.
+                precursor_pep = pl.col("PRECURSOR_PEP").cast(pl.Float64)
+                best_precursor_pep = (
+                    source.with_columns(expr_peptide_index_seq(
+                        "PEPTIDE_LSEQ",
+                        collapse_met_oxidation=self.preprocessor.collapse_met_oxidation,
+                        collapse_all_ptms=self.preprocessor.collapse_all_ptms,
+                    ).alias("PEPTIDE_SEQ"))
+                    .group_by(["INDEX", "PEPTIDE_SEQ"], maintain_order=True)
+                    .agg(precursor_pep.filter(precursor_pep.is_finite()).min())
+                    .to_pandas().set_index(["INDEX", "PEPTIDE_SEQ"])["PRECURSOR_PEP"]
+                )
+                index = pd.MultiIndex.from_arrays([pep_protein_index, peptide_seq])
+                self.adata.uns["peptides"]["best_precursor_pep"] = best_precursor_pep.reindex(index).to_numpy(dtype=float)
             if self._protein_coverage_fasta is not None:
                 self.adata.uns["peptides"].update(protein_coverage_metadata(
                     pep_protein_index, peptide_seq, self._protein_coverage_fasta,
                 ))
+                self.adata.uns["protein_coverage"] = protein_coverage_payload(
+                    self.adata.uns["peptides"]["rows"], pep_protein_index, peptide_seq,
+                    self._protein_coverage_fasta,
+                )
             return
 
         if self.is_peptidomics or self.is_phospho:

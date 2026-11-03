@@ -1,4 +1,4 @@
-"""Optional, row-aligned FASTA coordinates for proteomics peptide drill-down."""
+"""Optional FASTA coverage metadata for proteomics peptide drill-down."""
 
 from pathlib import Path
 
@@ -84,3 +84,52 @@ def protein_coverage_metadata(
             result["peptide_start"][i] = start + 1
             result["peptide_end"][i] = start + len(sequence)
     return result
+
+
+def protein_coverage_payload(
+    peptide_ids: list[str],
+    protein_index: list[str],
+    peptide_seq: list[str],
+    fasta: dict[str, str],
+) -> dict:
+    """Build normalized coverage tables for every exact accession in each group.
+
+    Group IDs and peptide IDs retain their evidence-table identities. Reference
+    rows follow first-seen group order, then accession order within the group;
+    mapping rows follow peptide order, then accession order. Missing references
+    remain explicit rows. Coordinates are 1-based inclusive, order is zero-based.
+    """
+    references = {
+        "protein_index": [], "accession": [],
+        "protein_length_aa": [], "accession_order": [],
+    }
+    group_accessions = {}
+    for protein in dict.fromkeys(protein_index):
+        accessions = {}
+        for order, token in enumerate(protein.split(";")):
+            accession = token.strip()
+            if accession:
+                accessions.setdefault(accession, order)
+        group_accessions[protein] = list(accessions)
+        for accession, order in accessions.items():
+            reference = fasta.get(accession)
+            references["protein_index"].append(protein)
+            references["accession"].append(accession)
+            references["protein_length_aa"].append(np.nan if reference is None else len(reference))
+            references["accession_order"].append(order)
+    references["protein_length_aa"] = np.asarray(references["protein_length_aa"], dtype=np.float64)
+    references["accession_order"] = np.asarray(references["accession_order"], dtype=np.int64)
+
+    mappings = {"protein_index": [], "peptide_id": [], "accession": []}
+    sequences = []
+    for peptide_id, protein, sequence in zip(peptide_ids, protein_index, peptide_seq):
+        for accession in group_accessions[protein]:
+            mappings["protein_index"].append(protein)
+            mappings["peptide_id"].append(peptide_id)
+            mappings["accession"].append(accession)
+            sequences.append(sequence)
+    # Reuse the legacy exact-reference/unique-occurrence and cleavage rules.
+    coordinates = protein_coverage_metadata(mappings["accession"], sequences, fasta)
+    for field in ("peptide_start", "peptide_end", "peptide_mapping_status", "tryptic_missed_cleavages"):
+        mappings[field] = coordinates[field]
+    return {"version": 1, "references": references, "peptide_mappings": mappings}

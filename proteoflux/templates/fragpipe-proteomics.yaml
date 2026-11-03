@@ -14,6 +14,7 @@ dataset:
   signal_column: "Intensity"
   qvalue_column: null
   pep_column: null
+  precursor_pep_column: null
   index_column: null
 
   peptide_seq_column: "Modified Sequence"
@@ -21,6 +22,7 @@ dataset:
   uniprot_column: "Protein ID"
   gene_names_column: "Gene"
   protein_descriptions_column: "Protein Description"
+  other_proteins_column: null
   spectral_counts_column: "Spectral Count"
   precursors_exp_column: null
   ibaq_column: null

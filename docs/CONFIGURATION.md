@@ -77,6 +77,7 @@ Use the sanitized names in contrasts; original labels remain in `CONDITION_ORIG`
 | `charge_column` | Required precursor charge; used to distinguish precursor evidence. |
 | `qvalue_column` | q-value column, for filtering. Optional. |
 | `pep_column` | PEP column, for filtering. Optional. |
+| `precursor_pep_column` | Optional precursor/elution-group posterior error probability metadata; default `null`. Spectronaut: `EG.PEP`, preserved as `PRECURSOR_PEP`. Exported only with the existing proteomics peptide table: Excel `BEST_PRECURSOR_PEP` and row-aligned H5AD `uns['peptides']['best_precursor_pep']`. Never used for filtering, indexing, quantitative rollup or statistics. See the aggregation rule below. |
 | `precursors_exp_column` | Number of precursors (experiment-wide)/Run Evidence count, for filtering. Optional. |
 | `uniprot_column` | UniProt accession. Optional (if proteomics). Used to derive parent protein in phospho with flowthrough adjustment. |
 | `other_proteins_column` | Optional vendor list of all protein accessions matching a peptide; default `null`. Spectronaut: `PEP.AllOccurringProteinAccessions`, mapped to `OTHER_PROTEINS`. Informational only; never used for indexing, grouping, rollup or statistics. Exported in H5AD `var` and Summary for peptidomics, PELSA and phospho; for proteomics only in the Peptides (raw) worksheet and row-aligned `uns['peptides']['other_proteins']`. Contributing lists are combined into unique semicolon-separated accessions in first-seen input order, preserving isoform suffixes. |
@@ -88,6 +89,26 @@ Use the sanitized names in contrasts; original labels remain in `CONDITION_ORIG`
 | `spectral_counts_column` | Spectral counts. Optional. |
 | `gene_names_column` | Gene names. Optional. |
 | `protein_weight_column` | Protein weights. Optional. |
+
+For DIA-NN 2.2, use `qvalue_column: "PG.Q.Value"`, `pep_column: "PG.PEP"`
+for protein-group filtering, and `precursor_pep_column: "PEP"` for metadata.
+Spectronaut uses `precursor_pep_column: "EG.PEP"`. Leave metadata mappings null
+when the input lacks the field. If the precursor PEP mapping names the same source as
+`pep_column`, both metadata and the existing filtering PEP are preserved.
+An absent source column warns and omits the precursor PEP metadata.
+
+`other_proteins_column` maps DIA-NN `Protein.Ids` or Spectronaut
+`PEP.AllOccurringProteinAccessions`. `OTHER_PROTEINS` intentionally includes the
+primary/canonical protein supplied by the vendor; `Protein.Group` is not subtracted.
+
+Exported peptide rows combine precursors and runs using the existing protein
+and normalized peptide identity, including configured PTM collapsing. Identical
+finite precursor PEP values are preserved; differing values use their minimum
+(the strongest supporting precursor evidence) across retained main-input rows.
+Null, NaN and infinite values are ignored; groups without finite values export
+as missing. This is a summary of precursor evidence, not an estimated peptide PEP
+or a combined or recalibrated posterior probability.
+No peptide table is added to workflows that do not already export one.
 
 ---
 

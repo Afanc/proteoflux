@@ -99,9 +99,54 @@ AnnData slicing does not automatically subset these payloads. Evidence raw value
 are captured before analysis normalization. Their `centered` values are linear
 ratios to row means, unlike the subtractive centering used in QC layers.
 
-For proteomics, `analysis.protein_coverage.fasta` adds six parallel fields to
-`uns['peptides']`, all aligned to `rows`. Existing `protein_index`, `peptide_seq`,
-`cols`, `raw` and `centered` are unchanged; no additional evidence table is made.
+Optional `dataset.precursor_pep_column` adds the numeric vector
+`uns['peptides']['best_precursor_pep']`, aligned with `uns['peptides']['rows']`, for
+proteomics. Excel exports it as `BEST_PRECURSOR_PEP` in **Peptides (raw)**, immediately
+before sample intensities, after other peptide metadata. It does not appear in
+protein `var` or Summary, and no new table is created. The value is the minimum
+finite precursor/elution-group PEP across retained main-input rows sharing the
+existing peptide identity (including PTM collapsing); identical values remain
+unchanged and groups without finite values remain NaN/blank. This represents the
+strongest supporting precursor evidence, not an estimated peptide PEP.
+It does not affect filtering, indexing,
+rollup or statistics, and is separate from the existing `layers['pep']` and
+Identification PEP worksheet. If the mapping/source is absent, the field is omitted.
+
+For proteomics, `analysis.protein_coverage.fasta` adds
+`uns['protein_coverage']`, the authoritative coverage payload for all accessions
+in each protein group. It is a dictionary with `version: 1` and two table-like
+dictionaries of parallel one-dimensional arrays/lists:
+
+| Table | Field | Meaning/type |
+| --- | --- | --- |
+| `references` | `protein_index` | Original protein feature/group ID, unchanged; string. |
+| | `accession` | Individual accession, including unresolved accessions; string. |
+| | `protein_length_aa` | float64 length, NaN if absent from FASTA. |
+| | `accession_order` | int64 zero-based position in the original semicolon-separated group. |
+| `peptide_mappings` | `protein_index` | Original protein feature/group ID; string. |
+| | `peptide_id` | Exact ID from `uns['peptides']['rows']`; string. |
+| | `accession` | Individual accession; string. |
+| | `peptide_start`, `peptide_end` | float64, 1-based inclusive coordinates; NaN unless uniquely positioned. |
+| | `peptide_mapping_status` | `mapped`, `unmapped_reference`, `unmapped_peptide`, or `ambiguous_peptide`; string. |
+| | `tryptic_missed_cleavages` | int64 count of internal K/R residues not followed by P; independent of mapping success. |
+
+References have one row per group/accession combination, in first-seen peptide
+group order and then original accession order. Peptide mappings have one row per
+peptide/accession, in peptide evidence order and then accession order. Join the
+tables on `(protein_index, accession)` and join peptide evidence by `peptide_id`;
+the two tables have different row counts. As with other `uns` evidence, AnnData
+slicing does not subset these tables automatically. Accession tokens are trimmed,
+empty tokens ignored, and duplicates within a group retain their first position.
+Neither the group ID nor the quantitative feature index is rewritten.
+
+An absent accession retains its reference row with NaN length and its peptide
+mapping rows with `unmapped_reference` and NaN coordinates. Other group members
+are mapped independently, even when reference sequences are identical. A viewer
+can select the first available reference by `accession_order` and finite length,
+then choose any other resolved reference without mixing coordinate systems.
+
+For compatibility, the existing six parallel coverage fields in
+`uns['peptides']`, aligned to `rows`, retain their single-reference behavior:
 
 | Field | Meaning |
 | --- | --- |
@@ -111,19 +156,22 @@ For proteomics, `analysis.protein_coverage.fasta` adds six parallel fields to
 | `peptide_mapping_status` | `mapped`, `unmapped_reference`, `ambiguous_protein_group`, `unmapped_peptide`, or `ambiguous_peptide`. |
 | `tryptic_missed_cleavages` | int64 count of internal K/R residues not followed by P, using the existing tryptic rule. Independent of mapping success. |
 
-Mapping uses exact `protein_index` accession matches to local FASTA records
+Mapping uses exact accession matches to local FASTA records
 (plain identifiers or UniProt `sp|accession|...`/`tr|accession|...` headers).
 Explicit isoforms require their own FASTA entry; canonical fallback is forbidden.
-Semicolon-separated groups remain ambiguous even if only one member is in the
-FASTA or members share a sequence. Custom feature labels that are not FASTA
-identifiers remain unmapped. PTM annotations are stripped only for sequence
+Only the legacy `uns['peptides']` fields mark semicolon-separated groups as
+`ambiguous_protein_group`; consumers must use `uns['protein_coverage']` for group
+coverage. Custom feature labels that are not FASTA identifiers remain unmapped.
+PTM annotations are stripped only for sequence
 matching/counting; stored peptide identities are preserved. Multiple occurrences,
 including overlaps, yield `ambiguous_peptide` and missing coordinates. A resolved
 reference's accession and length remain available when the peptide is absent or
 repeated. The FASTA setting accepts a single path or a nonempty list of paths.
 Identical accession/sequence duplicates are accepted across files; conflicting
 sequences under one FASTA identifier fail validation regardless of file order.
-These six fields are absent when coverage FASTA is not configured.
+Both the normalized payload and the six legacy fields are absent when coverage
+FASTA is not configured. Existing peptide identities, quantities and normal
+peptide table exports are unchanged; coverage adds no `.var` columns.
 
 `uns['kinase_activity']` contains method metadata, results, substrate assignments
 and condition summaries. Read `method`, `tested`, `reason`, `pvalue` and `qvalue`;
