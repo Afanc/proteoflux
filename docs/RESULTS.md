@@ -157,7 +157,7 @@ For compatibility, the existing six parallel coverage fields in
 | `tryptic_missed_cleavages` | int64 count of internal K/R residues not followed by P, using the existing tryptic rule. Independent of mapping success. |
 
 Mapping uses exact accession matches to local FASTA records
-(plain identifiers or UniProt `sp|accession|...`/`tr|accession|...` headers).
+(plain identifiers or the middle field of `prefix|accession|name` headers).
 Explicit isoforms require their own FASTA entry; canonical fallback is forbidden.
 Only the legacy `uns['peptides']` fields mark semicolon-separated groups as
 `ambiguous_protein_group`; consumers must use `uns['protein_coverage']` for group

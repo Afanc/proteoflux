@@ -31,13 +31,18 @@ def load_protein_coverage_fasta(analysis: dict, analysis_type: str) -> dict[str,
         if not path.is_file():
             raise FileNotFoundError(f"Protein-coverage FASTA does not exist or is not a file: {path}")
         for identifier, sequence in _load_fasta(path).items():
-            previous = sequences.get(identifier)
-            if previous is not None and previous != sequence:
-                raise ValueError(
-                    f"Protein-coverage FASTA identifier {identifier!r} occurs with "
-                    f"conflicting sequences across files (including {path})."
-                )
-            sequences[identifier] = sequence
+            fields = identifier.split("|")
+            accessions = [identifier]
+            if len(fields) >= 3 and all(fields[:3]):
+                accessions.append(fields[1])
+            for accession in accessions:
+                previous = sequences.get(accession)
+                if previous is not None and previous != sequence:
+                    raise ValueError(
+                        f"Protein-coverage FASTA identifier {accession!r} occurs with "
+                        f"conflicting sequences across files (including {path})."
+                    )
+                sequences[accession] = sequence
     return sequences
 
 

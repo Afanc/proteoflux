@@ -30,6 +30,31 @@ def coverage_fasta(tmp_path):
     return load_protein_coverage_fasta({"protein_coverage": {"fasta": path}}, "proteomics")
 
 
+@pytest.mark.parametrize("prefix", ["ma", "custom"])
+def test_three_part_fasta_header_maps_accession_regardless_of_prefix(tmp_path, prefix):
+    path = tmp_path / "manual.fasta"
+    path.write_text(
+        f">{prefix}|G12345|VHHGFP_NANO MANUAL entry - VhH GFPtrap-Biotin-6HIS Nanobody GN=VhH\n"
+        "MDQVQLVESGGALVQPGGSLR\n"
+    )
+    fasta = load_protein_coverage_fasta({"protein_coverage": {"fasta": path}}, "proteomics")
+    assert fasta["G12345"] == fasta[f"{prefix.upper()}|G12345|VHHGFP_NANO"]
+    metadata = protein_coverage_metadata(["G12345"], ["MDQVQLVESGGALVQPGGSLR"], fasta)
+    assert metadata["peptide_mapping_status"] == ["mapped"]
+    assert_array_equal(metadata["peptide_start"], [1])
+    assert_array_equal(metadata["peptide_end"], [21])
+
+
+def test_three_part_fasta_headers_reject_conflicting_accession_aliases(tmp_path):
+    path = tmp_path / "manual.fasta"
+    path.write_text(
+        ">ma|G12345|FIRST\nACDEK\n"
+        ">custom|G12345|SECOND\nFGHIR\n"
+    )
+    with pytest.raises(ValueError, match="G12345.*conflicting sequences"):
+        load_protein_coverage_fasta({"protein_coverage": {"fasta": path}}, "proteomics")
+
+
 @pytest.mark.parametrize("accession, peptide, status, reference, length, start, end, missed", [
     ("P12345", "ACDKRPEPTIDER", "mapped", "P12345", 16, 2, 14, 1),
     ("P12345-2", "ACDKRPEPTIDER", "mapped", "P12345-2", 15, 3, 15, 1),
