@@ -6,6 +6,7 @@ AnnData object with layers and metadata for downstream analysis.
 """
 
 from typing import Optional, Tuple, Union, List
+from pathlib import Path
 import re
 import warnings
 from copy import deepcopy
@@ -107,6 +108,12 @@ class Dataset:
 
         analysis_cfg = deepcopy(kwargs.get("analysis", {}) or {})
         self._protein_coverage_fasta = load_protein_coverage_fasta(analysis_cfg, self.analysis_type)
+        self._protein_coverage_filenames = []
+        if self._protein_coverage_fasta is not None:
+            fasta_paths = analysis_cfg["protein_coverage"]["fasta"]
+            if not isinstance(fasta_paths, list):
+                fasta_paths = [fasta_paths]
+            self._protein_coverage_filenames = [Path(path).name for path in fasta_paths]
         batch_effect_columns = analysis_cfg.get("batch_effect_columns") or []
 
         self.preprocessor = Preprocessor(
@@ -1146,6 +1153,7 @@ class Dataset:
                     self.adata.uns["peptides"]["rows"], pep_protein_index, peptide_seq,
                     self._protein_coverage_fasta,
                 )
+                self.adata.uns["protein_coverage"]["fasta_filenames"] = self._protein_coverage_filenames
             return
 
         if self.is_peptidomics or self.is_phospho:

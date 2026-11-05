@@ -220,6 +220,8 @@ def test_optional_coverage_preserves_peptide_axes_intensities_and_h5ad(protein_c
             assert np.isnan(payload["peptide_start"][i])
 
     coverage = result.uns["protein_coverage"]
+    expected_filenames = ["coverage.fasta", "other-species.fasta"] if multiple_files else ["coverage.fasta"]
+    assert coverage["fasta_filenames"] == expected_filenames
     references = pd.DataFrame(coverage["references"])
     group_references = references[references.protein_index == "A;B;C"]
     assert_array_equal(group_references.accession, ["A", "B", "C"])
@@ -250,6 +252,7 @@ def test_optional_coverage_preserves_peptide_axes_intensities_and_h5ad(protein_c
     exporter = DEExporter(result, tmp_path / "coverage.xlsx", config=config)
     exporter.export_adata(str(output))
     restored = ad.read_h5ad(output)
+    assert_array_equal(restored.uns["protein_coverage"]["fasta_filenames"], expected_filenames)
     assert_array_equal(restored.obs_names, baseline.obs_names)
     assert_array_equal(restored.var_names, baseline.var_names)
     for key in payload:

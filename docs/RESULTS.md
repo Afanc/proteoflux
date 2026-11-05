@@ -117,6 +117,9 @@ For proteomics, `analysis.protein_coverage.fasta` adds
 in each protein group. It is a dictionary with `version: 1` and two table-like
 dictionaries of parallel one-dimensional arrays/lists:
 
+`fasta_filenames` lists the configured FASTA basenames in input order. Directory
+paths are omitted; repeated basenames remain repeated.
+
 | Table | Field | Meaning/type |
 | --- | --- | --- |
 | `references` | `protein_index` | Original protein feature/group ID, unchanged; string. |
