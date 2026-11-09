@@ -379,6 +379,27 @@ def _maybe_subset(adata: AnnData, feat_idx: Sequence[int]) -> AnnData:
     # Using copy() so downstream modifications don't touch the original.
     return adata[:, feat_idx].copy() if len(feat_idx) < adata.n_vars else adata
 
+
+def _mds_from_pca(pca_scores: np.ndarray, random_seed: int) -> tuple[Optional[np.ndarray], Dict[str, Any]]:
+    """Embed samples using correlation distance in PCA space."""
+    if pca_scores.shape[0] <= 3:
+        return None, {"skipped_reason": "n_obs<=3"}
+
+    Xp = np.asarray(pca_scores, dtype=np.float64)
+    C = np.corrcoef(Xp)
+    C = np.clip(C, -1.0, 1.0)
+    D = 1.0 - C
+    np.fill_diagonal(D, 0.0)
+    mds = MDS(
+        n_components=2,
+        dissimilarity="precomputed",
+        random_state=int(random_seed),
+        normalized_stress="auto",
+    )
+    coordinates = mds.fit_transform(D).astype(np.float32, copy=False)
+    return coordinates, {"stress": float(getattr(mds, "stress_", np.nan)), "metric": "correlation_pca"}
+
+
 def run_design_adjusted_pca(
     adata: AnnData,
     *,
@@ -444,6 +465,10 @@ def run_design_adjusted_pca(
         "Visualization-only PCA after removing fitted categorical design-factor "
         "effects. Condition effects are preserved."
     )
+    adjusted_mds, mds_meta = _mds_from_pca(E.obsm["X_pca"], random_seed)
+    if adjusted_mds is not None:
+        adata.obsm["X_mds_design_adjusted"] = adjusted_mds
+    adata.uns["mds_design_adjusted"] = mds_meta
     return adata
 
 
@@ -522,27 +547,9 @@ def run_clustering(
         E.uns["umap"] = {"skipped_reason": "n_obs<=3"}
 
     # MDS (default embedding)
-    if not small_n:
-        Xp = np.asarray(E.obsm["X_pca"][:, :n_comps], dtype=np.float64)
-
-        # Correlation distance between samples
-        # corr_ij = corr(Xp[i], Xp[j]); distance = 1 - corr_ij
-        C = np.corrcoef(Xp)  # shape (n_obs, n_obs)
-
-        # numerical safety
-        C = np.clip(C, -1.0, 1.0)
-        D = 1.0 - C
-        np.fill_diagonal(D, 0.0)
-        mds = MDS(
-            n_components=2,
-            dissimilarity="precomputed",
-            random_state=int(random_seed),
-            normalized_stress="auto",
-        )
-        E.obsm["X_mds"] = mds.fit_transform(D).astype(np.float32, copy=False)
-        E.uns["mds"] = {"stress": float(getattr(mds, "stress_", np.nan)), "metric": "correlation_pca"}
-    else:
-        E.uns["mds"] = {"skipped_reason": "n_obs<=3"}
+    default_mds, E.uns["mds"] = _mds_from_pca(E.obsm["X_pca"][:, :n_comps], random_seed)
+    if default_mds is not None:
+        E.obsm["X_mds"] = default_mds
 
     # Hierarchical clustering on samples (using PCA space)
     pca_matrix = E.obsm["X_pca"][:, :n_comps]  # shape: n_samples × n_pcs

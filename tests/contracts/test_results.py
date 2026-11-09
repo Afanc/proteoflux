@@ -10,7 +10,11 @@ from pandas.testing import assert_frame_equal
 from scipy.stats import false_discovery_control, t as student_t
 
 from proteoflux.export.de_exporter import DEExporter
-from proteoflux.analysis.clustering import run_clustering, run_clustering_missingness
+from proteoflux.analysis.clustering import (
+    run_clustering,
+    run_clustering_missingness,
+    run_design_adjusted_pca,
+)
 from tests.fixtures.workflows import WORKFLOWS
 from tests.scientific_reference import scientific_payload, assert_reference
 from tests.unit.test_statistics import expression
@@ -177,6 +181,74 @@ def test_qc_capping_preserves_analysis_values_and_full_missingness():
     assert out.obsm["X_pca"].shape[0] == 3
     assert "X_umap" not in out.obsm and "X_mds" not in out.obsm
     assert len(out.uns["intensity_feature_order"]) == 8
+
+
+def test_batch_adjusted_mds_export_and_h5ad_round_trip(tmp_path):
+    from scipy.spatial.distance import pdist, squareform
+    from sklearn.manifold import MDS
+    from proteoflux.analysis.limma_pipeline import clustering_pipeline, run_limma_pipeline
+
+    obj = expression(("A",)*3 + ("B",)*3)
+    obj.obs["batch"] = ["x", "y", "x"] * 2
+    batch_shift = 3.0 * (obj.obs["batch"] == "y").to_numpy()[:, None]
+    obj.X += batch_shift
+    obj.layers["normalized"] += batch_shift
+    obj.layers["raw"] = np.exp2(obj.X)
+    config = {"analysis": {"batch_effect_columns": ["batch"], "clustering_max": 12}}
+
+    result = run_limma_pipeline(obj, config)
+    before_qc = result.copy()
+    unadjusted = run_clustering(result.copy(), n_pcs=result.n_obs - 1,
+                                max_features=12, layer="normalized")
+    result = clustering_pipeline(result, config)
+
+    assert result.obsm["X_mds_design_adjusted"].shape == (result.n_obs, 2)
+    assert result.obsm["X_mds_design_adjusted"].dtype == np.float32
+    assert result.uns["mds_design_adjusted"]["metric"] == "correlation_pca"
+    assert not np.allclose(result.obsm["X_pca_design_adjusted"], result.obsm["X_pca"])
+    distances = squareform(pdist(result.obsm["X_pca_design_adjusted"], metric="correlation"))
+    expected_mds = MDS(n_components=2, dissimilarity="precomputed", random_state=0,
+                       normalized_stress="auto")
+    expected_coords = expected_mds.fit_transform(distances)
+    assert_allclose(result.obsm["X_mds_design_adjusted"], expected_coords, rtol=1e-5, atol=1e-5)
+    assert_allclose(result.uns["mds_design_adjusted"]["stress"], expected_mds.stress_, rtol=1e-5)
+    for key in ("X_pca", "X_mds"):
+        assert_array_equal(result.obsm[key], unadjusted.obsm[key])
+    assert_array_equal(result.uns["pca"]["variance_ratio"], unadjusted.uns["pca"]["variance_ratio"])
+    assert result.uns["mds"] == unadjusted.uns["mds"]
+    assert_array_equal(result.X, before_qc.X)
+    for key in before_qc.layers:
+        assert_array_equal(result.layers[key], before_qc.layers[key])
+    for key in before_qc.varm:
+        assert_array_equal(result.varm[key], before_qc.varm[key])
+
+    reordered = result[[5, 0, 3, 1, 4, 2], :].copy()
+    path = tmp_path / "adjusted-mds.h5ad"
+    DEExporter(reordered, output_path=None, config=config).export_adata(str(path))
+    restored = ad.read_h5ad(path)
+    assert_array_equal(restored.obs_names, reordered.obs_names)
+    for key in ("X_pca", "X_mds", "X_pca_design_adjusted", "X_mds_design_adjusted"):
+        assert_array_equal(restored.obsm[key], reordered.obsm[key])
+    assert restored.uns["mds_design_adjusted"] == result.uns["mds_design_adjusted"]
+    assert restored.uns["mds"] == result.uns["mds"]
+    assert_array_equal(restored.uns["pca_design_adjusted"]["variance_ratio"],
+                       result.uns["pca_design_adjusted"]["variance_ratio"])
+    assert_array_equal(restored.X, reordered.X)
+    for key in before_qc.varm:
+        assert_array_equal(restored.varm[key], reordered.varm[key])
+
+
+def test_design_adjusted_mds_uses_small_sample_guard():
+    obj = expression(("A", "A", "B"))
+    obj.obs["batch"] = ["x", "y", "x"]
+    out = run_design_adjusted_pca(
+        obj, design=np.array([[1, 0, 0], [1, 0, 1], [0, 1, 0]]),
+        design_columns=["A", "B", "batch__y"], nuisance_columns=["batch__y"],
+        n_pcs=2, max_features=8,
+    )
+    assert out.obsm["X_pca_design_adjusted"].shape == (3, 2)
+    assert "X_mds_design_adjusted" not in out.obsm
+    assert out.uns["mds_design_adjusted"] == {"skipped_reason": "n_obs<=3"}
 
 
 def test_pdf_viewer_selection_contract_distinguishes_observed_and_imputed():
