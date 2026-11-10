@@ -270,23 +270,16 @@ def test_packaged_phosx_requirement_and_adapter_agree():
 
 
 def test_installed_inmoose_matches_declared_dependency():
-    import json
     import tomllib
     from importlib.metadata import distribution
     from packaging.requirements import Requirement
     import inmoose
 
     project = tomllib.loads((Path(__file__).resolve().parents[2]/"pyproject.toml").read_text())
-    requirement = next(Requirement(s) for s in project["project"]["dependencies"] if Requirement(s).name == "inmoose")
-    installed = distribution("inmoose")
+    requirement = next(Requirement(s) for s in project["project"]["dependencies"] if Requirement(s).name == "inmoose-proteoflux")
+    installed = distribution("inmoose-proteoflux")
     assert Path(inmoose.__file__).resolve() == Path(installed.locate_file("inmoose/__init__.py")).resolve()
     assert requirement in [Requirement(s) for s in distribution("proteoflux").requires]
-    if requirement.url:
-        repository, commit = requirement.url.removeprefix("git+").rsplit("@", 1)
-        source = json.loads(installed.read_text("direct_url.json") or "{}")
-        assert source.get("url") == repository
-        assert source.get("vcs_info", {}).get("vcs") == "git"
-        assert source["vcs_info"]["commit_id"] == commit
-    else:
-        # Switching to a fixed upstream release only requires dependency edits.
-        assert installed.version in requirement.specifier
+    assert requirement.url is None
+    assert installed.version in requirement.specifier
+    assert installed.read_text("direct_url.json") is None

@@ -7,7 +7,7 @@ name = "proteoflux"
 version = "1.10.5"
 description = "Transparent and reproducible proteomics analysis pipeline"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = {file = "LICENSE"}
 authors = [
   {name = "Biozentrum Proteomics Core Facility", email = "dariush.mollet@unibas.ch"}
@@ -43,7 +43,7 @@ dependencies = [
     "xlsxwriter",
     "InquirerPy",
     # Temporary fork until these limma fixes are available in an upstream release.
-    "inmoose @ git+https://github.com/Afanc/inmoose.git@462389d827d0bd478eba0ec61170ba478628822e",
+    "inmoose-proteoflux==0.9.2",
     "directlfq[dask]",
     "tqdm",
 ]

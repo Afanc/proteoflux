@@ -73,6 +73,5 @@ exports:
     title: "Proteoflux Analysis Report"
     intro_text: |
       This report summarizes the proteomic analysis pipeline applied to your dataset.
-      We performed filtering to remove low-confidence identifications and contaminants, normalized intensities,
-      imputed missing values, and finally ran Differential Expression analysis using limma.
+      After filtering and normalization, peptide dose-response curves were fitted using a four-parameter logistic (4PL) model.
     footer_text: "Proteomics Core Facility - Biozentrum - University of Basel"

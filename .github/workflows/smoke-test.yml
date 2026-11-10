@@ -26,9 +26,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Existing release/smoke versions; the Python >=3.10 package floor
-        # does not imply scientific regression validation on Python 3.10.
-        python-version: ["3.11", "3.13"]
+        # The supported Python versions are validated by this matrix.
+        python-version: ["3.11", "3.12", "3.13"]
     env:
       OMP_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"

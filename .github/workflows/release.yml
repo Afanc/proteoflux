@@ -25,7 +25,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install build twine
-          python -m pip install -e .[dev] || python -m pip install -e .
+          python -m pip install -e '.[dev]'
 
       - name: Smoke test CLI
         run: |
@@ -42,10 +42,13 @@ jobs:
         with:
           name: python-package-distributions
           path: dist/
+          if-no-files-found: error
 
   github-release:
     name: Create GitHub Release
-    needs: build
+    needs:
+      - build
+      - publish-to-pypi
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -61,6 +64,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          fail_on_unmatched_files: true
 
   publish-to-testpypi:
     name: Publish to TestPyPI
