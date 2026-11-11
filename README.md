@@ -194,5 +194,7 @@ InMoose license and author attribution.
 
 If you use ProteoFlux in your work, please cite:
 
-ProteoFlux (latest version).  
-Zenodo. https://doi.org/10.5281/zenodo.18640998
+ProteoFlux. Zenodo. 
+https://doi.org/10.5281/zenodo.18640998
+
+Please specify the version used in your Methods section.
